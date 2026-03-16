@@ -1,0 +1,142 @@
+"""Robinson projection.
+
+Compromise pseudocylindrical projection for world maps. Used by Rand McNally
+and formerly by National Geographic. Table-based with interpolation.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import TYPE_CHECKING
+
+from vibeproj.projections import register
+from vibeproj.projections.base import Projection
+
+if TYPE_CHECKING:
+    from vibeproj.crs import ProjectionParams
+
+# Robinson lookup table at 5° intervals from 0° to 90°
+# (X_factor, Y_factor) — normalized to X=1 at equator, Y=1 at equator
+_TABLE_X = [
+    1.0000,
+    0.9986,
+    0.9954,
+    0.9900,
+    0.9822,
+    0.9730,
+    0.9600,
+    0.9427,
+    0.9216,
+    0.8962,
+    0.8679,
+    0.8350,
+    0.7986,
+    0.7597,
+    0.7186,
+    0.6732,
+    0.6213,
+    0.5722,
+    0.5322,
+]
+_TABLE_Y = [
+    0.0000,
+    0.0620,
+    0.1240,
+    0.1860,
+    0.2480,
+    0.3100,
+    0.3720,
+    0.4340,
+    0.4958,
+    0.5571,
+    0.6176,
+    0.6769,
+    0.7346,
+    0.7903,
+    0.8435,
+    0.8936,
+    0.9394,
+    0.9761,
+    1.0000,
+]
+_FXC = 0.8487  # scale factor for x
+_FYC = 1.3523  # scale factor for y
+_C1 = 11.459155902616464  # 1/5° in radians = 180/(5*pi) ... actually 5° intervals
+_RC1 = 0.08726646259971647  # 5° in radians
+
+
+class Robinson(Projection):
+    name = "robin"
+
+    def setup(self, params: ProjectionParams) -> dict:
+        return {
+            "a": params.ellipsoid.a,
+            "lam0": math.radians(params.lon_0),
+            "x0": params.x_0,
+            "y0": params.y_0,
+        }
+
+    def forward(self, lam, phi, params, computed, xp):
+        abs_phi = xp.abs(phi)
+        # Table index: phi_deg / 5 → index 0..18
+        phi_deg = abs_phi * (180.0 / math.pi)
+        idx = (
+            xp.clip(phi_deg / 5.0, 0, 17).astype(int)
+            if hasattr(phi_deg, "astype")
+            else int(min(phi_deg / 5.0, 17))
+        )
+        frac = phi_deg / 5.0 - idx
+
+        # Interpolate
+        if hasattr(idx, "__len__"):
+            # Array path
+            x_arr = xp.array(_TABLE_X, dtype=phi.dtype)
+            y_arr = xp.array(_TABLE_Y, dtype=phi.dtype)
+            idx_safe = xp.clip(idx, 0, 17)
+            idx_next = xp.clip(idx + 1, 0, 18)
+            X = x_arr[idx_safe] + frac * (x_arr[idx_next] - x_arr[idx_safe])
+            Y = y_arr[idx_safe] + frac * (y_arr[idx_next] - y_arr[idx_safe])
+        else:
+            i = int(idx)
+            X = _TABLE_X[i] + frac * (_TABLE_X[min(i + 1, 18)] - _TABLE_X[i])
+            Y = _TABLE_Y[i] + frac * (_TABLE_Y[min(i + 1, 18)] - _TABLE_Y[i])
+
+        x = _FXC * X * lam / math.pi
+        y = _FYC * Y * xp.sign(phi)
+        return x, y
+
+    def inverse(self, x, y, params, computed, xp):
+        abs_y = xp.abs(y) / _FYC
+
+        # Find table index by searching Y table
+        if hasattr(abs_y, "__len__"):
+            y_arr = xp.array(_TABLE_Y, dtype=y.dtype)
+            # Vectorized: binary search
+            idx = xp.searchsorted(y_arr, abs_y, side="right") - 1
+            idx = xp.clip(idx, 0, 17)
+            idx_next = xp.clip(idx + 1, 0, 18)
+            y0 = y_arr[idx]
+            y1 = y_arr[idx_next]
+            frac = (abs_y - y0) / xp.maximum(y1 - y0, 1e-30)
+            phi_deg = (idx + frac) * 5.0
+            x_arr = xp.array(_TABLE_X, dtype=x.dtype)
+            X = x_arr[idx] + frac * (x_arr[idx_next] - x_arr[idx])
+        else:
+            vy = float(abs_y)
+            idx = 0
+            for i in range(18):
+                if _TABLE_Y[i + 1] >= vy:
+                    idx = i
+                    break
+            else:
+                idx = 17
+            frac = (vy - _TABLE_Y[idx]) / max(_TABLE_Y[idx + 1] - _TABLE_Y[idx], 1e-30)
+            phi_deg = (idx + frac) * 5.0
+            X = _TABLE_X[idx] + frac * (_TABLE_X[min(idx + 1, 18)] - _TABLE_X[idx])
+
+        phi = phi_deg * (math.pi / 180.0) * xp.sign(y)
+        lam = x * math.pi / (_FXC * xp.maximum(X, 1e-30))
+        return lam, phi
+
+
+register("robin", Robinson())

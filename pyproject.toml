@@ -1,0 +1,58 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vibeproj"
+version = "0.1.0"
+description = "GPU-accelerated coordinate projection library"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+authors = [
+    { name = "vibeProj Contributors" },
+]
+keywords = ["coordinate", "projection", "gpu", "cuda", "gis", "geospatial", "cupy"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: GIS",
+]
+dependencies = [
+    "numpy>=2",
+    "pyproj>=3.7.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/vibeProj/vibeProj"
+Repository = "https://github.com/vibeProj/vibeProj"
+Documentation = "https://vibeproj.github.io/vibeProj/"
+Issues = "https://github.com/vibeProj/vibeProj/issues"
+
+[dependency-groups]
+dev = [
+    "furo>=2025.12.19",
+    "myst-parser>=5.0.0",
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "ruff>=0.11",
+    "sphinx>=9.1.0",
+]
+gpu = [
+    "cupy-cuda12x>=13",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vibeproj"]
+
+[tool.pytest.ini_options]
+addopts = ["-ra"]
+testpaths = ["tests"]
+xfail_strict = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

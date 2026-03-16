@@ -1,0 +1,45 @@
+"""Projection registry — maps projection names to implementation classes."""
+
+from __future__ import annotations
+
+from vibeproj.projections.base import Projection
+
+# Registry: projection_name -> Projection instance
+PROJECTION_REGISTRY: dict[str, Projection] = {}
+
+
+def register(name: str, projection: Projection):
+    """Register a projection implementation."""
+    PROJECTION_REGISTRY[name] = projection
+
+
+def get_projection(name: str) -> Projection:
+    """Look up a projection by name."""
+    if name not in PROJECTION_REGISTRY:
+        supported = sorted(PROJECTION_REGISTRY.keys())
+        raise ValueError(f"Unknown projection '{name}'. Supported: {supported}")
+    return PROJECTION_REGISTRY[name]
+
+
+# Import all projection modules to trigger registration
+from vibeproj.projections import (  # noqa: E402, F401
+    albers_equal_area,
+    azimuthal_equidistant,
+    cylindrical_equal_area,
+    equal_earth,
+    geostationary,
+    gnomonic,
+    lambert_azimuthal_equal_area,
+    lambert_conformal_conic,
+    mercator,
+    mollweide,
+    natural_earth,
+    oblique_stereographic,
+    orthographic,
+    plate_carree,
+    robinson,
+    sinusoidal,
+    stereographic,
+    transverse_mercator,
+    winkel_tripel,
+)
