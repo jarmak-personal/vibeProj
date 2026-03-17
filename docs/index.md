@@ -55,6 +55,14 @@ x, y = t.transform(49.0, 2.0)           # scalar
 x, y = t.transform(lat_array, lon_array) # NumPy or CuPy arrays
 ```
 
+```{raw} html
+<div class="cp-links" style="text-align: center; margin: 2rem 0;">
+  <a href="https://github.com/jarmak-personal/vibeProj" style="margin: 0 1rem;">GitHub</a> &middot;
+  <a href="https://pypi.org/project/vibeproj/" style="margin: 0 1rem;">PyPI</a> &middot;
+  <a href="https://github.com/jarmak-personal/vibeProj/issues" style="margin: 0 1rem;">Issues</a>
+</div>
+```
+
 ```{toctree}
 :hidden:
 :maxdepth: 2
