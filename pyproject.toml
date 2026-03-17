@@ -27,7 +27,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gpu = ["cupy-cuda12x>=13"]
+cu12 = [
+    "cupy-cuda12x>=13",
+    "cuda-cccl[cu12]",
+]
+cu13 = [
+    "cupy-cuda13x>=14",
+    "cuda-cccl[cu13]",
+]
 
 [project.urls]
 Homepage = "https://github.com/jarmak-personal/vibeProj"
@@ -44,8 +51,16 @@ dev = [
     "ruff>=0.11",
     "sphinx>=9.1.0",
 ]
-gpu = [
+gpu-dev = [
     "cupy-cuda12x>=13",
+]
+
+[tool.uv]
+conflicts = [
+  [
+    { extra = "cu12" },
+    { extra = "cu13" },
+  ],
 ]
 
 [tool.hatch.build.targets.wheel]
