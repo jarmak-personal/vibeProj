@@ -8,13 +8,6 @@ name: Publish to PyPI
 #   1. Bump version in pyproject.toml + src/vibeproj/__init__.py
 #   2. Create a GitHub Release with tag "v{version}" (e.g. v0.2.0)
 #   3. This workflow builds the wheel, attaches it to the release, and publishes to PyPI
-#
-# PyPI setup (one-time):
-#   1. Go to https://pypi.org/manage/project/vibeproj/settings/publishing/
-#   2. Add a "trusted publisher" for GitHub Actions:
-#        Repository: vibeProj/vibeProj
-#        Workflow:   publish.yml
-#        Environment: pypi
 on:
   release:
     types: [published]
@@ -85,7 +78,9 @@ jobs:
   publish-pypi:
     needs: build
     runs-on: ubuntu-latest
-    environment: pypi
+    environment:
+      name: pypi
+      url: https://pypi.org/p/vibeproj
     permissions:
       id-token: write  # Required for OIDC trusted publishing
     steps:
