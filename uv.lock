@@ -334,6 +334,29 @@ wheels = [
 ]
 
 [[package]]
+name = "cuda-python"
+version = "12.9.6"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cuda-bindings", version = "12.9.6", source = { registry = "https://pypi.org/simple" } },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/57/69/4a79126959ad6f1653504122ee1eb22d089dd6272d3fa37694dcdeb78ba5/cuda_python-12.9.6-py3-none-any.whl", hash = "sha256:ed5cf30e1129729eecf4605dff6e8bce84f2d30c17b17c7e5ac4b76448de35d2", size = 7596, upload-time = "2026-03-11T15:35:17.282Z" },
+]
+
+[[package]]
+name = "cuda-python"
+version = "13.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cuda-bindings", version = "13.2.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "cuda-pathfinder" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4a/da/b4dbe129f941afe1c24a09ba53521b78875626763d96414798a74763282f/cuda_python-13.2.0-py3-none-any.whl", hash = "sha256:2f092b0ec13a860115fa595411889ee939ad203450ea4f91e9461b174ea7b084", size = 8145, upload-time = "2026-03-11T13:55:19.143Z" },
+]
+
+[[package]]
 name = "cuda-toolkit"
 version = "12.9.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1218,10 +1241,12 @@ dependencies = [
 [package.optional-dependencies]
 cu12 = [
     { name = "cuda-cccl", extra = ["cu12"], marker = "extra == 'extra-8-vibeproj-cu12'" },
+    { name = "cuda-python", version = "12.9.6", source = { registry = "https://pypi.org/simple" } },
     { name = "cupy-cuda12x" },
 ]
 cu13 = [
     { name = "cuda-cccl", extra = ["cu13"], marker = "extra == 'extra-8-vibeproj-cu13'" },
+    { name = "cuda-python", version = "13.2.0", source = { registry = "https://pypi.org/simple" } },
     { name = "cupy-cuda13x" },
 ]
 
@@ -1242,6 +1267,8 @@ gpu-dev = [
 requires-dist = [
     { name = "cuda-cccl", extras = ["cu12"], marker = "extra == 'cu12'" },
     { name = "cuda-cccl", extras = ["cu13"], marker = "extra == 'cu13'" },
+    { name = "cuda-python", marker = "extra == 'cu12'", specifier = ">=12,<13" },
+    { name = "cuda-python", marker = "extra == 'cu13'", specifier = ">=13" },
     { name = "cupy-cuda12x", marker = "extra == 'cu12'", specifier = ">=13" },
     { name = "cupy-cuda13x", marker = "extra == 'cu13'", specifier = ">=14" },
     { name = "numpy", specifier = ">=2" },

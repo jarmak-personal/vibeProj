@@ -28,12 +28,14 @@ dependencies = [
 
 [project.optional-dependencies]
 cu12 = [
-    "cupy-cuda12x>=13",
+    "cuda-python>=12,<13",
     "cuda-cccl[cu12]",
+    "cupy-cuda12x>=13",
 ]
 cu13 = [
-    "cupy-cuda13x>=14",
+    "cuda-python>=13",
     "cuda-cccl[cu13]",
+    "cupy-cuda13x>=14",
 ]
 
 [project.urls]
