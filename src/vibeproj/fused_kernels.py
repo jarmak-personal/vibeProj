@@ -714,8 +714,10 @@ _LAEA_INVERSE_SOURCE = (
 # ===================================================================
 
 _EQEARTH_FORWARD_SOURCE = (
-    _FWD_SIGNATURE.format(func="eqearth_forward", real_t="{real_t}")
+    _EA_DEVICE_FNS
+    + _FWD_SIGNATURE.format(func="eqearth_forward", real_t="{real_t}")
     + """
+    {real_t} e, {real_t} qp, {real_t} rqda,
     {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
     int src_north_first, int dst_north_first, int n
 ) {{"""
@@ -723,39 +725,51 @@ _EQEARTH_FORWARD_SOURCE = (
     + """
     const {real_t} A1=({real_t})1.340264, A2=({real_t})-0.081106, A3=({real_t})0.000893, A4=({real_t})0.003796;
     const {real_t} SQRT3_2 = ({real_t})0.86602540378443864676;
-    {real_t} theta = asin(SQRT3_2 * sin(phi));
+    const {real_t} M = ({real_t})1.1547005383792515;  // 2*sqrt(3)/3
+    // Geodetic -> authalic latitude
+    {real_t} q = qsfn(sin(phi), e);
+    {real_t} beta = asin(fmin(fmax(q / qp, ({real_t})-1.0), ({real_t})1.0));
+    {real_t} theta = asin(SQRT3_2 * sin(beta));
     {real_t} t2 = theta * theta;
     {real_t} t6 = t2 * t2 * t2;
     {real_t} d = A1 + ({real_t})3.0*A2*t2 + t6*(({real_t})7.0*A3 + ({real_t})9.0*A4*t2);
-    {real_t} easting  = (lam * cos(theta) / d) * a + x0;
-    {real_t} northing = (theta * (A1 + A2*t2 + t6*(A3 + A4*t2))) * a + y0;
+    {real_t} easting  = (rqda * M * lam * cos(theta) / d) * a + x0;
+    {real_t} northing = (rqda * theta * (A1 + A2*t2 + t6*(A3 + A4*t2))) * a + y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
 )
 
 _EQEARTH_INVERSE_SOURCE = (
-    _INV_SIGNATURE.format(func="eqearth_inverse", real_t="{real_t}")
+    _EA_DEVICE_FNS
+    + _INV_SIGNATURE.format(func="eqearth_inverse", real_t="{real_t}")
     + """
+    {real_t} e, {real_t} es, {real_t} qp, {real_t} rqda,
     {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
     int src_north_first, int dst_north_first, int n
 ) {{"""
     + _INV_PREAMBLE
     + """
     const {real_t} A1=({real_t})1.340264, A2=({real_t})-0.081106, A3=({real_t})0.000893, A4=({real_t})0.003796;
-    {real_t} theta = cy;
+    const {real_t} M = ({real_t})1.1547005383792515;  // 2*sqrt(3)/3
+    // Remove rqda scaling
+    {real_t} cxs = cx / rqda, cys = cy / rqda;
+    {real_t} theta = cys;
     for (int i = 0; i < 12; i++) {{
         {real_t} t2 = theta * theta;
         {real_t} t6 = t2 * t2 * t2;
-        {real_t} fy = theta * (A1 + A2*t2 + t6*(A3 + A4*t2)) - cy;
+        {real_t} fy = theta * (A1 + A2*t2 + t6*(A3 + A4*t2)) - cys;
         {real_t} fpy = A1 + ({real_t})3.0*A2*t2 + t6*(({real_t})7.0*A3 + ({real_t})9.0*A4*t2);
         theta = theta - fy / fpy;
     }}
     {real_t} t2 = theta * theta;
     {real_t} t6 = t2 * t2 * t2;
     {real_t} d = A1 + ({real_t})3.0*A2*t2 + t6*(({real_t})7.0*A3 + ({real_t})9.0*A4*t2);
-    {real_t} lam = cx * d / cos(theta);
-    {real_t} phi = asin(fmin(fmax(sin(theta) * ({real_t})2.0 / ({real_t})1.7320508075688772935, ({real_t})-1.0), ({real_t})1.0));
+    {real_t} lam = cxs * d / (M * cos(theta));
+    // Recover authalic latitude, then convert to geodetic via q-inversion
+    {real_t} sin_beta = fmin(fmax(sin(theta) * ({real_t})2.0 / ({real_t})1.7320508075688772935, ({real_t})-1.0), ({real_t})1.0);
+    {real_t} q = qp * sin_beta;
+    {real_t} phi = phi_from_q(q, e, es);
 """
     + _INV_POSTAMBLE
     + "}}"
@@ -935,7 +949,7 @@ _MOLL_INVERSE_SOURCE = (
 _STEREA_FORWARD_SOURCE = (
     _FWD_SIGNATURE.format(func="sterea_forward", real_t="{real_t}")
     + """
-    {real_t} e, {real_t} nn, {real_t} c, {real_t} sin_chi0, {real_t} cos_chi0, {real_t} k0,
+    {real_t} e, {real_t} nn, {real_t} c, {real_t} R, {real_t} sin_chi0, {real_t} cos_chi0, {real_t} k0,
     {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
     int src_north_first, int dst_north_first, int n
 ) {{"""
@@ -949,8 +963,8 @@ _STEREA_FORWARD_SOURCE = (
     {real_t} sin_chi = sin(chi), cos_chi = cos(chi);
     {real_t} cos_lam_s = cos(lam_s), sin_lam_s = sin(lam_s);
     {real_t} k_den = ({real_t})1.0 + sin_chi0*sin_chi + cos_chi0*cos_chi*cos_lam_s;
-    {real_t} easting  = (({real_t})2.0 * k0 * cos_chi * sin_lam_s / k_den) * a + x0;
-    {real_t} northing = (({real_t})2.0 * k0 * (cos_chi0*sin_chi - sin_chi0*cos_chi*cos_lam_s) / k_den) * a + y0;
+    {real_t} easting  = (({real_t})2.0 * R * k0 * cos_chi * sin_lam_s / k_den) * a + x0;
+    {real_t} northing = (({real_t})2.0 * R * k0 * (cos_chi0*sin_chi - sin_chi0*cos_chi*cos_lam_s) / k_den) * a + y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -959,13 +973,13 @@ _STEREA_FORWARD_SOURCE = (
 _STEREA_INVERSE_SOURCE = (
     _INV_SIGNATURE.format(func="sterea_inverse", real_t="{real_t}")
     + """
-    {real_t} e, {real_t} nn, {real_t} c, {real_t} sin_chi0, {real_t} cos_chi0, {real_t} k0,
+    {real_t} e, {real_t} nn, {real_t} c, {real_t} R, {real_t} sin_chi0, {real_t} cos_chi0, {real_t} k0,
     {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
     int src_north_first, int dst_north_first, int n
 ) {{"""
     + _INV_PREAMBLE
     + """
-    {real_t} xs = cx / (({real_t})2.0 * k0), ys = cy / (({real_t})2.0 * k0);
+    {real_t} xs = cx / (({real_t})2.0 * R * k0), ys = cy / (({real_t})2.0 * R * k0);
     {real_t} rho = sqrt(xs*xs + ys*ys);
     {real_t} ce = ({real_t})2.0 * atan(rho);
     {real_t} sin_ce = sin(ce), cos_ce = cos(ce);
@@ -1004,12 +1018,17 @@ _GEOS_FORWARD_SOURCE = (
     + """
     {real_t} phi_gc = atan(r_pol2 / r_eq2 * tan(phi));
     {real_t} cos_pgc = cos(phi_gc), sin_pgc = sin(phi_gc);
+    // Geocentric earth radius (CGMS standard)
+    {real_t} r_pol = sqrt(r_pol2);
+    {real_t} r_earth = r_pol / sqrt(({real_t})1.0 - (r_eq2 - r_pol2) / r_eq2 * cos_pgc * cos_pgc);
     {real_t} cos_l = cos(lam);
-    {real_t} Sx = H - a * cos_pgc * cos_l;
-    {real_t} Sy = -a * cos_pgc * sin(lam);
-    {real_t} Sz = a * sin_pgc;
-    {real_t} easting  = (atan2(Sy, Sx) / a) * a + x0;
-    {real_t} northing = (atan(Sz / sqrt(Sx*Sx + Sy*Sy)) / a) * a + y0;
+    {real_t} Sx = H - r_earth * cos_pgc * cos_l;
+    {real_t} Sy = -r_earth * cos_pgc * sin(lam);
+    {real_t} Sz = r_earth * sin_pgc;
+    // Sweep Y (GOES-R PUG): x = arcsin(-s_y/|s|), y = arctan(s_z/s_x)
+    {real_t} sn = sqrt(Sx*Sx + Sy*Sy + Sz*Sz);
+    {real_t} easting  = asin(fmin(fmax(-Sy / sn, ({real_t})-1.0), ({real_t})1.0)) + x0;
+    {real_t} northing = atan2(Sz, Sx) + y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -1033,8 +1052,8 @@ _GEOS_INVERSE_SOURCE = (
     disc = fmax(disc, ({real_t})0.0);
     {real_t} rs = (-bc - sqrt(disc)) / (({real_t})2.0*ac);
     {real_t} Sx2 = rs*cx2*cy2, Sy2 = -rs*sx, Sz2 = rs*cx2*sy;
-    {real_t} lam = atan2(Sy2, H - Sx2);
-    {real_t} phi = atan(Sz2*H / (sqrt((H-Sx2)*(H-Sx2)+Sy2*Sy2) * r_pol2 / r_eq2));
+    {real_t} lam = atan2(-Sy2, H - Sx2);
+    {real_t} phi = atan(Sz2 * r_eq2 / (sqrt((H-Sx2)*(H-Sx2)+Sy2*Sy2) * r_pol2));
 """
     + _INV_POSTAMBLE
     + "}}"
@@ -1682,7 +1701,36 @@ def fused_transform(
             nn,
         )
 
-    elif projection_name in ("eqearth", "moll"):
+    elif projection_name == "eqearth":
+        if direction == "forward":
+            args = base + (
+                real_t(computed["e"]),
+                real_t(computed["qp"]),
+                real_t(computed["rqda"]),
+                real_t(computed["lam0"]),
+                real_t(computed["a"]),
+                real_t(computed["x0"]),
+                real_t(computed["y0"]),
+                snf,
+                dnf,
+                nn,
+            )
+        else:
+            args = base + (
+                real_t(computed["e"]),
+                real_t(computed["es"]),
+                real_t(computed["qp"]),
+                real_t(computed["rqda"]),
+                real_t(computed["lam0"]),
+                real_t(computed["a"]),
+                real_t(computed["x0"]),
+                real_t(computed["y0"]),
+                snf,
+                dnf,
+                nn,
+            )
+
+    elif projection_name == "moll":
         args = base + (
             real_t(computed["lam0"]),
             real_t(computed["a"]),
@@ -1738,6 +1786,7 @@ def fused_transform(
             real_t(computed["e"]),
             real_t(computed["n"]),
             real_t(computed["c"]),
+            real_t(computed["R"]),
             real_t(computed["sin_chi0"]),
             real_t(computed["cos_chi0"]),
             real_t(computed["k0"]),

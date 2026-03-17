@@ -66,6 +66,7 @@ class ObliqueStereographic(Projection):
         ec = computed["e"]
         n = computed["n"]
         c = computed["c"]
+        R = computed["R"]
         sin_chi0 = computed["sin_chi0"]
         cos_chi0 = computed["cos_chi0"]
         k0 = computed["k0"]
@@ -77,27 +78,28 @@ class ObliqueStereographic(Projection):
         chi = xp.arcsin((w - 1) / (w + 1))
         lam_s = n * lam
 
-        # Oblique stereographic on conformal sphere
+        # Oblique stereographic on conformal sphere (radius R)
         sin_chi = xp.sin(chi)
         cos_chi = xp.cos(chi)
         cos_lam_s = xp.cos(lam_s)
         sin_lam_s = xp.sin(lam_s)
 
         k_denom = 1 + sin_chi0 * sin_chi + cos_chi0 * cos_chi * cos_lam_s
-        x = 2 * k0 * cos_chi * sin_lam_s / k_denom
-        y = 2 * k0 * (cos_chi0 * sin_chi - sin_chi0 * cos_chi * cos_lam_s) / k_denom
+        x = 2 * R * k0 * cos_chi * sin_lam_s / k_denom
+        y = 2 * R * k0 * (cos_chi0 * sin_chi - sin_chi0 * cos_chi * cos_lam_s) / k_denom
         return x, y
 
     def inverse(self, x, y, params, computed, xp):
         ec = computed["e"]
         n = computed["n"]
         c = computed["c"]
+        R = computed["R"]
         sin_chi0 = computed["sin_chi0"]
         cos_chi0 = computed["cos_chi0"]
         k0 = computed["k0"]
 
-        x_s = x / (2 * k0)
-        y_s = y / (2 * k0)
+        x_s = x / (2 * R * k0)
+        y_s = y / (2 * R * k0)
         rho = xp.sqrt(x_s * x_s + y_s * y_s)
 
         ce = 2 * xp.arctan(rho)

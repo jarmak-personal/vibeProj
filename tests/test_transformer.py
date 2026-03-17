@@ -306,21 +306,17 @@ def test_eqc_roundtrip():
 def test_eqearth_forward():
     """EPSG:8857 — WGS 84 / Equal Earth Greenwich.
 
-    NOTE: vibeproj uses the semi-major axis for scaling while pyproj uses
-    a different parameterisation for Equal Earth on the ellipsoid, so the
-    absolute metre values differ.  We verify the forward path produces
-    finite values with correct sign and relative magnitude.
+    With authalic latitude conversion, results now match pyproj.
     """
+    pp = PyProjTransformer.from_crs("EPSG:4326", "EPSG:8857")
     t = Transformer.from_crs("EPSG:4326", "EPSG:8857")
 
     lat, lon = np.array([40.0, -30.0]), np.array([-74.0, 20.0])
+    exp_x, exp_y = pp.transform(lat, lon)
     vp_x, vp_y = t.transform(lat, lon)
 
-    # Negative longitude -> negative easting, positive latitude -> positive northing
-    assert vp_x[0] < 0
-    assert vp_y[0] > 0
-    assert np.all(np.isfinite(vp_x))
-    assert np.all(np.isfinite(vp_y))
+    assert_allclose(vp_x, exp_x, atol=0.01)
+    assert_allclose(vp_y, exp_y, atol=0.01)
 
 
 def test_eqearth_roundtrip():
@@ -367,17 +363,20 @@ def test_cea_roundtrip():
 
 
 def test_sterea_forward():
-    """EPSG:28992 — Amersfoort / RD New."""
-    pp = PyProjTransformer.from_crs("EPSG:4326", "EPSG:28992")
+    """EPSG:28992 — Amersfoort / RD New.
+
+    Compare against pyproj on the same datum (EPSG:4289 Amersfoort geographic)
+    to isolate projection math from datum transforms.
+    """
+    pp = PyProjTransformer.from_crs("EPSG:4289", "EPSG:28992")
     t = Transformer.from_crs("EPSG:4326", "EPSG:28992")
 
     lat, lon = np.array([52.3676]), np.array([4.9041])
     exp_x, exp_y = pp.transform(lat, lon)
     vp_x, vp_y = t.transform(lat, lon)
 
-    # Relaxed tolerance — conformal sphere mapping introduces small systematic offset
-    assert_allclose(vp_x, exp_x, atol=200.0)
-    assert_allclose(vp_y, exp_y, atol=200.0)
+    assert_allclose(vp_x, exp_x, atol=0.01)
+    assert_allclose(vp_y, exp_y, atol=0.01)
 
 
 def test_sterea_roundtrip():
@@ -386,9 +385,8 @@ def test_sterea_roundtrip():
     x, y = t.transform(lat, lon)
     lat2, lon2 = t.transform(x, y, direction="INVERSE")
 
-    # Relaxed tolerance — inverse conformal sphere conversion has a known bug
-    assert_allclose(lat2, lat, atol=0.2)
-    assert_allclose(lon2, lon, atol=0.2)
+    assert_allclose(lat2, lat, atol=1e-7)
+    assert_allclose(lon2, lon, atol=1e-7)
 
 
 # ---------------------------------------------------------------------------
@@ -510,13 +508,7 @@ def test_moll_roundtrip():
 
 
 def test_geos_roundtrip():
-    """Geostationary forward/inverse.
-
-    NOTE: The geos inverse has a known issue with latitude recovery for
-    off-nadir points (the geocentric ↔ geodetic latitude conversion is
-    incomplete).  We test the sub-satellite point (origin) exactly and
-    verify that the forward path produces finite output for off-nadir.
-    """
+    """Geostationary forward/inverse — both origin and off-nadir points."""
     from vibeproj.crs import ProjectionParams
     from vibeproj.ellipsoid import WGS84
     from vibeproj.pipeline import TransformPipeline
@@ -531,22 +523,25 @@ def test_geos_roundtrip():
     )
     src = ProjectionParams(projection_name="longlat", ellipsoid=WGS84, north_first=True)
     pipe = TransformPipeline(src, params)
+    inv_pipe = TransformPipeline(params, src)
 
     # Sub-satellite point roundtrips exactly
     lat = np.array([0.0])
     lon = np.array([0.0])
     x, y = pipe.transform(lat, lon, np)
-    inv_pipe = TransformPipeline(params, src)
     lat2, lon2 = inv_pipe.transform(x, y, np)
     assert_allclose(lat2, lat, atol=1e-7)
     assert_allclose(lon2, lon, atol=1e-7)
 
-    # Off-nadir points: forward produces finite values (inverse is known-broken)
-    lat_off = np.array([5.0, -5.0])
-    lon_off = np.array([-5.0, 5.0])
+    # Off-nadir points now roundtrip accurately
+    lat_off = np.array([5.0, -5.0, 30.0, -45.0])
+    lon_off = np.array([-5.0, 5.0, 20.0, -30.0])
     x_off, y_off = pipe.transform(lat_off, lon_off, np)
     assert np.all(np.isfinite(x_off))
     assert np.all(np.isfinite(y_off))
+    lat3, lon3 = inv_pipe.transform(x_off, y_off, np)
+    assert_allclose(lat3, lat_off, atol=1e-7)
+    assert_allclose(lon3, lon_off, atol=1e-7)
 
 
 # ---------------------------------------------------------------------------

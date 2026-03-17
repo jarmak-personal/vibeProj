@@ -45,7 +45,7 @@ def select_compute_precision() -> str:
     64x fp32 throughput advantage doesn't materialize for projections.
 
     On the RTX 4090 (1:64 ALU ratio), fp64 TM still runs at 0.49ms/1M points
-    = 259x faster than CPU. The ds path exists for experimentation but provides
+    = 183x faster than CPU. The ds path exists for experimentation but provides
     no speedup for trig-heavy projection kernels.
     """
     return "fp64"

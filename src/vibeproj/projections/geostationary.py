@@ -49,27 +49,28 @@ class Geostationary(Projection):
         # Geographic to geocentric latitude
         phi_gc = xp.arctan(r_pol2 / r_eq2 * xp.tan(phi))
         cos_phi_gc = xp.cos(phi_gc)
+        sin_phi_gc = xp.sin(phi_gc)
 
-        # Distance from Earth center to surface point
-        r_earth = a / xp.sqrt(1.0 + (r_eq2 - r_pol2) / r_pol2 * cos_phi_gc * cos_phi_gc)
-        # Actually use simplified approach
-        r_earth = a  # For the normalized projection
+        # Geocentric earth radius (CGMS standard)
+        r_pol = math.sqrt(r_pol2)
+        r_earth = r_pol / xp.sqrt(1.0 - (r_eq2 - r_pol2) / r_eq2 * cos_phi_gc * cos_phi_gc)
 
-        cos_phi = xp.cos(phi_gc)
-        sin_phi = xp.sin(phi_gc)
         cos_lam = xp.cos(lam)
 
-        Sx = H - r_earth * cos_phi * cos_lam
-        Sy = -r_earth * cos_phi * xp.sin(lam)
-        Sz = r_earth * sin_phi
+        Sx = H - r_earth * cos_phi_gc * cos_lam
+        Sy = -r_earth * cos_phi_gc * xp.sin(lam)
+        Sz = r_earth * sin_phi_gc
 
-        # Sweep Y (GOES standard)
-        x = xp.arctan(Sy / Sx) / a  # normalized
-        y = xp.arctan(Sz / xp.sqrt(Sx * Sx + Sy * Sy)) / a  # normalized
+        # Sweep Y (GOES-R PUG): x = arcsin(-s_y/|s|), y = arctan(s_z/s_x)
+        sn = xp.sqrt(Sx * Sx + Sy * Sy + Sz * Sz)
+        x = xp.arcsin(xp.clip(-Sy / sn, -1.0, 1.0)) / a
+        y = xp.arctan2(Sz, Sx) / a
         return x, y
 
     def inverse(self, x, y, params, computed, xp):
         H = computed["H"]
+        r_eq2 = computed["r_eq2"]
+        r_pol2 = computed["r_pol2"]
         a = computed["a"]
 
         x_proj = x * a
@@ -80,9 +81,9 @@ class Geostationary(Projection):
         sin_y = xp.sin(y_proj)
         cos_y = xp.cos(y_proj)
 
-        # Back-project
+        # Back-project: ray-ellipsoid intersection
         a_coeff = sin_x * sin_x + cos_x * cos_x * (
-            cos_y * cos_y + sin_y * sin_y * (a * a) / (computed["r_pol2"])
+            cos_y * cos_y + sin_y * sin_y * r_eq2 / r_pol2
         )
         b_coeff = -2 * H * cos_x * cos_y
         c_coeff = H * H - a * a
@@ -96,8 +97,10 @@ class Geostationary(Projection):
         Sy = -r_s * sin_x
         Sz = r_s * cos_x * sin_y
 
-        lam = xp.arctan2(Sy, H - Sx)
-        phi = xp.arctan(Sz * H / (xp.sqrt((H - Sx) ** 2 + Sy**2) * computed["r_pol2"] / (a * a)))
+        # Y_ecef = -Sy (from sign convention), X_ecef = H - Sx
+        lam = xp.arctan2(-Sy, H - Sx)
+        # Geocentric → geodetic latitude (CGMS standard: r_eq²/r_pol² factor)
+        phi = xp.arctan(Sz * r_eq2 / (xp.sqrt((H - Sx) ** 2 + Sy ** 2) * r_pol2))
 
         return lam, phi
 

@@ -12,12 +12,12 @@ On an RTX 4090 vs i9-13900k, 1M coordinates:
 
 | Projection | GPU | vs CPU |
 |---|---|---|
-| Transverse Mercator / UTM | 0.50 ms | 260x |
-| Lambert Conformal Conic | 0.54 ms | 82x |
-| Albers Equal Area | 0.28 ms | 114x |
-| Web Mercator | 0.15 ms | 95x |
-| Equal Earth | 0.21 ms | 139x |
-| Plate Carrée | 0.04 ms | 169x |
+| Transverse Mercator / UTM | 0.49 ms | 183x |
+| Lambert Conformal Conic | 0.54 ms | 135x |
+| Albers Equal Area | 0.27 ms | 180x |
+| Web Mercator | 0.15 ms | 364x |
+| Equal Earth | 0.43 ms | 154x |
+| Plate Carrée | 0.04 ms | 702x |
 
 All 20 projections run sub-millisecond at 1M coordinates. See full benchmark in the repo.
 
@@ -49,15 +49,17 @@ All 20 projections run sub-millisecond at 1M coordinates. See full benchmark in 
 ## Install
 
 ```bash
-pip install vibeproj          # CPU-only (NumPy fallback)
-pip install vibeproj[gpu]     # with CuPy for GPU acceleration
+pip install vibeproj            # CPU-only (NumPy fallback)
+pip install vibeproj[cu12]      # CUDA 12
+pip install vibeproj[cu13]      # CUDA 13
 ```
 
 For development:
 
 ```bash
-uv sync               # CPU-only
-uv sync --group gpu   # with CuPy
+uv sync                         # CPU-only
+uv sync --extra cu12            # CUDA 12
+uv sync --extra cu13            # CUDA 13
 ```
 
 ## Usage

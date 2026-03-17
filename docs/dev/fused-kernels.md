@@ -15,7 +15,7 @@ one thread per coordinate pair, all stages in registers. This eliminates:
 - Multiple global memory round-trips
 
 For 1M coordinates on an RTX 4090, the fused Transverse Mercator kernel
-runs in 0.50ms vs ~2ms for the element-wise path.
+runs in 0.49ms vs ~2ms for the element-wise path.
 
 ## Kernel structure
 

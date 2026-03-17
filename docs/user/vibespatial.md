@@ -144,10 +144,10 @@ On an RTX 4090 with 1M fp64 coordinates:
 
 | Operation | Time |
 |---|---|
-| Fused TM forward kernel | 0.50 ms |
+| Fused TM forward kernel | 0.49 ms |
 | `transform_buffers()` overhead | < 0.01 ms |
-| Equivalent pyproj CPU (i9-13900k) | ~130 ms |
+| Equivalent pyproj CPU (i9-13900k) | ~90 ms |
 | Host→Device copy (16 MB) | ~2 ms |
 
-The GPU kernel is 260x faster than CPU pyproj, and `transform_buffers()`
+The GPU kernel is 183x faster than CPU pyproj, and `transform_buffers()`
 adds negligible Python overhead on top of the raw kernel time.
