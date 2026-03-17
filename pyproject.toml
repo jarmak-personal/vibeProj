@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 authors = [
-    { name = "vibeProj Contributors" },
+    { name = "Ben Jarmak", email = "ben@vibespatial.dev" },
 ]
 keywords = ["coordinate", "projection", "gpu", "cuda", "gis", "geospatial", "cupy"]
 classifiers = [
@@ -30,10 +30,10 @@ dependencies = [
 gpu = ["cupy-cuda12x>=13"]
 
 [project.urls]
-Homepage = "https://github.com/vibeProj/vibeProj"
-Repository = "https://github.com/vibeProj/vibeProj"
-Documentation = "https://vibeproj.github.io/vibeProj/"
-Issues = "https://github.com/vibeProj/vibeProj/issues"
+Homepage = "https://github.com/jarmak-personal/vibeProj"
+Repository = "https://github.com/jarmak-personal/vibeProj"
+Documentation = "https://jarmak-personal.github.io/vibeProj/"
+Issues = "https://github.com/jarmak-personal/vibeProj/issues"
 
 [dependency-groups]
 dev = [
