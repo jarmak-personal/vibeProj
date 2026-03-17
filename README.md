@@ -2,6 +2,9 @@
 
 GPU-accelerated coordinate projection library. Extracted from [RAPIDS cuProj](https://github.com/rapidsai/cuspatial), re-engineered as a pure Python + CuPy package, and expanded from 1 to 20 projections — each with a fused NVRTC kernel that runs the full transform pipeline in a single GPU kernel launch.
 
+> [!WARNING]
+> vibeProj is very early in development. Operations may be unoptimized or have multiple Host/Device transfers causing reduced performance. [File an issue](https://github.com/jarmak-personal/vibeProj/issues) if you hit a problem!
+
 ## Performance
 
 On an RTX 4090 vs i9-13900k, 1M coordinates:
