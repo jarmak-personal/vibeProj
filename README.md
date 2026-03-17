@@ -46,8 +46,15 @@ All 20 projections run sub-millisecond at 1M coordinates. See full benchmark in 
 ## Install
 
 ```bash
-uv sync               # CPU-only (NumPy)
-uv sync --group gpu   # with CuPy for GPU acceleration
+pip install vibeproj          # CPU-only (NumPy fallback)
+pip install vibeproj[gpu]     # with CuPy for GPU acceleration
+```
+
+For development:
+
+```bash
+uv sync               # CPU-only
+uv sync --group gpu   # with CuPy
 ```
 
 ## Usage
@@ -55,18 +62,20 @@ uv sync --group gpu   # with CuPy for GPU acceleration
 ```python
 from vibeproj import Transformer
 
-# pyproj-compatible API
+# Default: native CRS axis order (matches pyproj)
 t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
-x, y = t.transform(49.0, 2.0)           # scalar
-x, y = t.transform(lat_array, lon_array) # NumPy or CuPy arrays
-lat, lon = t.transform(x, y, direction="INVERSE")
+x, y = t.transform(49.0, 2.0)           # (lat, lon) in, (easting, northing) out
+
+# always_xy=True: (lon, lat) order — matches shapely/geopandas
+t = Transformer.from_crs("EPSG:4326", "EPSG:32631", always_xy=True)
+x, y = t.transform(2.0, 49.0)           # (lon, lat) in, (easting, northing) out
 ```
 
 ### vibeSpatial Integration (zero-copy GPU)
 
 ```python
 # Pre-allocated output, no intermediate allocations, stays on GPU
-t = Transformer.from_crs(src_crs, dst_crs)
+t = Transformer.from_crs(src_crs, dst_crs, always_xy=True)
 new_x = cp.empty_like(buf.x)
 new_y = cp.empty_like(buf.y)
 t.transform_buffers(buf.x, buf.y, out_x=new_x, out_y=new_y)

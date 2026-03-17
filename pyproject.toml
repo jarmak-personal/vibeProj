@@ -26,6 +26,9 @@ dependencies = [
     "pyproj>=3.7.0",
 ]
 
+[project.optional-dependencies]
+gpu = ["cupy-cuda12x>=13"]
+
 [project.urls]
 Homepage = "https://github.com/vibeProj/vibeProj"
 Repository = "https://github.com/vibeProj/vibeProj"
