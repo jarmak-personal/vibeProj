@@ -106,6 +106,10 @@ _METHOD_MAP = {
     "Modified Azimuthal Equidistant": "aeqd",
     "Azimuthal Equidistant": "aeqd",
     "Azimuthal Equidistant (Spherical)": "aeqd",
+    "Hotine Oblique Mercator (variant A)": "omerc",
+    "Hotine Oblique Mercator (variant B)": "omerc",
+    "Krovak": "krovak",
+    "Krovak (North Orientated)": "krovak",
 }
 
 
@@ -188,22 +192,58 @@ def resolve_projection_params(crs: CRS) -> ProjectionParams:
     lon_0 = _get_param(
         pl,
         "Longitude of natural origin",
-        _get_param(pl, "Longitude of false origin", _get_param(pl, "Longitude of origin", 0.0)),
+        _get_param(
+            pl,
+            "Longitude of false origin",
+            _get_param(
+                pl,
+                "Longitude of origin",
+                _get_param(pl, "Longitude of projection centre", 0.0),
+            ),
+        ),
     )
     lat_0 = _get_param(
         pl,
         "Latitude of natural origin",
         _get_param(
-            pl, "Latitude of false origin", _get_param(pl, "Latitude of standard parallel", 0.0)
+            pl,
+            "Latitude of false origin",
+            _get_param(
+                pl,
+                "Latitude of standard parallel",
+                _get_param(pl, "Latitude of projection centre", 0.0),
+            ),
         ),
     )
     lat_1 = _get_param(pl, "Latitude of 1st standard parallel", 0.0)
     lat_2 = _get_param(pl, "Latitude of 2nd standard parallel", 0.0)
     k_0 = _get_param(
-        pl, "Scale factor at natural origin", _get_param(pl, "Scale factor on initial line", 1.0)
+        pl,
+        "Scale factor at natural origin",
+        _get_param(
+            pl,
+            "Scale factor on initial line",
+            _get_param(
+                pl,
+                "Scale factor at projection centre",
+                _get_param(pl, "Scale factor on pseudo standard parallel", 1.0),
+            ),
+        ),
     )
-    x_0 = _get_param(pl, "False easting", _get_param(pl, "Easting at false origin", 0.0))
-    y_0 = _get_param(pl, "False northing", _get_param(pl, "Northing at false origin", 0.0))
+    x_0 = _get_param(
+        pl,
+        "False easting",
+        _get_param(
+            pl, "Easting at false origin", _get_param(pl, "Easting at projection centre", 0.0)
+        ),
+    )
+    y_0 = _get_param(
+        pl,
+        "False northing",
+        _get_param(
+            pl, "Northing at false origin", _get_param(pl, "Northing at projection centre", 0.0)
+        ),
+    )
 
     params = ProjectionParams(
         projection_name=proj_name,
@@ -217,6 +257,20 @@ def resolve_projection_params(crs: CRS) -> ProjectionParams:
         y_0=y_0,
         north_first=first_is_north,
     )
+
+    # Oblique Mercator extra params
+    if proj_name == "omerc":
+        params.extra["alpha_c"] = _get_param(pl, "Azimuth at projection centre", 0.0)
+        params.extra["gamma_c"] = _get_param(pl, "Angle from Rectified to Skew Grid", 0.0)
+        # Variant A: FE/FN already encode u_c offset → skip u_c subtraction (no_uoff=True)
+        # Variant B: Ec/Nc at projection centre → apply u_c subtraction (no_uoff=False)
+        has_epc = any(p.name == "Easting at projection centre" for p in pl)
+        params.extra["no_uoff"] = not has_epc
+
+    # Krovak extra params
+    if proj_name == "krovak":
+        params.extra["alpha_c"] = _get_param(pl, "Co-latitude of cone axis", 30.28813975277778)
+        params.extra["phi_p"] = _get_param(pl, "Latitude of pseudo standard parallel", 78.5)
 
     # UTM detection
     if proj_name == "tmerc" and epsg is not None:

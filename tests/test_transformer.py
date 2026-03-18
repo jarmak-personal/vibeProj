@@ -391,6 +391,86 @@ def test_sterea_roundtrip():
 
 
 # ---------------------------------------------------------------------------
+# Oblique Mercator (Hotine) — Malaysia RSO, EPSG:3168 (variant A)
+# ---------------------------------------------------------------------------
+
+
+def test_omerc_variant_a_forward():
+    """EPSG:3168 — Malaysia RSO (variant A)."""
+    pp = PyProjTransformer.from_crs("EPSG:4326", "EPSG:3168", always_xy=False)
+    t = Transformer.from_crs("EPSG:4326", "EPSG:3168", always_xy=False)
+    lat = np.array([4.0, 3.0, 5.5, 2.0])
+    lon = np.array([102.25, 101.0, 103.5, 100.0])
+    exp_x, exp_y = pp.transform(lat, lon)
+    vp_x, vp_y = t.transform(lat, lon)
+    assert_allclose(vp_x, exp_x, atol=0.01)
+    assert_allclose(vp_y, exp_y, atol=0.01)
+
+
+def test_omerc_variant_a_roundtrip():
+    t = Transformer.from_crs("EPSG:4326", "EPSG:3168", always_xy=False)
+    lat = np.array([4.0, 3.0, 5.5, 2.0])
+    lon = np.array([102.25, 101.0, 103.5, 100.0])
+    x, y = t.transform(lat, lon)
+    t_inv = Transformer.from_crs("EPSG:3168", "EPSG:4326", always_xy=False)
+    lat2, lon2 = t_inv.transform(x, y)
+    assert_allclose(lat2, lat, atol=1e-7)
+    assert_allclose(lon2, lon, atol=1e-7)
+
+
+def test_omerc_variant_b_forward():
+    """EPSG:29873 — Timbalai 1948 / RSO Borneo (variant B)."""
+    pp = PyProjTransformer.from_crs("EPSG:4326", "EPSG:29873", always_xy=False)
+    t = Transformer.from_crs("EPSG:4326", "EPSG:29873", always_xy=False)
+    lat = np.array([4.0, 3.0, 5.5])
+    lon = np.array([115.0, 114.0, 116.0])
+    exp_x, exp_y = pp.transform(lat, lon)
+    vp_x, vp_y = t.transform(lat, lon)
+    assert_allclose(vp_x, exp_x, atol=0.01)
+    assert_allclose(vp_y, exp_y, atol=0.01)
+
+
+def test_omerc_variant_b_roundtrip():
+    t = Transformer.from_crs("EPSG:4326", "EPSG:29873", always_xy=False)
+    lat = np.array([4.0, 3.0, 5.5])
+    lon = np.array([115.0, 114.0, 116.0])
+    x, y = t.transform(lat, lon)
+    t_inv = Transformer.from_crs("EPSG:29873", "EPSG:4326", always_xy=False)
+    lat2, lon2 = t_inv.transform(x, y)
+    assert_allclose(lat2, lat, atol=1e-7)
+    assert_allclose(lon2, lon, atol=1e-7)
+
+
+# ---------------------------------------------------------------------------
+# Krovak — EPSG:5514 (North Orientated)
+# ---------------------------------------------------------------------------
+
+
+def test_krovak_forward():
+    """EPSG:5514 — S-JTSK / Krovak East North."""
+    pp = PyProjTransformer.from_crs("EPSG:4326", "EPSG:5514", always_xy=False)
+    t = Transformer.from_crs("EPSG:4326", "EPSG:5514", always_xy=False)
+    lat = np.array([50.0, 49.5, 48.0, 50.5])
+    lon = np.array([14.0, 15.0, 17.0, 12.0])
+    exp_x, exp_y = pp.transform(lat, lon)
+    vp_x, vp_y = t.transform(lat, lon)
+    # ~5-10m tolerance due to Helmert vs PROJ's datum transformation
+    assert_allclose(vp_x, exp_x, atol=15.0)
+    assert_allclose(vp_y, exp_y, atol=15.0)
+
+
+def test_krovak_roundtrip():
+    t = Transformer.from_crs("EPSG:4326", "EPSG:5514", always_xy=False)
+    lat = np.array([50.0, 49.5, 48.0, 50.5])
+    lon = np.array([14.0, 15.0, 17.0, 12.0])
+    x, y = t.transform(lat, lon)
+    t_inv = Transformer.from_crs("EPSG:5514", "EPSG:4326", always_xy=False)
+    lat2, lon2 = t_inv.transform(x, y)
+    assert_allclose(lat2, lat, atol=1e-6)
+    assert_allclose(lon2, lon, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
 # Sinusoidal (manual pipeline — no standard EPSG)
 # ---------------------------------------------------------------------------
 
@@ -496,6 +576,62 @@ def test_moll_roundtrip():
     pipe = TransformPipeline(src, params)
     lat = np.array([40.0, -30.0, 60.0])
     lon = np.array([-74.0, 20.0, 140.0])
+    x, y = pipe.transform(lat, lon, np)
+    inv_pipe = TransformPipeline(params, src)
+    lat2, lon2 = inv_pipe.transform(x, y, np)
+    assert_allclose(lat2, lat, atol=1e-7)
+    assert_allclose(lon2, lon, atol=1e-7)
+
+
+# ---------------------------------------------------------------------------
+# Eckert IV (manual pipeline — no standard EPSG)
+# ---------------------------------------------------------------------------
+
+
+def test_eck4_roundtrip():
+    from vibeproj.crs import ProjectionParams
+    from vibeproj.ellipsoid import WGS84
+    from vibeproj.pipeline import TransformPipeline
+
+    params = ProjectionParams(
+        projection_name="eck4",
+        ellipsoid=WGS84,
+        lon_0=0.0,
+        lat_0=0.0,
+        north_first=False,
+    )
+    src = ProjectionParams(projection_name="longlat", ellipsoid=WGS84, north_first=True)
+    pipe = TransformPipeline(src, params)
+    lat = np.array([40.0, -30.0, 60.0, 0.0])
+    lon = np.array([-74.0, 20.0, 140.0, 0.0])
+    x, y = pipe.transform(lat, lon, np)
+    inv_pipe = TransformPipeline(params, src)
+    lat2, lon2 = inv_pipe.transform(x, y, np)
+    assert_allclose(lat2, lat, atol=1e-7)
+    assert_allclose(lon2, lon, atol=1e-7)
+
+
+# ---------------------------------------------------------------------------
+# Eckert VI (manual pipeline — no standard EPSG)
+# ---------------------------------------------------------------------------
+
+
+def test_eck6_roundtrip():
+    from vibeproj.crs import ProjectionParams
+    from vibeproj.ellipsoid import WGS84
+    from vibeproj.pipeline import TransformPipeline
+
+    params = ProjectionParams(
+        projection_name="eck6",
+        ellipsoid=WGS84,
+        lon_0=0.0,
+        lat_0=0.0,
+        north_first=False,
+    )
+    src = ProjectionParams(projection_name="longlat", ellipsoid=WGS84, north_first=True)
+    pipe = TransformPipeline(src, params)
+    lat = np.array([40.0, -30.0, 60.0, 0.0])
+    lon = np.array([-74.0, 20.0, 140.0, 0.0])
     x, y = pipe.transform(lat, lon, np)
     inv_pipe = TransformPipeline(params, src)
     lat2, lon2 = inv_pipe.transform(x, y, np)
@@ -914,7 +1050,7 @@ def test_unsupported_projection_error():
     from vibeproj.exceptions import UnsupportedProjectionError
 
     with pytest.raises(UnsupportedProjectionError):
-        Transformer.from_crs("EPSG:4326", "EPSG:5514")  # S-JTSK / Krovak — not supported
+        Transformer.from_crs("EPSG:4326", "EPSG:5880")  # Polyconic — not supported
 
 
 def test_crs_resolution_error():

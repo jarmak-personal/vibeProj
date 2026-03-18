@@ -562,6 +562,102 @@ def test_moll_fused_roundtrip():
 
 
 # ---------------------------------------------------------------------------
+# Oblique Mercator (Hotine) — EPSG:3168 variant A
+# ---------------------------------------------------------------------------
+
+
+def test_omerc_forward_fused_matches_numpy():
+    lat = np.array([4.0, 3.0, 5.5, 2.0])
+    lon = np.array([102.25, 101.0, 103.5, 100.0])
+    _run_forward_gpu_vs_cpu("EPSG:4326", "EPSG:3168", lat, lon, atol=0.01)
+
+
+def test_omerc_fused_roundtrip():
+    t = Transformer.from_crs("EPSG:4326", "EPSG:3168", always_xy=False)
+    lat = cp.array([4.0, 3.0, 5.5, 2.0], dtype=cp.float64)
+    lon = cp.array([102.25, 101.0, 103.5, 100.0], dtype=cp.float64)
+    x, y = t.transform(lat, lon)
+    lat2, lon2 = t.transform(x, y, direction="INVERSE")
+    assert_allclose(cp.asnumpy(lat2), cp.asnumpy(lat), atol=1e-6)
+    assert_allclose(cp.asnumpy(lon2), cp.asnumpy(lon), atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Krovak — EPSG:5514 (North Orientated)
+# ---------------------------------------------------------------------------
+
+
+def test_krovak_fused_roundtrip():
+    t = Transformer.from_crs("EPSG:4326", "EPSG:5514", always_xy=False)
+    lat = cp.array([50.0, 49.5, 48.0, 50.5], dtype=cp.float64)
+    lon = cp.array([14.0, 15.0, 17.0, 12.0], dtype=cp.float64)
+    x, y = t.transform(lat, lon)
+    lat2, lon2 = t.transform(x, y, direction="INVERSE")
+    assert_allclose(cp.asnumpy(lat2), cp.asnumpy(lat), atol=1e-6)
+    assert_allclose(cp.asnumpy(lon2), cp.asnumpy(lon), atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Eckert IV (manual pipeline — no standard EPSG)
+# ---------------------------------------------------------------------------
+
+
+def test_eck4_fused_roundtrip():
+    from vibeproj.crs import ProjectionParams
+    from vibeproj.ellipsoid import WGS84
+    from vibeproj.pipeline import TransformPipeline
+
+    params = ProjectionParams(
+        projection_name="eck4",
+        ellipsoid=WGS84,
+        lon_0=0.0,
+        north_first=False,
+    )
+    src = ProjectionParams(projection_name="longlat", ellipsoid=WGS84, north_first=True)
+    pipe = TransformPipeline(src, params)
+
+    lat = cp.array([40.0, -30.0, 60.0, 0.0], dtype=cp.float64)
+    lon = cp.array([-100.0, 20.0, 140.0, 0.0], dtype=cp.float64)
+    x, y = pipe.transform(lat, lon, cp)
+
+    inv_pipe = TransformPipeline(params, src)
+    lat2, lon2 = inv_pipe.transform(x, y, cp)
+
+    assert_allclose(cp.asnumpy(lat2), cp.asnumpy(lat), atol=1e-6)
+    assert_allclose(cp.asnumpy(lon2), cp.asnumpy(lon), atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Eckert VI (manual pipeline — no standard EPSG)
+# ---------------------------------------------------------------------------
+
+
+def test_eck6_fused_roundtrip():
+    from vibeproj.crs import ProjectionParams
+    from vibeproj.ellipsoid import WGS84
+    from vibeproj.pipeline import TransformPipeline
+
+    params = ProjectionParams(
+        projection_name="eck6",
+        ellipsoid=WGS84,
+        lon_0=0.0,
+        north_first=False,
+    )
+    src = ProjectionParams(projection_name="longlat", ellipsoid=WGS84, north_first=True)
+    pipe = TransformPipeline(src, params)
+
+    lat = cp.array([40.0, -30.0, 60.0, 0.0], dtype=cp.float64)
+    lon = cp.array([-100.0, 20.0, 140.0, 0.0], dtype=cp.float64)
+    x, y = pipe.transform(lat, lon, cp)
+
+    inv_pipe = TransformPipeline(params, src)
+    lat2, lon2 = inv_pipe.transform(x, y, cp)
+
+    assert_allclose(cp.asnumpy(lat2), cp.asnumpy(lat), atol=1e-6)
+    assert_allclose(cp.asnumpy(lon2), cp.asnumpy(lon), atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
 # Oblique Stereographic (Netherlands EPSG:28992)
 # ---------------------------------------------------------------------------
 

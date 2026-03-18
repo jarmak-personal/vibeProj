@@ -50,6 +50,14 @@ _SUPPORTED = {
     ("gnom", "inverse"),
     ("moll", "forward"),
     ("moll", "inverse"),
+    ("omerc", "forward"),
+    ("omerc", "inverse"),
+    ("krovak", "forward"),
+    ("krovak", "inverse"),
+    ("eck4", "forward"),
+    ("eck4", "inverse"),
+    ("eck6", "forward"),
+    ("eck6", "inverse"),
     ("sterea", "forward"),
     ("sterea", "inverse"),
     ("geos", "forward"),
@@ -948,6 +956,283 @@ _MOLL_INVERSE_SOURCE = (
 )
 
 # ===================================================================
+# Oblique Mercator (Hotine) kernels
+# ===================================================================
+
+_OMERC_FORWARD_SOURCE = (
+    _FWD_SIGNATURE.format(func="omerc_forward", real_t="{real_t}")
+    + """
+    {real_t} e, {real_t} B, {real_t} A_norm, {real_t} H,
+    {real_t} sin_g0, {real_t} cos_g0, {real_t} sin_gc, {real_t} cos_gc,
+    {real_t} u_c,
+    {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
+    int src_north_first, int dst_north_first, int n
+) {{"""
+    + _FWD_PREAMBLE
+    + """
+    // Conformal latitude function t(phi)
+    {real_t} sin_phi = sin(phi);
+    {real_t} e_sin = e * sin_phi;
+    {real_t} t = tan(({real_t})0.25 * {pi} - ({real_t})0.5 * phi)
+              * pow((({real_t})1.0 + e_sin) / (({real_t})1.0 - e_sin), ({real_t})0.5 * e);
+
+    {real_t} Q = H / pow(t, B);
+    {real_t} S = (Q - ({real_t})1.0 / Q) * ({real_t})0.5;
+    {real_t} T = (Q + ({real_t})1.0 / Q) * ({real_t})0.5;
+    {real_t} V = sin(B * lam);
+    {real_t} U = (-V * cos_g0 + S * sin_g0) / T;
+    // Clamp U
+    if (U > ({real_t})0.9999999999) U = ({real_t})0.9999999999;
+    if (U < ({real_t})-0.9999999999) U = ({real_t})-0.9999999999;
+
+    {real_t} v_ob = A_norm / (({real_t})2.0 * B)
+                  * log((({real_t})1.0 - U) / (({real_t})1.0 + U));
+    {real_t} u_ob = (A_norm / B)
+                  * atan2(S * cos_g0 + V * sin_g0, cos(B * lam))
+                  - u_c;
+
+    // Rectified grid rotation + scale + offset (fp64)
+    double easting  = ((double)v_ob * (double)cos_gc + (double)u_ob * (double)sin_gc) * (double)a + (double)x0;
+    double northing = ((double)u_ob * (double)cos_gc - (double)v_ob * (double)sin_gc) * (double)a + (double)y0;
+"""
+    + _FWD_POSTAMBLE
+    + "}}"
+)
+
+_OMERC_INVERSE_SOURCE = (
+    _INV_SIGNATURE.format(func="omerc_inverse", real_t="{real_t}")
+    + """
+    {real_t} e, {real_t} B, {real_t} A_norm, {real_t} H,
+    {real_t} sin_g0, {real_t} cos_g0, {real_t} sin_gc, {real_t} cos_gc,
+    {real_t} u_c,
+    {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
+    int src_north_first, int dst_north_first, int n
+) {{"""
+    + _INV_PREAMBLE
+    + """
+    // Undo rectified grid rotation (cx, cy are already normalised)
+    {real_t} v_ob = cx * cos_gc - cy * sin_gc;
+    {real_t} u_ob = cx * sin_gc + cy * cos_gc + u_c;
+
+    // Oblique Mercator inverse
+    {real_t} Qp = exp(-B * v_ob / A_norm);
+    {real_t} Sp = (Qp - ({real_t})1.0 / Qp) * ({real_t})0.5;
+    {real_t} Tp = (Qp + ({real_t})1.0 / Qp) * ({real_t})0.5;
+    {real_t} Vp = sin(B * u_ob / A_norm);
+    {real_t} Up = (Vp * cos_g0 + Sp * sin_g0) / Tp;
+    if (Up > ({real_t})0.9999999999) Up = ({real_t})0.9999999999;
+    if (Up < ({real_t})-0.9999999999) Up = ({real_t})-0.9999999999;
+
+    // Recover t from Up
+    {real_t} t = pow(H / sqrt((({real_t})1.0 + Up) / (({real_t})1.0 - Up)), ({real_t})1.0 / B);
+
+    // Iterative conformal latitude inversion
+    {real_t} phi = ({real_t})0.5 * {pi} - ({real_t})2.0 * atan(t);
+    for (int i = 0; i < 15; i++) {{
+        {real_t} e_sin = e * sin(phi);
+        {real_t} phi_new = ({real_t})0.5 * {pi} - ({real_t})2.0 * atan(
+            t * pow((({real_t})1.0 - e_sin) / (({real_t})1.0 + e_sin), ({real_t})0.5 * e));
+        if (fabs(phi_new - phi) < ({real_t})1e-14) {{ phi = phi_new; break; }}
+        phi = phi_new;
+    }}
+
+    // Recover lambda
+    {real_t} lam = -atan2(Sp * cos_g0 - Vp * sin_g0,
+                          cos(B * u_ob / A_norm)) / B;
+"""
+    + _INV_POSTAMBLE
+    + "}}"
+)
+
+# ===================================================================
+# Krovak kernels (oblique conformal conic)
+# ===================================================================
+
+_KROVAK_FORWARD_SOURCE = (
+    _FWD_SIGNATURE.format(func="krovak_forward", real_t="{real_t}")
+    + """
+    {real_t} e, {real_t} B, {real_t} kk, {real_t} nn,
+    {real_t} r0_norm, {real_t} tan_half_p,
+    {real_t} sin_ac, {real_t} cos_ac,
+    {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
+    int src_north_first, int dst_north_first, int n
+) {{"""
+    + _FWD_PREAMBLE
+    + """
+    // Gaussian conformal sphere
+    {real_t} sin_phi = sin(phi);
+    {real_t} e_sin = e * sin_phi;
+    {real_t} gfi = pow((({real_t})1.0 + e_sin) / (({real_t})1.0 - e_sin), B * e * ({real_t})0.5);
+    {real_t} Q = kk * pow(tan(({real_t})0.25 * {pi} + phi * ({real_t})0.5), B) / gfi;
+    {real_t} U = ({real_t})2.0 * atan(Q) - ({real_t})0.5 * {pi};
+    {real_t} V = -B * lam;
+
+    // Oblique coordinates
+    {real_t} cos_U = cos(U), sin_U = sin(U);
+    {real_t} cos_V = cos(V), sin_V = sin(V);
+    {real_t} T = asin(cos_ac * sin_U + sin_ac * cos_U * cos_V);
+    {real_t} D = asin(cos_U * sin_V / cos(T));
+
+    // Oblique cone
+    {real_t} theta = nn * D;
+    {real_t} r_norm = r0_norm * pow(tan_half_p / tan(({real_t})0.25 * {pi} + T * ({real_t})0.5), nn);
+
+    // North Orientated: negate
+    double easting  = (double)(-r_norm * sin(theta)) * (double)a + (double)x0;
+    double northing = (double)(-r_norm * cos(theta)) * (double)a + (double)y0;
+"""
+    + _FWD_POSTAMBLE
+    + "}}"
+)
+
+_KROVAK_INVERSE_SOURCE = (
+    _INV_SIGNATURE.format(func="krovak_inverse", real_t="{real_t}")
+    + """
+    {real_t} e, {real_t} B, {real_t} kk, {real_t} nn,
+    {real_t} r0_norm, {real_t} tan_half_p,
+    {real_t} sin_ac, {real_t} cos_ac,
+    {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
+    int src_north_first, int dst_north_first, int n
+) {{"""
+    + _INV_PREAMBLE
+    + """
+    // Undo North Orientated negation (cx, cy already normalised)
+    {real_t} r_norm = sqrt(cx * cx + cy * cy);
+    {real_t} theta = atan2(-cx, -cy);
+
+    // Inverse cone
+    {real_t} D = theta / nn;
+    {real_t} T = ({real_t})2.0 * atan(
+        pow(r0_norm / fmax(r_norm, ({real_t})1e-30), ({real_t})1.0 / nn) * tan_half_p
+    ) - ({real_t})0.5 * {pi};
+
+    // Inverse oblique
+    {real_t} cos_T = cos(T), sin_T = sin(T);
+    {real_t} cos_D = cos(D), sin_D = sin(D);
+    {real_t} U = asin(cos_ac * sin_T - sin_ac * cos_T * cos_D);
+    {real_t} V = asin(cos_T * sin_D / cos(U));
+
+    // Inverse Gaussian sphere: t = [tan(pi/4+U/2)/k]^(1/B)
+    {real_t} t = pow(tan(({real_t})0.25 * {pi} + U * ({real_t})0.5) / kk, ({real_t})1.0 / B);
+    {real_t} phi = ({real_t})2.0 * atan(t) - ({real_t})0.5 * {pi};
+    for (int i = 0; i < 15; i++) {{
+        {real_t} e_sin = e * sin(phi);
+        {real_t} phi_new = ({real_t})2.0 * atan(
+            t * pow((({real_t})1.0 + e_sin) / (({real_t})1.0 - e_sin), ({real_t})0.5 * e)
+        ) - ({real_t})0.5 * {pi};
+        if (fabs(phi_new - phi) < ({real_t})1e-14) {{ phi = phi_new; break; }}
+        phi = phi_new;
+    }}
+
+    {real_t} lam = -V / B;
+"""
+    + _INV_POSTAMBLE
+    + "}}"
+)
+
+# ===================================================================
+# Eckert IV kernels (pseudocylindrical equal-area)
+# ===================================================================
+
+_ECK4_FORWARD_SOURCE = (
+    _FWD_SIGNATURE.format(func="eck4_forward", real_t="{real_t}")
+    + """
+    {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
+    int src_north_first, int dst_north_first, int n
+) {{"""
+    + _FWD_PREAMBLE
+    + """
+    const {real_t} C_x = ({real_t})0.42223820031577120149;
+    const {real_t} C_y = ({real_t})1.32650042817700232218;
+    const {real_t} C_p = ({real_t})3.57079632679489661923;
+    {real_t} p = C_p * sin(phi);
+    {real_t} theta = phi;
+    for (int i = 0; i < 20; i++) {{
+        {real_t} sin_t = sin(theta);
+        {real_t} cos_t = cos(theta);
+        {real_t} V = theta + sin_t * cos_t + ({real_t})2.0 * sin_t - p;
+        {real_t} dtheta = -V / (({real_t})1.0 + cos(({real_t})2.0 * theta) + ({real_t})2.0 * cos_t);
+        theta += dtheta;
+        if (fabs(dtheta) < ({real_t})1e-14) break;
+    }}
+    {real_t} easting  = (C_x * lam * (({real_t})1.0 + cos(theta))) * a + x0;
+    {real_t} northing = (C_y * sin(theta)) * a + y0;
+"""
+    + _FWD_POSTAMBLE
+    + "}}"
+)
+
+_ECK4_INVERSE_SOURCE = (
+    _INV_SIGNATURE.format(func="eck4_inverse", real_t="{real_t}")
+    + """
+    {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
+    int src_north_first, int dst_north_first, int n
+) {{"""
+    + _INV_PREAMBLE
+    + """
+    const {real_t} C_x = ({real_t})0.42223820031577120149;
+    const {real_t} C_y = ({real_t})1.32650042817700232218;
+    const {real_t} C_p = ({real_t})3.57079632679489661923;
+    {real_t} theta = asin(fmin(fmax(cy / C_y, ({real_t})-1.0), ({real_t})1.0));
+    {real_t} sin_t = sin(theta);
+    {real_t} cos_t = cos(theta);
+    {real_t} phi = asin(fmin(fmax((theta + sin_t * cos_t + ({real_t})2.0 * sin_t) / C_p, ({real_t})-1.0), ({real_t})1.0));
+    {real_t} lam = cx / (C_x * (({real_t})1.0 + cos_t));
+"""
+    + _INV_POSTAMBLE
+    + "}}"
+)
+
+# ===================================================================
+# Eckert VI kernels (pseudocylindrical equal-area)
+# ===================================================================
+
+_ECK6_FORWARD_SOURCE = (
+    _FWD_SIGNATURE.format(func="eck6_forward", real_t="{real_t}")
+    + """
+    {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
+    int src_north_first, int dst_north_first, int n
+) {{"""
+    + _FWD_PREAMBLE
+    + """
+    const {real_t} C_p = ({real_t})2.57079632679489661923;
+    const {real_t} C_x = ({real_t})0.44101327172257790882;
+    const {real_t} C_y = ({real_t})0.88202654344515581764;
+    {real_t} p = C_p * sin(phi);
+    {real_t} theta = phi;
+    for (int i = 0; i < 20; i++) {{
+        {real_t} V = theta + sin(theta) - p;
+        {real_t} dtheta = -V / (({real_t})1.0 + cos(theta));
+        theta += dtheta;
+        if (fabs(dtheta) < ({real_t})1e-14) break;
+    }}
+    {real_t} easting  = (C_x * lam * (({real_t})1.0 + cos(theta))) * a + x0;
+    {real_t} northing = (C_y * theta) * a + y0;
+"""
+    + _FWD_POSTAMBLE
+    + "}}"
+)
+
+_ECK6_INVERSE_SOURCE = (
+    _INV_SIGNATURE.format(func="eck6_inverse", real_t="{real_t}")
+    + """
+    {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
+    int src_north_first, int dst_north_first, int n
+) {{"""
+    + _INV_PREAMBLE
+    + """
+    const {real_t} C_p = ({real_t})2.57079632679489661923;
+    const {real_t} C_x = ({real_t})0.44101327172257790882;
+    const {real_t} C_y = ({real_t})0.88202654344515581764;
+    {real_t} theta = cy / C_y;
+    {real_t} phi = asin(fmin(fmax((theta + sin(theta)) / C_p, ({real_t})-1.0), ({real_t})1.0));
+    {real_t} lam = cx / (C_x * (({real_t})1.0 + cos(theta)));
+"""
+    + _INV_POSTAMBLE
+    + "}}"
+)
+
+# ===================================================================
 # Oblique Stereographic kernels (double projection)
 # ===================================================================
 
@@ -1433,6 +1718,14 @@ _SOURCE_MAP = {
     ("gnom", "inverse"): (_GNOM_INVERSE_SOURCE, "gnom_inverse"),
     ("moll", "forward"): (_MOLL_FORWARD_SOURCE, "moll_forward"),
     ("moll", "inverse"): (_MOLL_INVERSE_SOURCE, "moll_inverse"),
+    ("omerc", "forward"): (_OMERC_FORWARD_SOURCE, "omerc_forward"),
+    ("omerc", "inverse"): (_OMERC_INVERSE_SOURCE, "omerc_inverse"),
+    ("krovak", "forward"): (_KROVAK_FORWARD_SOURCE, "krovak_forward"),
+    ("krovak", "inverse"): (_KROVAK_INVERSE_SOURCE, "krovak_inverse"),
+    ("eck4", "forward"): (_ECK4_FORWARD_SOURCE, "eck4_forward"),
+    ("eck4", "inverse"): (_ECK4_INVERSE_SOURCE, "eck4_inverse"),
+    ("eck6", "forward"): (_ECK6_FORWARD_SOURCE, "eck6_forward"),
+    ("eck6", "inverse"): (_ECK6_INVERSE_SOURCE, "eck6_inverse"),
     ("sterea", "forward"): (_STEREA_FORWARD_SOURCE, "sterea_forward"),
     ("sterea", "inverse"): (_STEREA_INVERSE_SOURCE, "sterea_inverse"),
     ("geos", "forward"): (_GEOS_FORWARD_SOURCE, "geos_forward"),
@@ -1791,7 +2084,46 @@ def fused_transform(
                 nn,
             )
 
-    elif projection_name == "moll":
+    elif projection_name == "omerc":
+        args = base + (
+            real_t(computed["e"]),
+            real_t(computed["B"]),
+            real_t(computed["A_norm"]),
+            real_t(computed["H"]),
+            real_t(computed["sin_gamma0"]),
+            real_t(computed["cos_gamma0"]),
+            real_t(computed["sin_gamma_c"]),
+            real_t(computed["cos_gamma_c"]),
+            real_t(computed["u_c"]),
+            real_t(computed["lam0"]),
+            real_t(computed["a"]),
+            real_t(computed["x0"]),
+            real_t(computed["y0"]),
+            snf,
+            dnf,
+            nn,
+        )
+
+    elif projection_name == "krovak":
+        args = base + (
+            real_t(computed["e"]),
+            real_t(computed["B"]),
+            real_t(computed["k"]),
+            real_t(computed["n"]),
+            real_t(computed["r_0_norm"]),
+            real_t(computed["tan_half_p"]),
+            real_t(computed["sin_alpha_c"]),
+            real_t(computed["cos_alpha_c"]),
+            real_t(computed["lam0"]),
+            real_t(computed["a"]),
+            real_t(computed["x0"]),
+            real_t(computed["y0"]),
+            snf,
+            dnf,
+            nn,
+        )
+
+    elif projection_name in ("moll", "eck4", "eck6"):
         args = base + (
             real_t(computed["lam0"]),
             real_t(computed["a"]),
