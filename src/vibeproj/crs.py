@@ -228,13 +228,13 @@ def resolve_projection_params(crs: CRS) -> ProjectionParams:
     return params
 
 
-def resolve_transform(crs_from, crs_to) -> tuple[ProjectionParams, ProjectionParams]:
+def resolve_transform(crs_from, crs_to) -> tuple[ProjectionParams, ProjectionParams, CRS, CRS]:
     """Resolve source and target CRS for a coordinate transform.
 
-    Returns (src_params, dst_params).
+    Returns (src_params, dst_params, src_crs, dst_crs).
     """
     src_crs = parse_crs_input(crs_from)
     dst_crs = parse_crs_input(crs_to)
     src_params = resolve_projection_params(src_crs)
     dst_params = resolve_projection_params(dst_crs)
-    return src_params, dst_params
+    return src_params, dst_params, src_crs, dst_crs

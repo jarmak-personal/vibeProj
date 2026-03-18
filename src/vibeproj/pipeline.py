@@ -53,6 +53,7 @@ def _try_fused(
     out_x=None,
     out_y=None,
     precision="auto",
+    stream=None,
 ):
     """Attempt fused kernel execution. Returns None if not available."""
     cp = _get_cupy()
@@ -76,6 +77,7 @@ def _try_fused(
         out_x=out_x,
         out_y=out_y,
         precision=precision,
+        stream=stream,
     )
 
 
@@ -125,7 +127,7 @@ class TransformPipeline:
         if self.mode in ("forward", "inverse"):
             self.computed = self.projection.setup(self.proj_params)
 
-    def transform(self, x, y, xp, *, out_x=None, out_y=None, precision="auto"):
+    def transform(self, x, y, xp, *, out_x=None, out_y=None, precision="auto", stream=None):
         """Execute the transform pipeline.
 
         For forward (geographic -> projected):
@@ -138,17 +140,18 @@ class TransformPipeline:
 
         out_x, out_y: optional pre-allocated output arrays (avoids allocation).
         precision: "auto", "fp32", or "fp64" — compute precision for GPU kernels.
+        stream: optional CUDA stream for async kernel execution.
         """
         if self.mode == "forward":
-            return self._forward(x, y, xp, out_x=out_x, out_y=out_y, precision=precision)
+            return self._forward(x, y, xp, out_x=out_x, out_y=out_y, precision=precision, stream=stream)
         elif self.mode == "inverse":
-            return self._inverse(x, y, xp, out_x=out_x, out_y=out_y, precision=precision)
+            return self._inverse(x, y, xp, out_x=out_x, out_y=out_y, precision=precision, stream=stream)
         elif self.mode == "proj_to_proj":
             return self._proj_to_proj(x, y, xp)
         else:
             return x, y  # longlat -> longlat identity
 
-    def _forward(self, arg1, arg2, xp, *, out_x=None, out_y=None, precision="auto"):
+    def _forward(self, arg1, arg2, xp, *, out_x=None, out_y=None, precision="auto", stream=None):
         """Geographic -> Projected.
 
         Input follows source CRS axis order (lat/lon for EPSG:4326).
@@ -167,6 +170,7 @@ class TransformPipeline:
             out_x=out_x,
             out_y=out_y,
             precision=precision,
+            stream=stream,
         )
         if fused is not None:
             return fused
@@ -202,7 +206,7 @@ class TransformPipeline:
             return northing, easting
         return easting, northing
 
-    def _inverse(self, arg1, arg2, xp, *, out_x=None, out_y=None, precision="auto"):
+    def _inverse(self, arg1, arg2, xp, *, out_x=None, out_y=None, precision="auto", stream=None):
         """Projected -> Geographic.
 
         Input follows source CRS axis order.
@@ -221,6 +225,7 @@ class TransformPipeline:
             out_x=out_x,
             out_y=out_y,
             precision=precision,
+            stream=stream,
         )
         if fused is not None:
             return fused

@@ -65,7 +65,7 @@ def test_can_fuse_unsupported():
 
 def _run_forward_gpu_vs_cpu(crs_from, crs_to, lat, lon, atol=1e-4):
     """Run transform on GPU (fused) and CPU (numpy), compare results."""
-    t = Transformer.from_crs(crs_from, crs_to)
+    t = Transformer.from_crs(crs_from, crs_to, always_xy=False)
 
     # CPU path (NumPy)
     lat_np = np.asarray(lat, dtype=np.float64)
@@ -109,12 +109,12 @@ def test_tmerc_inverse_fused_matches_numpy(min_corner, max_corner, crs_to):
     """Forward on CPU to get projected coords, then inverse on GPU vs CPU."""
     lat, lon = _make_grid(min_corner, max_corner)
 
-    t = Transformer.from_crs("EPSG:4326", crs_to)
+    t = Transformer.from_crs("EPSG:4326", crs_to, always_xy=False)
     # Get projected coordinates via CPU
     proj_x, proj_y = t.transform(np.asarray(lat), np.asarray(lon))
 
     # Inverse: GPU vs CPU
-    t_inv = Transformer.from_crs(crs_to, "EPSG:4326")
+    t_inv = Transformer.from_crs(crs_to, "EPSG:4326", always_xy=False)
 
     cpu_lat, cpu_lon = t_inv.transform(np.asarray(proj_x), np.asarray(proj_y))
 
@@ -129,7 +129,7 @@ def test_tmerc_fused_roundtrip():
     lat = cp.array([48.8566, 40.7128, -33.8587], dtype=cp.float64)
     lon = cp.array([2.3522, -74.006, 151.214], dtype=cp.float64)
 
-    t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32631", always_xy=False)
     x, y = t.transform(lat, lon)
     lat2, lon2 = t.transform(x, y, direction="INVERSE")
 
@@ -149,7 +149,7 @@ def test_webmerc_forward_fused_matches_numpy():
 
 
 def test_webmerc_inverse_fused_matches_numpy():
-    t = Transformer.from_crs("EPSG:3857", "EPSG:4326")
+    t = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=False)
 
     x_np = np.array([-8238310.24, -14226.63])
     y_np = np.array([4970071.58, 6711533.71])
@@ -167,7 +167,7 @@ def test_webmerc_fused_roundtrip():
     lat = cp.array([40.0, -30.0, 60.0], dtype=cp.float64)
     lon = cp.array([-100.0, 20.0, 140.0], dtype=cp.float64)
 
-    t = Transformer.from_crs("EPSG:4326", "EPSG:3857")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=False)
     x, y = t.transform(lat, lon)
     lat2, lon2 = t.transform(x, y, direction="INVERSE")
 
@@ -182,7 +182,7 @@ def test_webmerc_fused_roundtrip():
 
 def test_tmerc_ds_fp64_equivalent():
     """Double-single (ds) fp32 arithmetic matches fp64 to ~10^-8 meters."""
-    t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32631", always_xy=False)
     rng = np.random.default_rng(42)
     lat = cp.asarray(rng.uniform(45, 55, 10_000), dtype=cp.float64)
     lon = cp.asarray(rng.uniform(0, 6, 10_000), dtype=cp.float64)
@@ -213,7 +213,7 @@ def test_tmerc_fused_large_array():
     lat = cp.asarray(rng.uniform(30, 60, 1_000_000), dtype=cp.float64)
     lon = cp.asarray(rng.uniform(-10, 10, 1_000_000), dtype=cp.float64)
 
-    t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32631", always_xy=False)
     x, y = t.transform(lat, lon)
 
     assert x.shape == (1_000_000,)
@@ -237,7 +237,7 @@ def test_merc_forward_fused_matches_numpy():
 def test_merc_fused_roundtrip():
     lat = cp.array([40.0, -30.0, 60.0], dtype=cp.float64)
     lon = cp.array([-74.0, 20.0, 140.0], dtype=cp.float64)
-    t = Transformer.from_crs("EPSG:4326", "EPSG:3395")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:3395", always_xy=False)
     x, y = t.transform(lat, lon)
     lat2, lon2 = t.transform(x, y, direction="INVERSE")
     assert_allclose(cp.asnumpy(lat2), cp.asnumpy(lat), atol=1e-7)
@@ -258,7 +258,7 @@ def test_lcc_forward_fused_matches_numpy():
 def test_lcc_fused_roundtrip():
     lat = cp.array([48.8566, 43.6], dtype=cp.float64)
     lon = cp.array([2.3522, 1.44], dtype=cp.float64)
-    t = Transformer.from_crs("EPSG:4326", "EPSG:2154")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:2154", always_xy=False)
     x, y = t.transform(lat, lon)
     lat2, lon2 = t.transform(x, y, direction="INVERSE")
     assert_allclose(cp.asnumpy(lat2), cp.asnumpy(lat), atol=1e-7)
@@ -279,7 +279,7 @@ def test_aea_forward_fused_matches_numpy():
 def test_aea_fused_roundtrip():
     lat = cp.array([40.0, 35.0], dtype=cp.float64)
     lon = cp.array([-96.0, -100.0], dtype=cp.float64)
-    t = Transformer.from_crs("EPSG:4326", "EPSG:5070")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=False)
     x, y = t.transform(lat, lon)
     lat2, lon2 = t.transform(x, y, direction="INVERSE")
     assert_allclose(cp.asnumpy(lat2), cp.asnumpy(lat), atol=1e-7)
@@ -300,7 +300,7 @@ def test_stere_forward_fused_matches_numpy():
 def test_stere_fused_roundtrip():
     lat = cp.array([-75.0, -80.0], dtype=cp.float64)
     lon = cp.array([30.0, -60.0], dtype=cp.float64)
-    t = Transformer.from_crs("EPSG:4326", "EPSG:3031")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:3031", always_xy=False)
     x, y = t.transform(lat, lon)
     lat2, lon2 = t.transform(x, y, direction="INVERSE")
     assert_allclose(cp.asnumpy(lat2), cp.asnumpy(lat), atol=1e-6)
@@ -321,7 +321,7 @@ def test_laea_forward_fused_matches_numpy():
 def test_laea_fused_roundtrip():
     lat = cp.array([52.52, 48.86], dtype=cp.float64)
     lon = cp.array([13.405, 2.35], dtype=cp.float64)
-    t = Transformer.from_crs("EPSG:4326", "EPSG:3035")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:3035", always_xy=False)
     x, y = t.transform(lat, lon)
     lat2, lon2 = t.transform(x, y, direction="INVERSE")
     assert_allclose(cp.asnumpy(lat2), cp.asnumpy(lat), atol=1e-7)
@@ -342,7 +342,7 @@ def test_eqc_forward_fused_matches_numpy():
 def test_eqc_fused_roundtrip():
     lat = cp.array([40.0, -30.0], dtype=cp.float64)
     lon = cp.array([-100.0, 20.0], dtype=cp.float64)
-    t = Transformer.from_crs("EPSG:4326", "EPSG:4087")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:4087", always_xy=False)
     x, y = t.transform(lat, lon)
     lat2, lon2 = t.transform(x, y, direction="INVERSE")
     assert_allclose(cp.asnumpy(lat2), cp.asnumpy(lat), atol=1e-7)
@@ -363,7 +363,7 @@ def test_eqearth_forward_fused_matches_numpy():
 def test_eqearth_fused_roundtrip():
     lat = cp.array([40.0, -30.0, 60.0], dtype=cp.float64)
     lon = cp.array([-100.0, 20.0, 140.0], dtype=cp.float64)
-    t = Transformer.from_crs("EPSG:4326", "EPSG:8857")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:8857", always_xy=False)
     x, y = t.transform(lat, lon)
     lat2, lon2 = t.transform(x, y, direction="INVERSE")
     assert_allclose(cp.asnumpy(lat2), cp.asnumpy(lat), atol=1e-6)
@@ -384,7 +384,7 @@ def test_cea_forward_fused_matches_numpy():
 def test_cea_fused_roundtrip():
     lat = cp.array([40.0, -30.0, 60.0], dtype=cp.float64)
     lon = cp.array([-100.0, 20.0, 140.0], dtype=cp.float64)
-    t = Transformer.from_crs("EPSG:4326", "EPSG:6933")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:6933", always_xy=False)
     x, y = t.transform(lat, lon)
     lat2, lon2 = t.transform(x, y, direction="INVERSE")
     assert_allclose(cp.asnumpy(lat2), cp.asnumpy(lat), atol=1e-6)
@@ -461,7 +461,7 @@ def test_gnom_fused_roundtrip():
 
 def test_transform_buffers_basic():
     """transform_buffers() fast path — no scalar handling."""
-    t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32631", always_xy=False)
     lat = cp.array([48.8566, 40.7128], dtype=cp.float64)
     lon = cp.array([2.3522, -74.006], dtype=cp.float64)
 
@@ -486,7 +486,7 @@ def test_transform_buffers_basic():
 
 def test_transform_buffers_roundtrip():
     """transform_buffers forward then inverse with pre-allocated outputs."""
-    t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32631", always_xy=False)
     lat = cp.array([48.8566, 40.7128, -33.8587], dtype=cp.float64)
     lon = cp.array([2.3522, -74.006, 151.214], dtype=cp.float64)
 
@@ -518,7 +518,7 @@ def test_transform_buffers_vibeSpatial_pattern():
     device_y = cp.asarray(rng.uniform(-10, 10, n), dtype=cp.float64)  # lon
 
     # Create transformer once (cached by vibeSpatial)
-    t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32631", always_xy=False)
 
     # Pre-allocate output (vibeSpatial creates new FamilyBuffer)
     new_x = cp.empty(n, dtype=cp.float64)
@@ -573,7 +573,7 @@ def test_sterea_forward_fused_matches_numpy():
 
 
 def test_sterea_fused_roundtrip():
-    t = Transformer.from_crs("EPSG:4326", "EPSG:28992")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:28992", always_xy=False)
     lat = cp.array([52.15, 52.10], dtype=cp.float64)
     lon = cp.array([5.38, 5.39], dtype=cp.float64)
     x, y = t.transform(lat, lon)

@@ -123,7 +123,7 @@ def main():
     results = {}
 
     for label, src, dst in projections:
-        t = Transformer.from_crs(src, dst)
+        t = Transformer.from_crs(src, dst, always_xy=False)
 
         # Use the right input for each source CRS
         if src == "EPSG:4326":
@@ -154,7 +154,7 @@ def main():
         print()
         print("── Step 4: Zero-copy transform_buffers() API ──")
 
-        t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+        t = Transformer.from_crs("EPSG:4326", "EPSG:32631", always_xy=False)
         out_x = cp.empty(n_coords, dtype=cp.float64)
         out_y = cp.empty(n_coords, dtype=cp.float64)
 
@@ -174,8 +174,8 @@ def main():
     print()
     print("── Step 5: Roundtrip accuracy verification ──")
 
-    t_fwd = Transformer.from_crs("EPSG:4326", "EPSG:32631")
-    t_inv = Transformer.from_crs("EPSG:32631", "EPSG:4326")
+    t_fwd = Transformer.from_crs("EPSG:4326", "EPSG:32631", always_xy=False)
+    t_inv = Transformer.from_crs("EPSG:32631", "EPSG:4326", always_xy=False)
 
     proj_x, proj_y = t_fwd.transform(lat_gpu, lon_gpu)
     lat2, lon2 = t_inv.transform(proj_x, proj_y)

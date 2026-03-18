@@ -1497,6 +1497,30 @@ _DS_SOURCE_MAP = {
 # ===================================================================
 
 
+def compile_kernels(projections=None, *, precision="auto"):
+    """Pre-compile fused NVRTC kernels to eliminate first-call latency.
+
+    Parameters
+    ----------
+    projections : list of str, optional
+        Projection names to compile (e.g. ["tmerc", "webmerc"]).
+        If None, compiles all supported projections.
+    precision : str
+        Compute precision: "auto"/"fp64"/"fp32"/"ds".
+    """
+    compute_dtype = {"auto": "float64", "fp64": "float64", "fp32": "float32", "ds": "ds"}.get(
+        precision, "float64"
+    )
+    if projections is None:
+        targets = list(_SUPPORTED)
+    else:
+        targets = [
+            (p, d) for p in projections for d in ("forward", "inverse") if (p, d) in _SUPPORTED
+        ]
+    for proj_name, direction in targets:
+        _get_kernel(proj_name, direction, compute_dtype)
+
+
 def fused_transform(
     arg1,
     arg2,
@@ -1510,6 +1534,7 @@ def fused_transform(
     out_x=None,
     out_y=None,
     precision: str = "auto",
+    stream=None,
 ) -> tuple | None:
     """Execute a fused GPU kernel for the full transform pipeline.
 
@@ -1839,5 +1864,9 @@ def fused_transform(
     else:
         return None
 
-    kernel((grid,), (block,), args)
+    if stream is not None:
+        with stream:
+            kernel((grid,), (block,), args)
+    else:
+        kernel((grid,), (block,), args)
     return out_x, out_y

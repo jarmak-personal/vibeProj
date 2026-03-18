@@ -22,7 +22,7 @@ def test_wgs84_to_utm_one_point():
     pp = PyProjTransformer.from_crs("EPSG:4326", "EPSG:32756")
     expected_x, expected_y = pp.transform(lat, lon)
 
-    t = Transformer.from_crs("EPSG:4326", "EPSG:32756")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32756", always_xy=False)
     x, y = t.transform(lat, lon)
 
     assert_allclose(x, expected_x, atol=1e-4)
@@ -49,7 +49,7 @@ def test_wgs84_to_utm_grid(min_corner, max_corner, crs_to):
     pp = PyProjTransformer.from_crs("EPSG:4326", crs_to)
     exp_x, exp_y = pp.transform(lat, lon)
 
-    t = Transformer.from_crs("EPSG:4326", crs_to)
+    t = Transformer.from_crs("EPSG:4326", crs_to, always_xy=False)
     vp_x, vp_y = t.transform(lat, lon)
 
     assert_allclose(vp_x, exp_x, atol=1e-4)
@@ -66,7 +66,7 @@ def test_wgs84_to_utm_grid(min_corner, max_corner, crs_to):
 def test_utm_inverse_constructor():
     """Build transformer in UTM->WGS84 order."""
     pp = PyProjTransformer.from_crs("EPSG:32631", "EPSG:4326")
-    t = Transformer.from_crs("EPSG:32631", "EPSG:4326")
+    t = Transformer.from_crs("EPSG:32631", "EPSG:4326", always_xy=False)
 
     x_in, y_in = 500000.0, 5460836.5
     exp = pp.transform(x_in, y_in)
@@ -83,7 +83,7 @@ def test_utm_inverse_constructor():
 
 def test_web_mercator_forward():
     pp = PyProjTransformer.from_crs("EPSG:4326", "EPSG:3857")
-    t = Transformer.from_crs("EPSG:4326", "EPSG:3857")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=False)
 
     lat, lon = np.array([40.7128, 51.5074]), np.array([-74.0060, -0.1278])
     exp_x, exp_y = pp.transform(lat, lon)
@@ -95,7 +95,7 @@ def test_web_mercator_forward():
 
 def test_web_mercator_inverse():
     pp = PyProjTransformer.from_crs("EPSG:3857", "EPSG:4326")
-    t = Transformer.from_crs("EPSG:3857", "EPSG:4326")
+    t = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=False)
 
     x, y = np.array([-8238310.24]), np.array([4970071.58])
     exp = pp.transform(x, y)
@@ -113,7 +113,7 @@ def test_web_mercator_inverse():
 def test_lcc_france():
     """EPSG:2154 — France Lambert 93."""
     pp = PyProjTransformer.from_crs("EPSG:4326", "EPSG:2154")
-    t = Transformer.from_crs("EPSG:4326", "EPSG:2154")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:2154", always_xy=False)
 
     lat, lon = np.array([48.8566]), np.array([2.3522])
     exp_x, exp_y = pp.transform(lat, lon)
@@ -124,7 +124,7 @@ def test_lcc_france():
 
 
 def test_lcc_roundtrip():
-    t = Transformer.from_crs("EPSG:4326", "EPSG:2154")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:2154", always_xy=False)
 
     lat, lon = 48.8566, 2.3522
     x, y = t.transform(lat, lon)
@@ -142,7 +142,7 @@ def test_lcc_roundtrip():
 def test_albers_conus():
     """EPSG:5070 — NAD83 Conus Albers."""
     pp = PyProjTransformer.from_crs("EPSG:4326", "EPSG:5070")
-    t = Transformer.from_crs("EPSG:4326", "EPSG:5070")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=False)
 
     lat, lon = np.array([40.0]), np.array([-96.0])
     exp_x, exp_y = pp.transform(lat, lon)
@@ -153,7 +153,7 @@ def test_albers_conus():
 
 
 def test_albers_roundtrip():
-    t = Transformer.from_crs("EPSG:4326", "EPSG:5070")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=False)
     lat, lon = 40.0, -96.0
     x, y = t.transform(lat, lon)
     lat2, lon2 = t.transform(x, y, direction="INVERSE")
@@ -170,7 +170,7 @@ def test_albers_roundtrip():
 def test_laea_europe():
     """EPSG:3035 — ETRS89 / LAEA Europe."""
     pp = PyProjTransformer.from_crs("EPSG:4326", "EPSG:3035")
-    t = Transformer.from_crs("EPSG:4326", "EPSG:3035")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:3035", always_xy=False)
 
     lat, lon = np.array([52.5200]), np.array([13.4050])
     exp_x, exp_y = pp.transform(lat, lon)
@@ -181,7 +181,7 @@ def test_laea_europe():
 
 
 def test_laea_roundtrip():
-    t = Transformer.from_crs("EPSG:4326", "EPSG:3035")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:3035", always_xy=False)
     lat, lon = 52.52, 13.405
     x, y = t.transform(lat, lon)
     lat2, lon2 = t.transform(x, y, direction="INVERSE")
@@ -198,7 +198,7 @@ def test_laea_roundtrip():
 def test_polar_stereo_antarctic():
     """EPSG:3031 — Antarctic Polar Stereographic."""
     pp = PyProjTransformer.from_crs("EPSG:4326", "EPSG:3031")
-    t = Transformer.from_crs("EPSG:4326", "EPSG:3031")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:3031", always_xy=False)
 
     lat, lon = np.array([-75.0]), np.array([0.0])
     exp_x, exp_y = pp.transform(lat, lon)
@@ -209,7 +209,7 @@ def test_polar_stereo_antarctic():
 
 
 def test_polar_stereo_roundtrip():
-    t = Transformer.from_crs("EPSG:4326", "EPSG:3031")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:3031", always_xy=False)
     lat, lon = -75.0, 30.0
     x, y = t.transform(lat, lon)
     lat2, lon2 = t.transform(x, y, direction="INVERSE")
@@ -224,20 +224,20 @@ def test_polar_stereo_roundtrip():
 
 
 def test_scalar_input():
-    t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32631", always_xy=False)
     x, y = t.transform(49.0, 2.0)
     assert isinstance(x, float)
     assert isinstance(y, float)
 
 
 def test_list_input():
-    t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32631", always_xy=False)
     x, y = t.transform([49.0, 50.0], [2.0, 3.0])
     assert len(x) == 2
 
 
 def test_direction_validation():
-    t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32631", always_xy=False)
     with pytest.raises(ValueError, match="Invalid direction"):
         t.transform(49.0, 2.0, direction="BACKWARD")
 
@@ -250,7 +250,7 @@ def test_direction_validation():
 def test_merc_forward():
     """EPSG:3395 — World Mercator."""
     pp = PyProjTransformer.from_crs("EPSG:4326", "EPSG:3395")
-    t = Transformer.from_crs("EPSG:4326", "EPSG:3395")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:3395", always_xy=False)
 
     lat, lon = np.array([40.7128, 51.5074]), np.array([-74.0060, -0.1278])
     exp_x, exp_y = pp.transform(lat, lon)
@@ -261,7 +261,7 @@ def test_merc_forward():
 
 
 def test_merc_roundtrip():
-    t = Transformer.from_crs("EPSG:4326", "EPSG:3395")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:3395", always_xy=False)
     lat, lon = 40.7128, -74.0060
     x, y = t.transform(lat, lon)
     lat2, lon2 = t.transform(x, y, direction="INVERSE")
@@ -278,7 +278,7 @@ def test_merc_roundtrip():
 def test_eqc_forward():
     """EPSG:4087 — WGS 84 / World Equidistant Cylindrical."""
     pp = PyProjTransformer.from_crs("EPSG:4326", "EPSG:4087")
-    t = Transformer.from_crs("EPSG:4326", "EPSG:4087")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:4087", always_xy=False)
 
     lat, lon = np.array([48.8566, -33.8688]), np.array([2.3522, 151.2093])
     exp_x, exp_y = pp.transform(lat, lon)
@@ -289,7 +289,7 @@ def test_eqc_forward():
 
 
 def test_eqc_roundtrip():
-    t = Transformer.from_crs("EPSG:4326", "EPSG:4087")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:4087", always_xy=False)
     lat, lon = 48.8566, 2.3522
     x, y = t.transform(lat, lon)
     lat2, lon2 = t.transform(x, y, direction="INVERSE")
@@ -309,7 +309,7 @@ def test_eqearth_forward():
     With authalic latitude conversion, results now match pyproj.
     """
     pp = PyProjTransformer.from_crs("EPSG:4326", "EPSG:8857")
-    t = Transformer.from_crs("EPSG:4326", "EPSG:8857")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:8857", always_xy=False)
 
     lat, lon = np.array([40.0, -30.0]), np.array([-74.0, 20.0])
     exp_x, exp_y = pp.transform(lat, lon)
@@ -320,7 +320,7 @@ def test_eqearth_forward():
 
 
 def test_eqearth_roundtrip():
-    t = Transformer.from_crs("EPSG:4326", "EPSG:8857")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:8857", always_xy=False)
     lat, lon = 40.0, -74.0
     x, y = t.transform(lat, lon)
     lat2, lon2 = t.transform(x, y, direction="INVERSE")
@@ -337,7 +337,7 @@ def test_eqearth_roundtrip():
 def test_cea_forward():
     """EPSG:6933 — WGS 84 / NSIDC EASE-Grid 2.0 Global."""
     pp = PyProjTransformer.from_crs("EPSG:4326", "EPSG:6933")
-    t = Transformer.from_crs("EPSG:4326", "EPSG:6933")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:6933", always_xy=False)
 
     lat, lon = np.array([45.0, -20.0]), np.array([10.0, -60.0])
     exp_x, exp_y = pp.transform(lat, lon)
@@ -348,7 +348,7 @@ def test_cea_forward():
 
 
 def test_cea_roundtrip():
-    t = Transformer.from_crs("EPSG:4326", "EPSG:6933")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:6933", always_xy=False)
     lat, lon = 45.0, 10.0
     x, y = t.transform(lat, lon)
     lat2, lon2 = t.transform(x, y, direction="INVERSE")
@@ -369,7 +369,7 @@ def test_sterea_forward():
     to isolate projection math from datum transforms.
     """
     pp = PyProjTransformer.from_crs("EPSG:4289", "EPSG:28992")
-    t = Transformer.from_crs("EPSG:4326", "EPSG:28992")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:28992", always_xy=False)
 
     lat, lon = np.array([52.3676]), np.array([4.9041])
     exp_x, exp_y = pp.transform(lat, lon)
@@ -380,7 +380,7 @@ def test_sterea_forward():
 
 
 def test_sterea_roundtrip():
-    t = Transformer.from_crs("EPSG:4326", "EPSG:28992")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:28992", always_xy=False)
     lat, lon = 52.3676, 4.9041
     x, y = t.transform(lat, lon)
     lat2, lon2 = t.transform(x, y, direction="INVERSE")
@@ -666,7 +666,7 @@ def test_proj_to_proj():
     """Projected -> Projected via geographic intermediate."""
     pp_src = PyProjTransformer.from_crs("EPSG:32631", "EPSG:4326")
     pp_dst = PyProjTransformer.from_crs("EPSG:4326", "EPSG:3857")
-    t = Transformer.from_crs("EPSG:32631", "EPSG:3857")
+    t = Transformer.from_crs("EPSG:32631", "EPSG:3857", always_xy=False)
 
     x_in = np.array([500000.0, 600000.0])
     y_in = np.array([5400000.0, 5500000.0])
@@ -684,7 +684,7 @@ def test_proj_to_proj():
 
 def test_longlat_to_longlat():
     """Geographic -> Geographic identity transform."""
-    t = Transformer.from_crs("EPSG:4326", "EPSG:4326")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:4326", always_xy=False)
     lat = np.array([40.0, -30.0, 60.0])
     lon = np.array([-74.0, 20.0, 140.0])
     lat2, lon2 = t.transform(lat, lon)
@@ -698,7 +698,193 @@ def test_longlat_to_longlat():
 
 
 def test_empty_array():
-    t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32631", always_xy=False)
     x, y = t.transform(np.array([]), np.array([]))
     assert len(x) == 0
     assert len(y) == 0
+
+
+# ---------------------------------------------------------------------------
+# always_xy=True (new default)
+# ---------------------------------------------------------------------------
+
+
+def test_always_xy_true_default():
+    """Default always_xy=True: x=lon, y=lat for geographic CRS."""
+    pp = PyProjTransformer.from_crs("EPSG:4326", "EPSG:32631", always_xy=True)
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32631")  # always_xy=True is default
+
+    lon, lat = 2.0, 49.0
+    exp_x, exp_y = pp.transform(lon, lat)
+    vp_x, vp_y = t.transform(lon, lat)
+
+    assert_allclose(vp_x, exp_x, atol=1e-4)
+    assert_allclose(vp_y, exp_y, atol=1e-4)
+
+
+def test_always_xy_true_inverse():
+    """always_xy=True inverse: returns (lon, lat)."""
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32631")  # always_xy=True default
+    lon, lat = 2.3522, 48.8566
+    x, y = t.transform(lon, lat)
+    lon2, lat2 = t.transform(x, y, direction="INVERSE")
+
+    assert_allclose(lon2, lon, atol=1e-7)
+    assert_allclose(lat2, lat, atol=1e-7)
+
+
+# ---------------------------------------------------------------------------
+# __repr__
+# ---------------------------------------------------------------------------
+
+
+def test_repr():
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+    r = repr(t)
+    assert "EPSG:4326" in r
+    assert "EPSG:32631" in r
+    assert "tmerc" in r
+
+
+def test_repr_proj_to_proj():
+    t = Transformer.from_crs("EPSG:32631", "EPSG:3857")
+    r = repr(t)
+    assert "EPSG:32631" in r
+    assert "EPSG:3857" in r
+
+
+# ---------------------------------------------------------------------------
+# list_projections
+# ---------------------------------------------------------------------------
+
+
+def test_list_projections():
+    import vibeproj
+
+    projs = vibeproj.list_projections()
+    assert "tmerc" in projs
+    assert "webmerc" in projs
+    assert projs["tmerc"]["fused"] is True
+    assert len(projs["tmerc"]["methods"]) > 0
+
+
+# ---------------------------------------------------------------------------
+# is_fused
+# ---------------------------------------------------------------------------
+
+
+def test_is_fused():
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+    assert t.is_fused is True
+
+
+def test_is_fused_longlat():
+    t = Transformer.from_crs("EPSG:4326", "EPSG:4326")
+    assert t.is_fused is False
+
+
+# ---------------------------------------------------------------------------
+# Pickle serialization
+# ---------------------------------------------------------------------------
+
+
+def test_pickle_roundtrip():
+    import pickle
+
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+    lon, lat = 2.3522, 48.8566
+    x1, y1 = t.transform(lon, lat)
+
+    t2 = pickle.loads(pickle.dumps(t))
+    x2, y2 = t2.transform(lon, lat)
+
+    assert_allclose(x2, x1, atol=1e-10)
+    assert_allclose(y2, y1, atol=1e-10)
+
+
+def test_pickle_preserves_always_xy():
+    import pickle
+
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32631", always_xy=False)
+    t2 = pickle.loads(pickle.dumps(t))
+    assert t2._always_xy is False
+
+
+# ---------------------------------------------------------------------------
+# Z-coordinate passthrough
+# ---------------------------------------------------------------------------
+
+
+def test_z_passthrough_scalar():
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+    lon, lat, z = 2.0, 49.0, 100.0
+    x, y, z_out = t.transform(lon, lat, z)
+    assert isinstance(z_out, float)
+    assert z_out == 100.0
+
+
+def test_z_passthrough_array():
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+    lon = np.array([2.0, 3.0])
+    lat = np.array([49.0, 50.0])
+    z = np.array([100.0, 200.0])
+    x, y, z_out = t.transform(lon, lat, z)
+    assert_allclose(z_out, z)
+
+
+def test_z_none_returns_two_tuple():
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+    result = t.transform(2.0, 49.0)
+    assert len(result) == 2
+
+
+def test_z_passthrough_transform_buffers():
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+    lon = np.array([2.0, 3.0], dtype=np.float64)
+    lat = np.array([49.0, 50.0], dtype=np.float64)
+    z = np.array([100.0, 200.0], dtype=np.float64)
+    x, y, z_out = t.transform_buffers(lon, lat, z)
+    assert z_out is z  # same object, zero-copy
+
+
+# ---------------------------------------------------------------------------
+# NaN / inf output warning
+# ---------------------------------------------------------------------------
+
+
+def test_nan_output_warns():
+    """NaN input propagates to NaN output and triggers a warning."""
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+    with pytest.warns(UserWarning, match="non-finite"):
+        t.transform(float("nan"), 49.0)
+
+
+# ---------------------------------------------------------------------------
+# Datum shift warning
+# ---------------------------------------------------------------------------
+
+
+def test_datum_warning():
+    """EPSG:27700 (OSGB 1936 / Airy 1830) vs EPSG:4326 (WGS84) — different ellipsoids."""
+    with pytest.warns(UserWarning, match="datum"):
+        Transformer.from_crs("EPSG:4326", "EPSG:27700")
+
+
+def test_no_datum_warning_same_ellipsoid():
+    """EPSG:4326 → EPSG:32631 — both WGS84, no warning."""
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        Transformer.from_crs("EPSG:4326", "EPSG:32631")
+
+
+# ---------------------------------------------------------------------------
+# compile / warm_up
+# ---------------------------------------------------------------------------
+
+
+def test_compile():
+    """Transformer.compile() should not raise."""
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+    t.compile()  # no-op on CPU, but should not raise

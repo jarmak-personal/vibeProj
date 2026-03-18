@@ -67,13 +67,13 @@ uv sync --extra cu13            # CUDA 13
 ```python
 from vibeproj import Transformer
 
-# Default: native CRS axis order (matches pyproj)
+# Default: always_xy=True — (lon, lat) order, matches shapely/geopandas
 t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
-x, y = t.transform(49.0, 2.0)           # (lat, lon) in, (easting, northing) out
-
-# always_xy=True: (lon, lat) order — matches shapely/geopandas
-t = Transformer.from_crs("EPSG:4326", "EPSG:32631", always_xy=True)
 x, y = t.transform(2.0, 49.0)           # (lon, lat) in, (easting, northing) out
+
+# always_xy=False: native CRS axis order (matches pyproj default)
+t = Transformer.from_crs("EPSG:4326", "EPSG:32631", always_xy=False)
+x, y = t.transform(49.0, 2.0)           # (lat, lon) in, (easting, northing) out
 ```
 
 ### vibeSpatial Integration (zero-copy GPU)
