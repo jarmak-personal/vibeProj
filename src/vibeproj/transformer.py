@@ -52,7 +52,7 @@ class Transformer:
         self._src_label = f"EPSG:{src_epsg}" if src_epsg else str(crs_from)
         self._dst_label = f"EPSG:{dst_epsg}" if dst_epsg else str(crs_to)
 
-        # Datum shift detection: warn when ellipsoids differ significantly
+        # Datum shift detection and Helmert extraction
         src_ell = src_crs.ellipsoid
         dst_ell = dst_crs.ellipsoid
         self._cross_datum = (
@@ -60,16 +60,22 @@ class Transformer:
             and dst_ell is not None
             and abs(src_ell.semi_major_metre - dst_ell.semi_major_metre) > 1.0
         )
+        self._helmert = None
         if self._cross_datum:
-            src_datum = src_crs.datum.name if src_crs.datum else "unknown"
-            dst_datum = dst_crs.datum.name if dst_crs.datum else "unknown"
-            warnings.warn(
-                f"Source and destination CRS use different datums "
-                f"({src_datum} \u2192 {dst_datum}). vibeProj performs projection "
-                f"math only \u2014 datum shifts (Helmert, NTv2) are not applied. "
-                f"Results may differ from pyproj by meters to hundreds of meters.",
-                stacklevel=2,
-            )
+            from vibeproj.crs import extract_helmert
+
+            self._helmert = extract_helmert(src_crs, dst_crs)
+            if self._helmert is None:
+                # No Helmert available (grid-only datum shift)
+                src_datum = src_crs.datum.name if src_crs.datum else "unknown"
+                dst_datum = dst_crs.datum.name if dst_crs.datum else "unknown"
+                warnings.warn(
+                    f"Source and destination CRS use different datums "
+                    f"({src_datum} \u2192 {dst_datum}). No Helmert transformation "
+                    f"available \u2014 grid-based shifts (NTv2) are not yet supported. "
+                    f"Results may differ from pyproj by meters to hundreds of meters.",
+                    stacklevel=2,
+                )
 
         # always_xy=True forces (x, y) = (lon, lat) / (easting, northing) order,
         # matching shapely/geopandas conventions regardless of CRS native axis order.
@@ -77,7 +83,7 @@ class Transformer:
             src_params = dataclasses.replace(src_params, north_first=False)
             dst_params = dataclasses.replace(dst_params, north_first=False)
 
-        self._pipeline = TransformPipeline(src_params, dst_params)
+        self._pipeline = TransformPipeline(src_params, dst_params, helmert=self._helmert)
         self._src_params = src_params
         self._dst_params = dst_params
         # Build the inverse pipeline lazily
@@ -132,10 +138,10 @@ class Transformer:
             "degraded — no datum shift applied" — different datums; results
             may differ from pyproj by meters to hundreds of meters.
         """
-        if self._cross_datum:
+        if self._cross_datum and self._helmert is None:
             return "degraded \u2014 no datum shift applied"
-        if self._pipeline.mode == "longlat_to_longlat":
-            return "sub-millimeter"
+        if self._cross_datum and self._helmert is not None:
+            return "sub-meter"
         return "sub-millimeter"
 
     def compile(self, *, precision="auto"):
@@ -155,6 +161,10 @@ class Transformer:
         elif pipeline.mode == "proj_to_proj":
             names = [pipeline.src_projection.name, pipeline.dst_projection.name]
             compile_kernels(names, precision=precision)
+        if self._helmert is not None:
+            from vibeproj.fused_kernels import compile_helmert_kernel
+
+            compile_helmert_kernel()
 
     def __getstate__(self):
         return {
@@ -219,7 +229,10 @@ class Transformer:
             rx, ry = self._pipeline.transform(x, y, xp)
         else:
             if self._inv_pipeline is None:
-                self._inv_pipeline = TransformPipeline(self._dst_params, self._src_params)
+                inv_helmert = self._helmert.inverted() if self._helmert else None
+                self._inv_pipeline = TransformPipeline(
+                    self._dst_params, self._src_params, helmert=inv_helmert
+                )
             rx, ry = self._inv_pipeline.transform(x, y, xp)
 
         # Check for non-finite output values
@@ -287,7 +300,10 @@ class Transformer:
             pipeline = self._pipeline
         else:
             if self._inv_pipeline is None:
-                self._inv_pipeline = TransformPipeline(self._dst_params, self._src_params)
+                inv_helmert = self._helmert.inverted() if self._helmert else None
+                self._inv_pipeline = TransformPipeline(
+                    self._dst_params, self._src_params, helmert=inv_helmert
+                )
             pipeline = self._inv_pipeline
 
         rx, ry = pipeline.transform(
@@ -355,7 +371,10 @@ class Transformer:
             pipeline = self._pipeline
         else:
             if self._inv_pipeline is None:
-                self._inv_pipeline = TransformPipeline(self._dst_params, self._src_params)
+                inv_helmert = self._helmert.inverted() if self._helmert else None
+                self._inv_pipeline = TransformPipeline(
+                    self._dst_params, self._src_params, helmert=inv_helmert
+                )
             pipeline = self._inv_pipeline
 
         out_x = np.empty(n, dtype=np.float64)

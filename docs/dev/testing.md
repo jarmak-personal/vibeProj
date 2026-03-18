@@ -26,6 +26,7 @@ uv run pytest tests/test_transformer.py::test_wgs84_to_utm_one_point
 | `tests/test_crs.py` | CRS parsing and resolution | No |
 | `tests/test_transformer.py` | CPU-path transforms for all 20 projections | No |
 | `tests/test_fused_kernels.py` | GPU fused kernel correctness | Yes |
+| `tests/test_helmert.py` | Helmert datum shift math, extraction, cross-datum integration | No |
 
 GPU tests are automatically skipped when CuPy is not available
 (`pytest.importorskip("cupy")`).
@@ -110,6 +111,8 @@ def test_my_roundtrip():
 | Roundtrip | 1e-7 degrees | Machine precision for fp64 |
 | GPU vs CPU | 1e-4 to 0.01 m | Should be identical; allows for fp64 associativity |
 | Iterative inverse (Winkel Tripel) | 0.005 degrees | Newton convergence limit |
+| Cross-datum vs pyproj | 10 m | Helmert variant differences; pyproj may use grid shifts |
+| Helmert roundtrip (fwd+inv) | 1e-4 degrees | Linearized rotation matrix is approximate |
 
 ## Linting
 

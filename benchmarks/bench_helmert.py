@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Benchmark key projections on CPU and GPU, output JSON.
+"""Benchmark cross-datum (Helmert) transforms on CPU and GPU, output JSON.
 
 Usage:
-    uv run benchmarks/bench_projections.py run [--n N] [--output FILE]
-    uv run benchmarks/bench_projections.py compare BASE.json CURRENT.json [--threshold PCT]
+    uv run benchmarks/bench_helmert.py run [--n N] [--output FILE]
+    uv run benchmarks/bench_helmert.py compare BASE.json CURRENT.json [--threshold PCT]
 """
 
 from __future__ import annotations
@@ -17,17 +17,11 @@ import time
 import numpy as np
 
 
-# Projections to benchmark (matches README table)
+# Cross-datum benchmarks — all involve Helmert datum shifts
 BENCHMARKS = [
-    ("tmerc", "EPSG:4326", "EPSG:32631"),
-    ("lcc", "EPSG:4326", "EPSG:2154"),
-    ("aea", "EPSG:4326", "EPSG:5070"),
-    ("webmerc", "EPSG:4326", "EPSG:3857"),
-    ("eqearth", "EPSG:4326", "EPSG:8857"),
-    ("eqc", "EPSG:4326", "EPSG:4087"),
-    # Same-datum overhead-sensitive cases (zero Helmert overhead expected)
-    ("p2p_utm", "EPSG:32631", "EPSG:3857"),
-    ("identity", "EPSG:4326", "EPSG:4326"),
+    ("helmert_fwd", "EPSG:4326", "EPSG:27700"),  # WGS84 -> OSGB36 BNG
+    ("helmert_p2p", "EPSG:32631", "EPSG:27700"),  # UTM -> BNG cross-datum
+    ("helmert_ll", "EPSG:4326", "EPSG:4277"),  # longlat cross-datum
 ]
 
 WARMUP_ITERS = 3
@@ -48,26 +42,39 @@ def _detect_gpu():
 
 
 def _bench_cpu(n):
-    """Benchmark all projections on CPU (NumPy)."""
+    """Benchmark cross-datum projections on CPU (NumPy)."""
+    import warnings
+
     from vibeproj import Transformer
 
     rng = np.random.default_rng(42)
-    lat = rng.uniform(35, 65, n).astype(np.float64)
-    lon = rng.uniform(-10, 30, n).astype(np.float64)
+    lon = rng.uniform(-10, 2, n).astype(np.float64)
+    lat = rng.uniform(49, 59, n).astype(np.float64)
 
     results = {}
     for label, src, dst in BENCHMARKS:
-        t = Transformer.from_crs(src, dst, always_xy=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            t = Transformer.from_crs(src, dst)
+
+        # For proj_to_proj, input is projected coordinates
+        if label == "helmert_p2p":
+            t_fwd = Transformer.from_crs("EPSG:4326", src)
+            x_in, y_in = t_fwd.transform(lon[:1000], lat[:1000])
+            x_full, y_full = t_fwd.transform(lon, lat)
+        else:
+            x_in, y_in = lon[:1000], lat[:1000]
+            x_full, y_full = lon, lat
 
         # Warmup
         for _ in range(WARMUP_ITERS):
-            t.transform(lat[:1000], lon[:1000])
+            t.transform(x_in, y_in)
 
         # Timed
         times = []
         for _ in range(BENCH_ITERS):
             t0 = time.perf_counter()
-            t.transform(lat, lon)
+            t.transform(x_full, y_full)
             times.append((time.perf_counter() - t0) * 1000)
 
         times.sort()
@@ -81,27 +88,39 @@ def _bench_cpu(n):
 
 
 def _bench_gpu(cp, n):
-    """Benchmark all projections on GPU (CuPy, fused kernels)."""
+    """Benchmark cross-datum projections on GPU (CuPy)."""
+    import warnings
+
     from vibeproj import Transformer
 
     rng = np.random.default_rng(42)
-    lat_np = rng.uniform(35, 65, n).astype(np.float64)
-    lon_np = rng.uniform(-10, 30, n).astype(np.float64)
-    lat = cp.asarray(lat_np)
+    lon_np = rng.uniform(-10, 2, n).astype(np.float64)
+    lat_np = rng.uniform(49, 59, n).astype(np.float64)
     lon = cp.asarray(lon_np)
+    lat = cp.asarray(lat_np)
     cp.cuda.Device(0).synchronize()
 
-    # Pre-allocate output buffers
     out_x = cp.empty(n, dtype=cp.float64)
     out_y = cp.empty(n, dtype=cp.float64)
 
     results = {}
     for label, src, dst in BENCHMARKS:
-        t = Transformer.from_crs(src, dst, always_xy=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            t = Transformer.from_crs(src, dst)
 
-        # Warmup (uses transform_buffers for zero-overhead path)
+        # For proj_to_proj, input is projected coordinates
+        if label == "helmert_p2p":
+            t_fwd = Transformer.from_crs("EPSG:4326", src)
+            x_in, y_in = t_fwd.transform_buffers(lon, lat, out_x=out_x, out_y=out_y)
+            x_full = x_in.copy()
+            y_full = y_in.copy()
+        else:
+            x_full, y_full = lon, lat
+
+        # Warmup
         for _ in range(WARMUP_ITERS):
-            t.transform_buffers(lat, lon, out_x=out_x, out_y=out_y)
+            t.transform_buffers(x_full, y_full, out_x=out_x, out_y=out_y)
             cp.cuda.Device(0).synchronize()
 
         # Timed
@@ -109,7 +128,7 @@ def _bench_gpu(cp, n):
         for _ in range(BENCH_ITERS):
             cp.cuda.Device(0).synchronize()
             t0 = time.perf_counter()
-            t.transform_buffers(lat, lon, out_x=out_x, out_y=out_y)
+            t.transform_buffers(x_full, y_full, out_x=out_x, out_y=out_y)
             cp.cuda.Device(0).synchronize()
             times.append((time.perf_counter() - t0) * 1000)
 
@@ -135,15 +154,13 @@ def cmd_run(args):
         "bench_iters": BENCH_ITERS,
     }
 
-    # CPU
-    print(f"Benchmarking CPU ({n:,} coords)...", file=sys.stderr)
+    print(f"Benchmarking Helmert CPU ({n:,} coords)...", file=sys.stderr)
     cpu_results = _bench_cpu(n)
 
-    # GPU
     cp, gpu_name = _detect_gpu()
     gpu_results = None
     if cp is not None:
-        print(f"Benchmarking GPU: {gpu_name} ({n:,} coords)...", file=sys.stderr)
+        print(f"Benchmarking Helmert GPU: {gpu_name} ({n:,} coords)...", file=sys.stderr)
         gpu_results = _bench_gpu(cp, n)
         meta["gpu"] = gpu_name
     else:
@@ -171,7 +188,6 @@ def cmd_compare(args):
         current = json.load(f)
 
     threshold = args.threshold
-
     has_regression = False
 
     for device in ("cpu", "gpu"):
@@ -179,13 +195,13 @@ def cmd_compare(args):
             continue
 
         print(f"\n{'=' * 60}")
-        print(f" {device.upper()} Performance Comparison")
+        print(f" {device.upper()} Helmert Performance Comparison")
         print(f" base: {args.base}  vs  current: {args.current}")
         print(f"{'=' * 60}")
         print(
-            f"{'Projection':<12} {'Base (ms)':>10} {'Current (ms)':>12} {'Change':>10} {'Status':>8}"
+            f"{'Benchmark':<14} {'Base (ms)':>10} {'Current (ms)':>12} {'Change':>10} {'Status':>8}"
         )
-        print("-" * 56)
+        print("-" * 58)
 
         base_d = base[device]
         curr_d = current[device]
@@ -211,7 +227,7 @@ def cmd_compare(args):
                 status = "OK"
 
             sign = "+" if pct >= 0 else ""
-            print(f"{proj:<12} {b:>10.3f} {c:>12.3f} {sign}{pct:>8.1f}%  {status:>8}")
+            print(f"{proj:<14} {b:>10.3f} {c:>12.3f} {sign}{pct:>8.1f}%  {status:>8}")
 
     print()
     if has_regression:
@@ -222,7 +238,7 @@ def cmd_compare(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="vibeProj projection benchmarks")
+    parser = argparse.ArgumentParser(description="vibeProj Helmert benchmarks")
     sub = parser.add_subparsers(dest="command")
 
     run_p = sub.add_parser("run", help="Run benchmarks")

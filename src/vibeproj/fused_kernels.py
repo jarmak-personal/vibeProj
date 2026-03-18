@@ -1892,3 +1892,150 @@ def fused_transform(
     else:
         kernel((grid,), (block,), args)
     return out_x, out_y
+
+
+# ===================================================================
+# Helmert datum shift kernel
+# ===================================================================
+
+_HELMERT_SHIFT_SOURCE = """\
+extern "C" __global__ void helmert_shift(
+    const double* __restrict__ in_lat,
+    const double* __restrict__ in_lon,
+    double* __restrict__ out_lat,
+    double* __restrict__ out_lon,
+    double src_a, double src_es,
+    double dst_a, double dst_es,
+    double tx, double ty, double tz,
+    double rx, double ry, double rz,
+    double ds,
+    int n
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+
+    double lat = in_lat[idx] * 0.017453292519943295;
+    double lon = in_lon[idx] * 0.017453292519943295;
+
+    /* Geodetic -> ECEF on source ellipsoid */
+    double sin_lat = sin(lat), cos_lat = cos(lat);
+    double sin_lon = sin(lon), cos_lon = cos(lon);
+    double N = src_a / sqrt(1.0 - src_es * sin_lat * sin_lat);
+    double X = N * cos_lat * cos_lon;
+    double Y = N * cos_lat * sin_lon;
+    double Z = N * (1.0 - src_es) * sin_lat;
+
+    /* Helmert: X' = ds * R * X + T  (Position Vector convention) */
+    double X2 = ds * ( X - rz * Y + ry * Z) + tx;
+    double Y2 = ds * ( rz * X +  Y - rx * Z) + ty;
+    double Z2 = ds * (-ry * X + rx * Y +  Z) + tz;
+
+    /* ECEF -> Geodetic on destination ellipsoid (Bowring iterative) */
+    double p = sqrt(X2 * X2 + Y2 * Y2);
+    double lon_out = atan2(Y2, X2);
+    double lat_out = atan2(Z2, p * (1.0 - dst_es));
+
+    for (int i = 0; i < 10; i++) {
+        double sin_lat_i = sin(lat_out);
+        double N_i = dst_a / sqrt(1.0 - dst_es * sin_lat_i * sin_lat_i);
+        lat_out = atan2(Z2 + dst_es * N_i * sin_lat_i, p);
+    }
+
+    out_lat[idx] = lat_out * 57.29577951308232;
+    out_lon[idx] = lon_out * 57.29577951308232;
+}
+"""
+
+_helmert_kernel_cache = None
+_helmert_kernel_lock = threading.Lock()
+
+
+def _get_helmert_kernel():
+    """Get or compile the Helmert datum shift kernel (thread-safe)."""
+    global _helmert_kernel_cache
+    if _helmert_kernel_cache is not None:
+        return _helmert_kernel_cache
+
+    import cupy as cp
+
+    with _helmert_kernel_lock:
+        if _helmert_kernel_cache is not None:
+            return _helmert_kernel_cache
+        kernel = cp.RawKernel(_HELMERT_SHIFT_SOURCE, "helmert_shift")
+        _helmert_kernel_cache = kernel
+        return kernel
+
+
+def compile_helmert_kernel():
+    """Pre-compile the Helmert datum shift kernel."""
+    _get_helmert_kernel()
+
+
+def fused_helmert_shift(lat, lon, helmert_params, xp, out_lat=None, out_lon=None, stream=None):
+    """Execute the Helmert datum shift on GPU.
+
+    Parameters
+    ----------
+    lat, lon : cupy.ndarray
+        Geographic coordinates in degrees on the source ellipsoid.
+    helmert_params : HelmertParams
+        Transformation parameters.
+    xp : module
+        Array module (must be cupy).
+    out_lat, out_lon : cupy.ndarray, optional
+        Pre-allocated output arrays.
+    stream : cupy.cuda.Stream, optional
+        CUDA stream for async execution.
+
+    Returns
+    -------
+    (out_lat, out_lon) or None if not on GPU.
+    """
+    try:
+        import cupy as cp
+    except ImportError:
+        return None
+
+    if xp is not cp:
+        return None
+
+    kernel = _get_helmert_kernel()
+
+    n = lat.size
+    if out_lat is None:
+        out_lat = cp.empty(n, dtype=cp.float64)
+    if out_lon is None:
+        out_lon = cp.empty(n, dtype=cp.float64)
+
+    block = 256
+    grid = max(1, (n + block - 1) // block)
+
+    src = helmert_params.src_ellipsoid
+    dst = helmert_params.dst_ellipsoid
+
+    args = (
+        lat,
+        lon,
+        out_lat,
+        out_lon,
+        np.float64(src.a),
+        np.float64(src.es),
+        np.float64(dst.a),
+        np.float64(dst.es),
+        np.float64(helmert_params.tx),
+        np.float64(helmert_params.ty),
+        np.float64(helmert_params.tz),
+        np.float64(helmert_params.rx),
+        np.float64(helmert_params.ry),
+        np.float64(helmert_params.rz),
+        np.float64(helmert_params.ds),
+        np.int32(n),
+    )
+
+    if stream is not None:
+        with stream:
+            kernel((grid,), (block,), args)
+    else:
+        kernel((grid,), (block,), args)
+
+    return out_lat, out_lon

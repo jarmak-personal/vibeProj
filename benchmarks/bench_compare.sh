@@ -20,6 +20,7 @@
 #   ./benchmarks/bench_compare.sh                    # default: 15% threshold, 1M coords
 #   ./benchmarks/bench_compare.sh --threshold 10     # stricter
 #   ./benchmarks/bench_compare.sh --n 500000         # fewer coords (faster)
+#   ./benchmarks/bench_compare.sh --strict            # 5% threshold (same-datum zero-overhead)
 
 set -euo pipefail
 
@@ -32,6 +33,7 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --threshold) THRESHOLD="$2"; shift 2 ;;
         --n)         N_COORDS="$2"; shift 2 ;;
+        --strict)    THRESHOLD=5.0; shift ;;
         *)           echo "Unknown arg: $1"; exit 1 ;;
     esac
 done

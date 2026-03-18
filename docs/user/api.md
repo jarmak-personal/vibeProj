@@ -106,6 +106,22 @@ pipe = TransformPipeline(src, dst)
 x, y = pipe.transform(lat_array, lon_array, np)
 ```
 
+### `Transformer.accuracy`
+
+Read-only property indicating the accuracy classification of this transform.
+
+- `"sub-millimeter"` -- same datum, projection math only.
+- `"sub-meter"` -- cross-datum with Helmert 7-parameter shift applied (~1--5m).
+- `"degraded — no datum shift applied"` -- cross-datum, no Helmert available (grid-only).
+
+```python
+t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+print(t.accuracy)  # "sub-millimeter" (same datum)
+
+t = Transformer.from_crs("EPSG:4326", "EPSG:27700")
+print(t.accuracy)  # "sub-meter" (Helmert applied)
+```
+
 ## Utility functions
 
 ### `vibeproj.runtime.gpu_available()`

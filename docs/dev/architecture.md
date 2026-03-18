@@ -33,6 +33,7 @@ Transformer.from_crs("EPSG:4326", "EPSG:32631")
 | `fused_kernels.py` | 40 CUDA kernel source strings (20 projections x fwd/inv). Compiled and cached via CuPy `RawKernel`. |
 | `projections/` | NumPy/CuPy element-wise implementations. Each is a `Projection` subclass with `setup()`, `forward()`, `inverse()`. |
 | `ellipsoid.py` | Reference ellipsoid definitions (WGS84, GRS80, sphere). |
+| `helmert.py` | Helmert 7-parameter datum transformation. `HelmertParams` dataclass, geodetic/ECEF conversion, `apply_helmert()`. |
 | `runtime.py` | GPU/CPU detection and array module selection. |
 | `gpu_detect.py` | Consumer vs datacenter GPU classification. |
 | `_ds_device_fns.py` | Double-single fp32 arithmetic CUDA device functions. |
@@ -42,14 +43,20 @@ Transformer.from_crs("EPSG:4326", "EPSG:32631")
 A forward transform (geographic -> projected) executes these stages:
 
 1. **Axis swap** -- CRS-dependent. EPSG:4326 is (lat, lon); some projected CRS are (E, N).
-2. **Degree to radian** -- `lat * pi/180`, `lon * pi/180`.
-3. **Central meridian** -- `lon -= lon_0`, wrapped to [-pi, pi].
-4. **Projection core** -- the actual math (Transverse Mercator, Lambert, etc.).
-5. **Scale** -- multiply by semi-major axis `a`.
-6. **False easting/northing** -- add `x_0`, `y_0`.
-7. **Output axis swap** -- match destination CRS axis order.
+2. **Datum shift** -- Helmert 7-parameter (if cross-datum). Converts geodetic coords from source ellipsoid to destination ellipsoid via ECEF intermediate. Skipped entirely when `helmert is None` (same-datum).
+3. **Degree to radian** -- `lat * pi/180`, `lon * pi/180`.
+4. **Central meridian** -- `lon -= lon_0`, wrapped to [-pi, pi].
+5. **Projection core** -- the actual math (Transverse Mercator, Lambert, etc.).
+6. **Scale** -- multiply by semi-major axis `a`.
+7. **False easting/northing** -- add `x_0`, `y_0`.
+8. **Output axis swap** -- match destination CRS axis order.
 
 Inverse transforms reverse these stages.
+
+For proj-to-proj transforms (projected -> projected), the pipeline decomposes into:
+inverse(src) -> datum shift (if cross-datum) -> forward(dst). Each sub-step
+may use its own fused GPU kernel, with the Helmert shift running as a separate
+kernel launch between them.
 
 ## Fused kernel fast-path
 

@@ -5,6 +5,7 @@ Uses pyproj for CRS metadata extraction, then maps to our internal projection ty
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -239,3 +240,142 @@ def resolve_transform(crs_from, crs_to) -> tuple[ProjectionParams, ProjectionPar
     src_params = resolve_projection_params(src_crs)
     dst_params = resolve_projection_params(dst_crs)
     return src_params, dst_params, src_crs, dst_crs
+
+
+# ---------------------------------------------------------------------------
+# Helmert extraction
+# ---------------------------------------------------------------------------
+
+_ARC_SECOND_TO_RAD = math.pi / (180.0 * 3600.0)
+
+
+def _parse_helmert_from_proj4(proj4: str):
+    """Parse Helmert parameters from a PROJ pipeline string.
+
+    Looks for ``+proj=helmert`` steps and extracts the 7 parameters.
+    Returns (tx, ty, tz, rx_as, ry_as, rz_as, ds_ppm, convention, is_inverse)
+    or None.
+    """
+    steps = proj4.split("+step")
+    for step in steps:
+        if "+proj=helmert" not in step:
+            continue
+
+        tokens = step.split()
+        params: dict[str, str] = {}
+        is_inverse = False
+        for token in tokens:
+            if token == "+inv":
+                is_inverse = True
+            elif token.startswith("+") and "=" in token:
+                key, _, val = token[1:].partition("=")
+                params[key] = val
+
+        tx = float(params.get("x", "0"))
+        ty = float(params.get("y", "0"))
+        tz = float(params.get("z", "0"))
+        rx_as = float(params.get("rx", "0"))
+        ry_as = float(params.get("ry", "0"))
+        rz_as = float(params.get("rz", "0"))
+        ds_ppm = float(params.get("s", "0"))
+        convention = params.get("convention", "position_vector")
+
+        return tx, ty, tz, rx_as, ry_as, rz_as, ds_ppm, convention, is_inverse
+
+    return None
+
+
+def extract_helmert(src_crs: CRS, dst_crs: CRS):
+    """Extract Helmert 7-parameter datum shift between two CRS.
+
+    Uses pyproj to determine the best available transformation pipeline,
+    then extracts the Helmert operation parameters from the PROJ pipeline string.
+
+    Returns
+    -------
+    HelmertParams or None
+        None if same datum, no Helmert available, or identity transform.
+    """
+    from vibeproj.helmert import HelmertParams
+
+    # Resolve to geographic CRS (strip projection)
+    src_geo = src_crs.geodetic_crs
+    dst_geo = dst_crs.geodetic_crs
+    if src_geo is None or dst_geo is None:
+        return None
+
+    # Same datum — no shift needed
+    if src_geo.datum == dst_geo.datum:
+        return None
+
+    # Query pyproj for available transformations
+    from pyproj.transformer import TransformerGroup
+
+    try:
+        tg = TransformerGroup(src_geo, dst_geo)
+    except Exception:
+        return None
+
+    # Search through available transformers for one containing a Helmert step
+    for transformer in tg.transformers:
+        try:
+            proj4 = transformer.to_proj4()
+        except Exception:
+            continue
+
+        parsed = _parse_helmert_from_proj4(proj4)
+        if parsed is None:
+            continue
+
+        tx, ty, tz, rx_as, ry_as, rz_as, ds_ppm, convention, is_inverse = parsed
+
+        rx_rad = rx_as * _ARC_SECOND_TO_RAD
+        ry_rad = ry_as * _ARC_SECOND_TO_RAD
+        rz_rad = rz_as * _ARC_SECOND_TO_RAD
+        ds = 1.0 + ds_ppm * 1e-6
+
+        # Coordinate Frame uses opposite rotation sign convention
+        if convention == "coordinate_frame":
+            rx_rad = -rx_rad
+            ry_rad = -ry_rad
+            rz_rad = -rz_rad
+
+        src_ell = _get_ellipsoid(src_geo)
+        dst_ell = _get_ellipsoid(dst_geo)
+
+        # When +inv is set, the PROJ string contains the forward (A→B) params
+        # but the pipeline applies them in reverse (B→A). We negate the params
+        # to get the B→A direction, while keeping our CRS ellipsoid assignment.
+        if is_inverse:
+            tx, ty, tz = -tx, -ty, -tz
+            rx_rad, ry_rad, rz_rad = -rx_rad, -ry_rad, -rz_rad
+            ds = 1.0 / ds if ds != 0.0 else 1.0
+
+        helmert = HelmertParams(
+            tx=tx,
+            ty=ty,
+            tz=tz,
+            rx=rx_rad,
+            ry=ry_rad,
+            rz=rz_rad,
+            ds=ds,
+            src_ellipsoid=src_ell,
+            dst_ellipsoid=dst_ell,
+        )
+
+        # Skip identity transforms (all params effectively zero)
+        if (
+            abs(helmert.tx) < 1e-6
+            and abs(helmert.ty) < 1e-6
+            and abs(helmert.tz) < 1e-6
+            and abs(helmert.rx) < 1e-12
+            and abs(helmert.ry) < 1e-12
+            and abs(helmert.rz) < 1e-12
+            and abs(helmert.ds - 1.0) < 1e-12
+        ):
+            return None
+
+        return helmert
+
+    # No Helmert operation found (e.g., grid-only transform)
+    return None

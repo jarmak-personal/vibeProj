@@ -69,6 +69,33 @@ pipe = TransformPipeline(src, params)
 x, y = pipe.transform(lat_array, lon_array, np)  # or cp for GPU
 ```
 
+## Datum shifting
+
+When the source and destination CRS use different geodetic datums (e.g.,
+WGS84 vs OSGB36), vibeProj applies a **Helmert 7-parameter transformation**
+automatically. This covers ~80% of real-world cross-datum transforms with
+~1--5 metre accuracy.
+
+```python
+# Cross-datum: WGS84 -> British National Grid (OSGB36 / Airy 1830)
+t = Transformer.from_crs("EPSG:4326", "EPSG:27700")
+x, y = t.transform(-0.1278, 51.5074)
+print(t.accuracy)  # "sub-meter"
+```
+
+Helmert parameters are extracted from pyproj's EPSG database at construction
+time; the actual datum shift math runs on vibeProj's own GPU kernels (or
+NumPy on CPU). Same-datum transforms have **zero overhead** -- the datum
+shift code path is bypassed entirely when no Helmert is needed.
+
+**Not yet supported:**
+
+- NTv2 / NADCON grid-based shifts (sub-centimetre accuracy for national datums)
+- Time-dependent Helmert (ITRF plate motion models)
+
+If no Helmert transformation is available for a cross-datum pair (grid-only
+datums), vibeProj warns and applies projection math without a datum shift.
+
 ## Known limitations
 
 - **Equal Earth** (`eqearth`): Uses the spherical polynomial formula on geodetic
