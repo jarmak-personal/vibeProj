@@ -11,6 +11,7 @@ Uses CuPy RawKernel for NVRTC compilation and caching.
 from __future__ import annotations
 
 import threading
+import warnings
 
 import numpy as np
 
@@ -1486,6 +1487,11 @@ def _get_kernel(projection_name: str, direction: str, compute_dtype: str):
                 source = source.format()
             else:
                 # Fallback to fp64 (RLock allows re-entrant acquisition)
+                warnings.warn(
+                    f"No double-single kernel for '{projection_name}' {direction}, "
+                    f"falling back to fp64.",
+                    stacklevel=3,
+                )
                 return _get_kernel(projection_name, direction, "float64")
         else:
             template, func_name = _SOURCE_MAP[(projection_name, direction)]
@@ -1615,8 +1621,16 @@ def fused_transform(
     kernel = _get_kernel(projection_name, direction, compute_dtype)
     if out_x is None:
         out_x = cp.empty(n, dtype=io_dtype)
+    elif out_x.dtype != np.float64:
+        raise CoordinateValidationError(
+            f"out_x must be float64 (kernel writes double*), got {out_x.dtype}"
+        )
     if out_y is None:
         out_y = cp.empty(n, dtype=io_dtype)
+    elif out_y.dtype != np.float64:
+        raise CoordinateValidationError(
+            f"out_y must be float64 (kernel writes double*), got {out_y.dtype}"
+        )
     block = 256
     grid = max(1, (n + block - 1) // block)
     snf = np.int32(src_north_first)
@@ -1889,6 +1903,7 @@ def fused_transform(
     if stream is not None:
         with stream:
             kernel((grid,), (block,), args)
+        stream.synchronize()
     else:
         kernel((grid,), (block,), args)
     return out_x, out_y
@@ -2001,11 +2016,21 @@ def fused_helmert_shift(lat, lon, helmert_params, xp, out_lat=None, out_lon=None
 
     kernel = _get_helmert_kernel()
 
+    from vibeproj.exceptions import CoordinateValidationError
+
     n = lat.size
     if out_lat is None:
         out_lat = cp.empty(n, dtype=cp.float64)
+    elif out_lat.dtype != np.float64:
+        raise CoordinateValidationError(
+            f"out_lat must be float64 (kernel writes double*), got {out_lat.dtype}"
+        )
     if out_lon is None:
         out_lon = cp.empty(n, dtype=cp.float64)
+    elif out_lon.dtype != np.float64:
+        raise CoordinateValidationError(
+            f"out_lon must be float64 (kernel writes double*), got {out_lon.dtype}"
+        )
 
     block = 256
     grid = max(1, (n + block - 1) // block)
@@ -2035,6 +2060,7 @@ def fused_helmert_shift(lat, lon, helmert_params, xp, out_lat=None, out_lon=None
     if stream is not None:
         with stream:
             kernel((grid,), (block,), args)
+        stream.synchronize()
     else:
         kernel((grid,), (block,), args)
 

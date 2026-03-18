@@ -34,9 +34,10 @@ class Mollweide(Projection):
         theta = phi  # initial guess
         pi_sin_phi = math.pi * xp.sin(phi)
         for _ in range(20):
-            dtheta = -(2.0 * theta + xp.sin(2.0 * theta) - pi_sin_phi) / (
-                2.0 + 2.0 * xp.cos(2.0 * theta)
-            )
+            denom = 2.0 + 2.0 * xp.cos(2.0 * theta)
+            # Guard against zero denominator when theta = ±π/2
+            denom = xp.where(xp.abs(denom) < 1e-30, 1e-30, denom)
+            dtheta = -(2.0 * theta + xp.sin(2.0 * theta) - pi_sin_phi) / denom
             theta = theta + dtheta
             if hasattr(dtheta, "__len__"):
                 if xp.all(xp.abs(dtheta) < 1e-14):
@@ -50,7 +51,10 @@ class Mollweide(Projection):
     def inverse(self, x, y, params, computed, xp):
         theta = xp.arcsin(xp.clip(y / _SQRT2, -1.0, 1.0))
         phi = xp.arcsin(xp.clip((2.0 * theta + xp.sin(2.0 * theta)) / math.pi, -1.0, 1.0))
-        lam = x * math.pi / (2.0 * _SQRT2 * xp.cos(theta))
+        cos_theta = xp.cos(theta)
+        # Guard against division by zero at poles (cos(±π/2) = 0)
+        cos_theta = xp.where(xp.abs(cos_theta) < 1e-30, 1e-30, cos_theta)
+        lam = x * math.pi / (2.0 * _SQRT2 * cos_theta)
         return lam, phi
 
 

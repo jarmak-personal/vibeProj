@@ -186,7 +186,9 @@ class LambertAzimuthalEqualArea(Projection):
             sin_phi = xp.sin(phi)
             e_sin = e * sin_phi
             one_minus = 1.0 - e_sin * e_sin
-            dphi = (one_minus * one_minus / (2.0 * xp.cos(phi))) * (
+            cos_phi = xp.cos(phi)
+            cos_phi = xp.where(xp.abs(cos_phi) < 1e-30, 1e-30, cos_phi)
+            dphi = (one_minus * one_minus / (2.0 * cos_phi)) * (
                 q / (1.0 - es)
                 - sin_phi / one_minus
                 + (1.0 / (2.0 * e)) * xp.log((1.0 - e_sin) / (1.0 + e_sin))

@@ -33,7 +33,10 @@ class Sinusoidal(Projection):
 
     def inverse(self, x, y, params, computed, xp):
         phi = y
-        lam = x / xp.cos(phi)
+        cos_phi = xp.cos(phi)
+        # Guard against division by zero at poles (cos(±π/2) = 0)
+        cos_phi = xp.where(xp.abs(cos_phi) < 1e-30, 1e-30, cos_phi)
+        lam = x / cos_phi
         return lam, phi
 
 

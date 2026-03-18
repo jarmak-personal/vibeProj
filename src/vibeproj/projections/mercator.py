@@ -15,6 +15,10 @@ from vibeproj.projections.base import Projection
 if TYPE_CHECKING:
     from vibeproj.crs import ProjectionParams
 
+# ~89.999° in radians — avoids tan(π/2) singularity at poles while preserving
+# sub-meter accuracy at extreme latitudes.
+_MAX_LAT_RAD = math.radians(89.999)
+
 
 class Mercator(Projection):
     """Ellipsoidal Mercator projection (variant A / 1SP)."""
@@ -35,6 +39,8 @@ class Mercator(Projection):
 
     def forward(self, lam, phi, params, computed, xp):
         e = computed["e"]
+        # Clamp latitude to avoid singularity at poles (tan(π/2) = inf)
+        phi = xp.clip(phi, -_MAX_LAT_RAD, _MAX_LAT_RAD)
         if e == 0:
             # Spherical case
             x = lam
@@ -85,6 +91,8 @@ class WebMercator(Projection):
         }
 
     def forward(self, lam, phi, params, computed, xp):
+        # Clamp latitude to avoid singularity at poles (tan(π/2) = inf)
+        phi = xp.clip(phi, -_MAX_LAT_RAD, _MAX_LAT_RAD)
         x = lam
         y = xp.log(xp.tan(math.pi / 4.0 + phi * 0.5))
         return x, y

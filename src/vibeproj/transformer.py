@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import dataclasses
+import threading
 import warnings
 
 import numpy as np
@@ -86,8 +87,9 @@ class Transformer:
         self._pipeline = TransformPipeline(src_params, dst_params, helmert=self._helmert)
         self._src_params = src_params
         self._dst_params = dst_params
-        # Build the inverse pipeline lazily
+        # Build the inverse pipeline lazily (protected by lock for thread safety)
         self._inv_pipeline = None
+        self._inv_pipeline_lock = threading.Lock()
 
     @staticmethod
     def from_crs(crs_from, crs_to, *, always_xy=True) -> Transformer:
@@ -229,10 +231,12 @@ class Transformer:
             rx, ry = self._pipeline.transform(x, y, xp)
         else:
             if self._inv_pipeline is None:
-                inv_helmert = self._helmert.inverted() if self._helmert else None
-                self._inv_pipeline = TransformPipeline(
-                    self._dst_params, self._src_params, helmert=inv_helmert
-                )
+                with self._inv_pipeline_lock:
+                    if self._inv_pipeline is None:
+                        inv_helmert = self._helmert.inverted() if self._helmert else None
+                        self._inv_pipeline = TransformPipeline(
+                            self._dst_params, self._src_params, helmert=inv_helmert
+                        )
             rx, ry = self._inv_pipeline.transform(x, y, xp)
 
         # Check for non-finite output values
@@ -371,10 +375,12 @@ class Transformer:
             pipeline = self._pipeline
         else:
             if self._inv_pipeline is None:
-                inv_helmert = self._helmert.inverted() if self._helmert else None
-                self._inv_pipeline = TransformPipeline(
-                    self._dst_params, self._src_params, helmert=inv_helmert
-                )
+                with self._inv_pipeline_lock:
+                    if self._inv_pipeline is None:
+                        inv_helmert = self._helmert.inverted() if self._helmert else None
+                        self._inv_pipeline = TransformPipeline(
+                            self._dst_params, self._src_params, helmert=inv_helmert
+                        )
             pipeline = self._inv_pipeline
 
         out_x = np.empty(n, dtype=np.float64)

@@ -37,6 +37,8 @@ class Gnomonic(Projection):
         cos_phi = xp.cos(phi)
         cos_lam = xp.cos(lam)
         cos_c = sin_phi0 * sin_phi + cos_phi0 * cos_phi * cos_lam
+        # Guard against division by zero at hemisphere boundary (cos_c = 0)
+        cos_c = xp.where(xp.abs(cos_c) < 1e-30, 1e-30, cos_c)
         x = cos_phi * xp.sin(lam) / cos_c
         y = (cos_phi0 * sin_phi - sin_phi0 * cos_phi * cos_lam) / cos_c
         return x, y
