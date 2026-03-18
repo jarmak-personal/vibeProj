@@ -143,9 +143,13 @@ class TransformPipeline:
         stream: optional CUDA stream for async kernel execution.
         """
         if self.mode == "forward":
-            return self._forward(x, y, xp, out_x=out_x, out_y=out_y, precision=precision, stream=stream)
+            return self._forward(
+                x, y, xp, out_x=out_x, out_y=out_y, precision=precision, stream=stream
+            )
         elif self.mode == "inverse":
-            return self._inverse(x, y, xp, out_x=out_x, out_y=out_y, precision=precision, stream=stream)
+            return self._inverse(
+                x, y, xp, out_x=out_x, out_y=out_y, precision=precision, stream=stream
+            )
         elif self.mode == "proj_to_proj":
             return self._proj_to_proj(x, y, xp)
         else:

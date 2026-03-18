@@ -12,6 +12,7 @@ from pyproj import CRS
 from pyproj.exceptions import CRSError
 
 from vibeproj.ellipsoid import WGS84, GRS80, SPHERE, Ellipsoid
+from vibeproj.exceptions import CRSResolutionError, UnsupportedProjectionError
 
 
 @dataclass
@@ -68,7 +69,7 @@ def parse_crs_input(crs_input) -> CRS:
             pass
         return CRS.from_user_input(s)
 
-    raise TypeError(f"Cannot parse CRS from {type(crs_input).__name__}: {crs_input}")
+    raise CRSResolutionError(f"Cannot parse CRS from {type(crs_input).__name__}: {crs_input}")
 
 
 # Mapping from pyproj projection method names to our internal names
@@ -157,17 +158,17 @@ def resolve_projection_params(crs: CRS) -> ProjectionParams:
         )
 
     if not crs.is_projected:
-        raise ValueError(f"Unsupported CRS type: {crs}")
+        raise CRSResolutionError(f"Unsupported CRS type: {crs}")
 
     cf = crs.coordinate_operation
     if cf is None:
-        raise ValueError(f"Cannot extract projection from CRS: {crs}")
+        raise CRSResolutionError(f"Cannot extract projection from CRS: {crs}")
 
     method_name = cf.method_name
     proj_name = _METHOD_MAP.get(method_name)
 
     if proj_name is None:
-        raise ValueError(
+        raise UnsupportedProjectionError(
             f"Unsupported projection method: '{method_name}'. "
             f"Supported methods: {sorted(_METHOD_MAP.keys())}"
         )

@@ -19,13 +19,16 @@ import numpy as np
 
 def timer(label):
     """Context manager that prints elapsed time."""
+
     class Timer:
         def __enter__(self):
             self.t0 = time.perf_counter()
             return self
+
         def __exit__(self, *_):
             self.elapsed = time.perf_counter() - self.t0
-            print(f"  {label:<45} {self.elapsed*1000:>8.2f} ms")
+            print(f"  {label:<45} {self.elapsed * 1000:>8.2f} ms")
+
     return Timer()
 
 
@@ -39,8 +42,8 @@ def _load_coords_from_parquet(path):
     coords = shapely.get_coordinates(gdf.geometry.values)
     raw_x, raw_y = coords[:, 0], coords[:, 1]
     # Scale synthetic [0, 1000] coords to realistic European range
-    lon = (raw_x / 1000.0) * 40.0 - 10.0   # [-10, 30]
-    lat = (raw_y / 1000.0) * 30.0 + 35.0    # [35, 65]
+    lon = (raw_x / 1000.0) * 40.0 - 10.0  # [-10, 30]
+    lat = (raw_y / 1000.0) * 30.0 + 35.0  # [35, 65]
     return lat, lon
 
 
@@ -66,6 +69,7 @@ def main():
     try:
         with timer("Import cupy + detect GPU"):
             import cupy as cp
+
             dev = cp.cuda.Device(0)
             cc = dev.compute_capability
             ratio = dev.attributes.get("SingleToDoublePrecisionPerfRatio", "?")
@@ -111,13 +115,13 @@ def main():
     print("── Step 3: Projection transforms ──")
 
     projections = [
-        ("WGS84 -> UTM 31N",         "EPSG:4326", "EPSG:32631"),
-        ("WGS84 -> Web Mercator",     "EPSG:4326", "EPSG:3857"),
-        ("WGS84 -> LAEA Europe",      "EPSG:4326", "EPSG:3035"),
-        ("WGS84 -> France Lambert",   "EPSG:4326", "EPSG:2154"),
-        ("WGS84 -> Albers CONUS",     "EPSG:4326", "EPSG:5070"),
-        ("WGS84 -> Equal Earth",      "EPSG:4326", "EPSG:8857"),
-        ("UTM 31N -> Web Mercator",   "EPSG:32631", "EPSG:3857"),
+        ("WGS84 -> UTM 31N", "EPSG:4326", "EPSG:32631"),
+        ("WGS84 -> Web Mercator", "EPSG:4326", "EPSG:3857"),
+        ("WGS84 -> LAEA Europe", "EPSG:4326", "EPSG:3035"),
+        ("WGS84 -> France Lambert", "EPSG:4326", "EPSG:2154"),
+        ("WGS84 -> Albers CONUS", "EPSG:4326", "EPSG:5070"),
+        ("WGS84 -> Equal Earth", "EPSG:4326", "EPSG:8857"),
+        ("UTM 31N -> Web Mercator", "EPSG:32631", "EPSG:3857"),
     ]
 
     results = {}

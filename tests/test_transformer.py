@@ -888,3 +888,95 @@ def test_compile():
     """Transformer.compile() should not raise."""
     t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
     t.compile()  # no-op on CPU, but should not raise
+
+
+# ---------------------------------------------------------------------------
+# Custom exceptions
+# ---------------------------------------------------------------------------
+
+
+def test_unsupported_projection_error():
+    from vibeproj.exceptions import UnsupportedProjectionError
+
+    with pytest.raises(UnsupportedProjectionError):
+        Transformer.from_crs("EPSG:4326", "EPSG:5514")  # S-JTSK / Krovak — not supported
+
+
+def test_crs_resolution_error():
+    from vibeproj.exceptions import CRSResolutionError
+
+    with pytest.raises(CRSResolutionError):
+        Transformer.from_crs(object(), "EPSG:4326")
+
+
+def test_exceptions_inherit_base():
+    from vibeproj import (
+        CoordinateValidationError,
+        CRSResolutionError,
+        UnsupportedProjectionError,
+        VibeProjectionError,
+    )
+
+    assert issubclass(UnsupportedProjectionError, VibeProjectionError)
+    assert issubclass(CRSResolutionError, VibeProjectionError)
+    assert issubclass(CoordinateValidationError, VibeProjectionError)
+
+
+# ---------------------------------------------------------------------------
+# Accuracy metadata
+# ---------------------------------------------------------------------------
+
+
+def test_accuracy_same_datum():
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+    assert t.accuracy == "sub-millimeter"
+
+
+def test_accuracy_cross_datum():
+    with pytest.warns(UserWarning, match="datum"):
+        t = Transformer.from_crs("EPSG:4326", "EPSG:27700")
+    assert "degraded" in t.accuracy
+
+
+# ---------------------------------------------------------------------------
+# Chunked transform
+# ---------------------------------------------------------------------------
+
+
+def test_transform_chunked_matches_transform():
+    """Chunked result must match non-chunked result."""
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+    lon = np.linspace(-10, 30, 5000)
+    lat = np.linspace(35, 65, 5000)
+
+    x_ref, y_ref = t.transform(lon, lat)
+    x_ch, y_ch = t.transform_chunked(lon, lat, chunk_size=1000)
+
+    assert_allclose(x_ch, x_ref, atol=1e-10)
+    assert_allclose(y_ch, y_ref, atol=1e-10)
+
+
+def test_transform_chunked_z_passthrough():
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+    lon = np.array([2.0, 3.0])
+    lat = np.array([49.0, 50.0])
+    z = np.array([100.0, 200.0])
+    x, y, z_out = t.transform_chunked(lon, lat, z, chunk_size=1)
+    assert_allclose(z_out, z)
+
+
+def test_transform_chunked_empty():
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+    x, y = t.transform_chunked(np.array([]), np.array([]))
+    assert len(x) == 0
+    assert len(y) == 0
+
+
+def test_transform_chunked_inverse():
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+    lon = np.array([2.0, 3.0, 4.0])
+    lat = np.array([49.0, 50.0, 51.0])
+    x, y = t.transform_chunked(lon, lat)
+    lon2, lat2 = t.transform_chunked(x, y, direction="INVERSE", chunk_size=2)
+    assert_allclose(lon2, lon, atol=1e-7)
+    assert_allclose(lat2, lat, atol=1e-7)

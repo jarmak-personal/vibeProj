@@ -39,8 +39,7 @@ def _qsfn_scalar(sin_phi, e):
         return 2.0 * sin_phi
     e_sin = e * sin_phi
     return (1.0 - e * e) * (
-        sin_phi / (1.0 - e_sin * e_sin)
-        - (0.5 / e) * math.log((1.0 - e_sin) / (1.0 + e_sin))
+        sin_phi / (1.0 - e_sin * e_sin) - (0.5 / e) * math.log((1.0 - e_sin) / (1.0 + e_sin))
     )
 
 
@@ -50,8 +49,7 @@ def _qsfn_array(sin_phi, e, xp):
         return 2.0 * sin_phi
     e_sin = e * sin_phi
     return (1.0 - e * e) * (
-        sin_phi / (1.0 - e_sin * e_sin)
-        - (0.5 / e) * xp.log((1.0 - e_sin) / (1.0 + e_sin))
+        sin_phi / (1.0 - e_sin * e_sin) - (0.5 / e) * xp.log((1.0 - e_sin) / (1.0 + e_sin))
     )
 
 

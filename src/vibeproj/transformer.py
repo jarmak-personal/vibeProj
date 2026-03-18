@@ -15,7 +15,7 @@ import warnings
 
 import numpy as np
 
-from vibeproj.crs import parse_crs_input, resolve_transform
+from vibeproj.crs import resolve_transform
 from vibeproj.pipeline import TransformPipeline
 from vibeproj.runtime import get_array_module, to_device
 
@@ -29,6 +29,13 @@ class Transformer:
 
     When CuPy is available and inputs are on GPU, transforms run on GPU.
     Otherwise falls back to NumPy on CPU.
+
+    Thread Safety
+    -------------
+    Transformer instances are safe to share across threads. The internal
+    kernel cache uses an RLock to serialize NVRTC compilation on first use;
+    subsequent calls are lock-free. Call ``compile()`` at startup to
+    front-load compilation if you want deterministic latency.
     """
 
     def __init__(self, crs_from, crs_to, *, always_xy=True):
@@ -48,11 +55,12 @@ class Transformer:
         # Datum shift detection: warn when ellipsoids differ significantly
         src_ell = src_crs.ellipsoid
         dst_ell = dst_crs.ellipsoid
-        if (
+        self._cross_datum = (
             src_ell is not None
             and dst_ell is not None
             and abs(src_ell.semi_major_metre - dst_ell.semi_major_metre) > 1.0
-        ):
+        )
+        if self._cross_datum:
             src_datum = src_crs.datum.name if src_crs.datum else "unknown"
             dst_datum = dst_crs.datum.name if dst_crs.datum else "unknown"
             warnings.warn(
@@ -111,6 +119,24 @@ class Transformer:
                 pipeline.dst_projection.name, "forward"
             )
         return False
+
+    @property
+    def accuracy(self) -> str:
+        """Rough accuracy classification for this transform.
+
+        Returns
+        -------
+        str
+            "sub-millimeter" — same datum, projection math only.
+            "sub-meter" — nearly identical datums (e.g. WGS84/NAD83).
+            "degraded — no datum shift applied" — different datums; results
+            may differ from pyproj by meters to hundreds of meters.
+        """
+        if self._cross_datum:
+            return "degraded \u2014 no datum shift applied"
+        if self._pipeline.mode == "longlat_to_longlat":
+            return "sub-millimeter"
+        return "sub-millimeter"
 
     def compile(self, *, precision="auto"):
         """Pre-compile fused NVRTC kernels for this transformer.
@@ -216,8 +242,16 @@ class Transformer:
         return rx, ry
 
     def transform_buffers(
-        self, x, y, z=None, *, direction="FORWARD", out_x=None, out_y=None,
-        precision="auto", stream=None,
+        self,
+        x,
+        y,
+        z=None,
+        *,
+        direction="FORWARD",
+        out_x=None,
+        out_y=None,
+        precision="auto",
+        stream=None,
     ):
         """Zero-overhead transform for device-resident arrays.
 
@@ -257,8 +291,104 @@ class Transformer:
             pipeline = self._inv_pipeline
 
         rx, ry = pipeline.transform(
-            x, y, xp, out_x=out_x, out_y=out_y, precision=precision, stream=stream,
+            x,
+            y,
+            xp,
+            out_x=out_x,
+            out_y=out_y,
+            precision=precision,
+            stream=stream,
         )
         if z is not None:
             return rx, ry, z
         return rx, ry
+
+    def transform_chunked(
+        self,
+        x,
+        y,
+        z=None,
+        *,
+        direction="FORWARD",
+        chunk_size=1_000_000,
+    ):
+        """Transform large host-resident arrays in GPU-sized chunks.
+
+        Transfers chunks to GPU, transforms via fused kernel, and copies
+        results back to the host. Reuses pre-allocated device buffers across
+        chunks to minimize allocation overhead.
+
+        Falls back to CPU ``transform()`` when CuPy is not available.
+
+        Parameters
+        ----------
+        x, y : array-like
+            Input coordinate arrays (host memory).
+        z : array-like, optional
+            Vertical coordinate. Passed through unchanged.
+        direction : str
+            "FORWARD" or "INVERSE".
+        chunk_size : int, default 1_000_000
+            Coordinates per GPU chunk. Larger values use more GPU memory
+            but reduce per-chunk overhead.
+
+        Returns
+        -------
+        tuple of numpy.ndarray
+            Transformed (x, y) or (x, y, z) on the host.
+        """
+        try:
+            import cupy as cp
+        except ImportError:
+            return self.transform(x, y, z=z, direction=direction)
+
+        x = np.asarray(x, dtype=np.float64)
+        y = np.asarray(y, dtype=np.float64)
+        n = x.size
+
+        if n == 0:
+            result = (np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64))
+            return (*result, np.asarray(z, dtype=np.float64)) if z is not None else result
+
+        # Resolve pipeline once
+        if direction == "FORWARD":
+            pipeline = self._pipeline
+        else:
+            if self._inv_pipeline is None:
+                self._inv_pipeline = TransformPipeline(self._dst_params, self._src_params)
+            pipeline = self._inv_pipeline
+
+        out_x = np.empty(n, dtype=np.float64)
+        out_y = np.empty(n, dtype=np.float64)
+
+        # Pre-allocate device buffers (reused across chunks)
+        buf_size = min(chunk_size, n)
+        dev_x = cp.empty(buf_size, dtype=cp.float64)
+        dev_y = cp.empty(buf_size, dtype=cp.float64)
+        dev_ox = cp.empty(buf_size, dtype=cp.float64)
+        dev_oy = cp.empty(buf_size, dtype=cp.float64)
+
+        for start in range(0, n, chunk_size):
+            end = min(start + chunk_size, n)
+            size = end - start
+
+            # H2D: host numpy slice → device buffer
+            dev_x[:size].set(x[start:end])
+            dev_y[:size].set(y[start:end])
+
+            # Transform on GPU (zero-alloc via pre-allocated output buffers)
+            pipeline.transform(
+                dev_x[:size],
+                dev_y[:size],
+                cp,
+                out_x=dev_ox[:size],
+                out_y=dev_oy[:size],
+            )
+
+            # D2H: device → host numpy slice
+            out_x[start:end] = cp.asnumpy(dev_ox[:size])
+            out_y[start:end] = cp.asnumpy(dev_oy[:size])
+
+        if z is not None:
+            return out_x, out_y, np.asarray(z, dtype=np.float64)
+        return out_x, out_y

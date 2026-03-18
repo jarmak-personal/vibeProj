@@ -10,10 +10,14 @@ Uses CuPy RawKernel for NVRTC compilation and caching.
 
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 
 # Kernel cache: (projection_name, direction, dtype_name) -> RawKernel
+# Protected by _kernel_cache_lock for thread-safe compilation.
 _kernel_cache: dict[tuple[str, str, str], object] = {}
+_kernel_cache_lock = threading.RLock()
 
 # Projections with fused kernel support
 _SUPPORTED = {
@@ -1454,7 +1458,10 @@ _TYPE_MAP = {
 
 
 def _get_kernel(projection_name: str, direction: str, compute_dtype: str):
-    """Get or compile a fused kernel.
+    """Get or compile a fused kernel (thread-safe).
+
+    Uses double-checked locking: the fast path (cache hit) is lock-free.
+    The lock is only acquired on cache miss to serialize NVRTC compilation.
 
     compute_dtype: "float64", "float32", or "ds" (double-single fp32).
     I/O arrays are always double* regardless of compute precision.
@@ -1462,26 +1469,33 @@ def _get_kernel(projection_name: str, direction: str, compute_dtype: str):
     import cupy as cp
 
     key = (projection_name, direction, compute_dtype)
+    # Fast path: lock-free read (dict reads are thread-safe in CPython)
     if key in _kernel_cache:
         return _kernel_cache[key]
 
-    if compute_dtype == "ds":
-        # Double-single kernel: uses ds_t pairs for fp64-equivalent accuracy at fp32 throughput
-        ds_key = (projection_name, direction)
-        if ds_key in _DS_SOURCE_MAP:
-            source, func_name = _DS_SOURCE_MAP[ds_key]
-            # ds sources have no template params (they use ds_t, not {real_t})
-            source = source.format()  # resolve any remaining {{ }} escapes
-        else:
-            # Fallback to fp64 if no ds variant exists for this projection
-            return _get_kernel(projection_name, direction, "float64")
-    else:
-        template, func_name = _SOURCE_MAP[(projection_name, direction)]
-        source = template.format(real_t=_TYPE_MAP[compute_dtype], pi=_PI_LITERALS[compute_dtype])
+    # Slow path: compile under lock
+    with _kernel_cache_lock:
+        # Re-check after acquiring lock (another thread may have compiled)
+        if key in _kernel_cache:
+            return _kernel_cache[key]
 
-    kernel = cp.RawKernel(source, func_name)
-    _kernel_cache[key] = kernel
-    return kernel
+        if compute_dtype == "ds":
+            ds_key = (projection_name, direction)
+            if ds_key in _DS_SOURCE_MAP:
+                source, func_name = _DS_SOURCE_MAP[ds_key]
+                source = source.format()
+            else:
+                # Fallback to fp64 (RLock allows re-entrant acquisition)
+                return _get_kernel(projection_name, direction, "float64")
+        else:
+            template, func_name = _SOURCE_MAP[(projection_name, direction)]
+            source = template.format(
+                real_t=_TYPE_MAP[compute_dtype], pi=_PI_LITERALS[compute_dtype]
+            )
+
+        kernel = cp.RawKernel(source, func_name)
+        _kernel_cache[key] = kernel
+        return kernel
 
 
 # DS source map: only projections with ds-specific implementations
@@ -1559,13 +1573,21 @@ def fused_transform(
     if xp is not cp:
         return None
 
+    from vibeproj.exceptions import CoordinateValidationError
+
     n = arg1.size
     if arg2.size != n:
-        raise ValueError(f"arg1 and arg2 must have the same size, got {n} and {arg2.size}")
+        raise CoordinateValidationError(
+            f"arg1 and arg2 must have the same size, got {n} and {arg2.size}"
+        )
     if out_x is not None and out_x.size < n:
-        raise ValueError(f"out_x too small: need at least {n} elements, got {out_x.size}")
+        raise CoordinateValidationError(
+            f"out_x too small: need at least {n} elements, got {out_x.size}"
+        )
     if out_y is not None and out_y.size < n:
-        raise ValueError(f"out_y too small: need at least {n} elements, got {out_y.size}")
+        raise CoordinateValidationError(
+            f"out_y too small: need at least {n} elements, got {out_y.size}"
+        )
 
     # Determine compute precision
     # Normalize: external names (fp64/fp32/ds/auto) → internal dtype keys (float64/float32/ds)

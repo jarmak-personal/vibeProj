@@ -82,9 +82,7 @@ class Geostationary(Projection):
         cos_y = xp.cos(y_proj)
 
         # Back-project: ray-ellipsoid intersection
-        a_coeff = sin_x * sin_x + cos_x * cos_x * (
-            cos_y * cos_y + sin_y * sin_y * r_eq2 / r_pol2
-        )
+        a_coeff = sin_x * sin_x + cos_x * cos_x * (cos_y * cos_y + sin_y * sin_y * r_eq2 / r_pol2)
         b_coeff = -2 * H * cos_x * cos_y
         c_coeff = H * H - a * a
 
@@ -100,7 +98,7 @@ class Geostationary(Projection):
         # Y_ecef = -Sy (from sign convention), X_ecef = H - Sx
         lam = xp.arctan2(-Sy, H - Sx)
         # Geocentric → geodetic latitude (CGMS standard: r_eq²/r_pol² factor)
-        phi = xp.arctan(Sz * r_eq2 / (xp.sqrt((H - Sx) ** 2 + Sy ** 2) * r_pol2))
+        phi = xp.arctan(Sz * r_eq2 / (xp.sqrt((H - Sx) ** 2 + Sy**2) * r_pol2))
 
         return lam, phi
 

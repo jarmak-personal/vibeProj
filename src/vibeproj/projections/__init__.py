@@ -16,8 +16,10 @@ def register(name: str, projection: Projection):
 def get_projection(name: str) -> Projection:
     """Look up a projection by name."""
     if name not in PROJECTION_REGISTRY:
+        from vibeproj.exceptions import UnsupportedProjectionError
+
         supported = sorted(PROJECTION_REGISTRY.keys())
-        raise ValueError(f"Unknown projection '{name}'. Supported: {supported}")
+        raise UnsupportedProjectionError(f"Unknown projection '{name}'. Supported: {supported}")
     return PROJECTION_REGISTRY[name]
 
 

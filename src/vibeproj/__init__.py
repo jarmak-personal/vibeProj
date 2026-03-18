@@ -2,6 +2,12 @@
 
 __version__ = "0.1.2"
 
+from vibeproj.exceptions import (
+    CoordinateValidationError,
+    CRSResolutionError,
+    UnsupportedProjectionError,
+    VibeProjectionError,
+)
 from vibeproj.transformer import Transformer
 
 
@@ -54,4 +60,13 @@ def warm_up(projections=None, *, precision="auto"):
     compile_kernels(projections, precision=precision)
 
 
-__all__ = ["Transformer", "list_projections", "warm_up", "__version__"]
+__all__ = [
+    "Transformer",
+    "list_projections",
+    "warm_up",
+    "VibeProjectionError",
+    "UnsupportedProjectionError",
+    "CRSResolutionError",
+    "CoordinateValidationError",
+    "__version__",
+]
