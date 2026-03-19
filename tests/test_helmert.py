@@ -367,3 +367,296 @@ def test_cross_datum_no_warning_when_helmert():
         if "vibeproj" in str(w.filename).lower() and "pyproj" not in str(w.filename).lower()
     ]
     assert len(our_warnings) == 0, f"Unexpected vibeProj warnings: {our_warnings}"
+
+
+# ---------------------------------------------------------------------------
+# 15-parameter time-dependent Helmert
+# ---------------------------------------------------------------------------
+
+
+def test_helmert_rate_fields_default_zero():
+    """Rate fields default to 0.0 (backward-compatible 7-param)."""
+    h = HelmertParams(
+        tx=1.0,
+        ty=2.0,
+        tz=3.0,
+        rx=0.01,
+        ry=0.02,
+        rz=0.03,
+        ds=1.0001,
+        src_ellipsoid=WGS84,
+        dst_ellipsoid=GRS80,
+    )
+    assert h.dtx == 0.0
+    assert h.dty == 0.0
+    assert h.dtz == 0.0
+    assert h.drx == 0.0
+    assert h.dry == 0.0
+    assert h.drz == 0.0
+    assert h.dds == 0.0
+    assert h.t_epoch == 0.0
+    assert not h.has_rates
+
+
+def test_helmert_has_rates():
+    """has_rates is True when any rate field is nonzero."""
+    h = HelmertParams(
+        tx=0,
+        ty=0,
+        tz=0,
+        rx=0,
+        ry=0,
+        rz=0,
+        ds=1.0,
+        src_ellipsoid=WGS84,
+        dst_ellipsoid=GRS80,
+        dtx=0.001,
+    )
+    assert h.has_rates
+
+
+def test_helmert_at_epoch_zero_dt():
+    """at_epoch(t_epoch) returns the same base params (dt=0)."""
+    h = HelmertParams(
+        tx=1.0,
+        ty=2.0,
+        tz=3.0,
+        rx=0.01,
+        ry=0.02,
+        rz=0.03,
+        ds=1.0001,
+        src_ellipsoid=WGS84,
+        dst_ellipsoid=GRS80,
+        dtx=0.1,
+        dty=0.2,
+        dtz=0.3,
+        drx=1e-9,
+        dry=2e-9,
+        drz=3e-9,
+        dds=1e-10,
+        t_epoch=2010.0,
+    )
+    resolved = h.at_epoch(2010.0)
+    assert_allclose(resolved.tx, 1.0)
+    assert_allclose(resolved.ty, 2.0)
+    assert_allclose(resolved.tz, 3.0)
+    assert_allclose(resolved.ds, 1.0001)
+    # Rates should be zeroed in the resolved result
+    assert resolved.dtx == 0.0
+    assert not resolved.has_rates
+
+
+def test_helmert_at_epoch_nonzero_dt():
+    """at_epoch applies rate * dt to each base parameter."""
+    h = HelmertParams(
+        tx=1.0,
+        ty=2.0,
+        tz=3.0,
+        rx=0.0,
+        ry=0.0,
+        rz=0.0,
+        ds=1.0,
+        src_ellipsoid=WGS84,
+        dst_ellipsoid=GRS80,
+        dtx=0.1,
+        dty=-0.2,
+        dtz=0.3,
+        drx=1e-9,
+        dry=0.0,
+        drz=0.0,
+        dds=1e-10,
+        t_epoch=2010.0,
+    )
+    resolved = h.at_epoch(2020.0)  # dt = 10 years
+    assert_allclose(resolved.tx, 1.0 + 0.1 * 10)
+    assert_allclose(resolved.ty, 2.0 + (-0.2) * 10)
+    assert_allclose(resolved.tz, 3.0 + 0.3 * 10)
+    assert_allclose(resolved.rx, 1e-9 * 10)
+    assert_allclose(resolved.ds, 1.0 + 1e-10 * 10)
+
+
+def test_helmert_inverted_preserves_rates():
+    """inverted() negates rates and preserves t_epoch."""
+    h = HelmertParams(
+        tx=1.0,
+        ty=2.0,
+        tz=3.0,
+        rx=0.01,
+        ry=0.02,
+        rz=0.03,
+        ds=1.0001,
+        src_ellipsoid=WGS84,
+        dst_ellipsoid=GRS80,
+        dtx=0.1,
+        dty=0.2,
+        dtz=0.3,
+        drx=1e-9,
+        dry=2e-9,
+        drz=3e-9,
+        dds=1e-10,
+        t_epoch=2010.0,
+    )
+    inv = h.inverted()
+    assert inv.dtx == -0.1
+    assert inv.dty == -0.2
+    assert inv.dtz == -0.3
+    assert inv.drx == -1e-9
+    assert inv.dry == -2e-9
+    assert inv.drz == -3e-9
+    assert inv.dds == -1e-10
+    assert inv.t_epoch == 2010.0
+
+
+def test_helmert_at_epoch_roundtrip():
+    """Forward at_epoch then inverse at_epoch recovers original coords."""
+    h = HelmertParams(
+        tx=446.448,
+        ty=-125.157,
+        tz=542.060,
+        rx=0.1502 * 4.84813681e-6,
+        ry=0.2470 * 4.84813681e-6,
+        rz=0.8421 * 4.84813681e-6,
+        ds=1.0 + (-20.4894) * 1e-6,
+        src_ellipsoid=WGS84,
+        dst_ellipsoid=Ellipsoid.from_af(6377563.396, 299.3249646),
+        dtx=0.001,
+        dty=-0.002,
+        dtz=0.003,
+        drx=1e-11,
+        dry=2e-11,
+        drz=3e-11,
+        dds=1e-12,
+        t_epoch=2000.0,
+    )
+    epoch = 2024.0
+    h_fwd = h.at_epoch(epoch)
+    h_inv = h.inverted().at_epoch(epoch)
+
+    lat = np.array([51.5074])
+    lon = np.array([-0.1278])
+
+    lat_s, lon_s = apply_helmert(lat, lon, h_fwd, np)
+    lat_b, lon_b = apply_helmert(lat_s, lon_s, h_inv, np)
+
+    assert_allclose(lat_b, lat, atol=1e-6)
+    assert_allclose(lon_b, lon, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# datum_shift parameter on Transformer
+# ---------------------------------------------------------------------------
+
+
+def test_datum_shift_invalid_value():
+    """Invalid datum_shift raises ValueError."""
+    with pytest.raises(ValueError, match="datum_shift"):
+        Transformer.from_crs("EPSG:4326", "EPSG:27700", datum_shift="invalid")
+
+
+def test_datum_shift_fast_uses_base_params():
+    """datum_shift='fast' passes base 7-param Helmert (rates not applied)."""
+    t = Transformer.from_crs("EPSG:4326", "EPSG:27700", datum_shift="fast")
+    assert t._helmert is not None
+    assert not t._epoch_applied
+    assert t.accuracy == "sub-meter"
+
+
+def test_datum_shift_accurate_default():
+    """datum_shift='accurate' is the default."""
+    t = Transformer.from_crs("EPSG:4326", "EPSG:27700")
+    assert t._datum_shift == "accurate"
+
+
+def test_datum_shift_pickle_roundtrip():
+    """datum_shift and epoch survive pickle."""
+    import pickle
+
+    t = Transformer.from_crs("EPSG:4326", "EPSG:27700", datum_shift="fast", epoch=2024.0)
+    data = pickle.dumps(t)
+    t2 = pickle.loads(data)
+    assert t2._datum_shift == "fast"
+    assert t2._epoch == 2024.0
+
+
+# ---------------------------------------------------------------------------
+# PROJ pipeline rate param parsing
+# ---------------------------------------------------------------------------
+
+
+def test_parse_helmert_rates_from_proj4():
+    """_parse_helmert_from_proj4 extracts 15-param rate fields."""
+    from vibeproj.crs import _parse_helmert_from_proj4
+
+    proj4 = (
+        "+proj=pipeline +step +proj=helmert +x=1.0 +y=2.0 +z=3.0 "
+        "+rx=0.1 +ry=0.2 +rz=0.3 +s=0.5 "
+        "+dx=0.01 +dy=0.02 +dz=0.03 "
+        "+drx=0.001 +dry=0.002 +drz=0.003 +ds=0.004 "
+        "+t_epoch=2010.0 +convention=position_vector"
+    )
+    parsed = _parse_helmert_from_proj4(proj4)
+    assert parsed is not None
+    (
+        tx,
+        ty,
+        tz,
+        rx_as,
+        ry_as,
+        rz_as,
+        ds_ppm,
+        convention,
+        is_inverse,
+        dtx,
+        dty,
+        dtz,
+        drx_as,
+        dry_as,
+        drz_as,
+        dds_ppm,
+        t_epoch,
+    ) = parsed
+    assert tx == 1.0
+    assert dtx == 0.01
+    assert dty == 0.02
+    assert dtz == 0.03
+    assert drx_as == 0.001
+    assert dry_as == 0.002
+    assert drz_as == 0.003
+    assert dds_ppm == 0.004
+    assert t_epoch == 2010.0
+
+
+def test_parse_helmert_no_rates():
+    """Standard 7-param PROJ string yields zero rates."""
+    from vibeproj.crs import _parse_helmert_from_proj4
+
+    proj4 = (
+        "+proj=pipeline +step +proj=helmert +x=446.448 +y=-125.157 +z=542.060 "
+        "+rx=0.1502 +ry=0.2470 +rz=0.8421 +s=-20.4894 "
+        "+convention=position_vector"
+    )
+    parsed = _parse_helmert_from_proj4(proj4)
+    assert parsed is not None
+    (
+        tx,
+        ty,
+        tz,
+        rx_as,
+        ry_as,
+        rz_as,
+        ds_ppm,
+        convention,
+        is_inverse,
+        dtx,
+        dty,
+        dtz,
+        drx_as,
+        dry_as,
+        drz_as,
+        dds_ppm,
+        t_epoch,
+    ) = parsed
+    assert dtx == 0.0
+    assert dty == 0.0
+    assert dtz == 0.0
+    assert t_epoch == 0.0

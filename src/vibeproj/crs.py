@@ -334,7 +334,35 @@ def _parse_helmert_from_proj4(proj4: str):
         ds_ppm = float(params.get("s", "0"))
         convention = params.get("convention", "position_vector")
 
-        return tx, ty, tz, rx_as, ry_as, rz_as, ds_ppm, convention, is_inverse
+        # Time-dependent (15-parameter) rates
+        dtx = float(params.get("dx", "0"))
+        dty = float(params.get("dy", "0"))
+        dtz = float(params.get("dz", "0"))
+        drx_as = float(params.get("drx", "0"))
+        dry_as = float(params.get("dry", "0"))
+        drz_as = float(params.get("drz", "0"))
+        dds_ppm = float(params.get("ds", "0"))
+        t_epoch = float(params.get("t_epoch", "0"))
+
+        return (
+            tx,
+            ty,
+            tz,
+            rx_as,
+            ry_as,
+            rz_as,
+            ds_ppm,
+            convention,
+            is_inverse,
+            dtx,
+            dty,
+            dtz,
+            drx_as,
+            dry_as,
+            drz_as,
+            dds_ppm,
+            t_epoch,
+        )
 
     return None
 
@@ -381,18 +409,45 @@ def extract_helmert(src_crs: CRS, dst_crs: CRS):
         if parsed is None:
             continue
 
-        tx, ty, tz, rx_as, ry_as, rz_as, ds_ppm, convention, is_inverse = parsed
+        (
+            tx,
+            ty,
+            tz,
+            rx_as,
+            ry_as,
+            rz_as,
+            ds_ppm,
+            convention,
+            is_inverse,
+            dtx,
+            dty,
+            dtz,
+            drx_as,
+            dry_as,
+            drz_as,
+            dds_ppm,
+            t_epoch,
+        ) = parsed
 
         rx_rad = rx_as * _ARC_SECOND_TO_RAD
         ry_rad = ry_as * _ARC_SECOND_TO_RAD
         rz_rad = rz_as * _ARC_SECOND_TO_RAD
         ds = 1.0 + ds_ppm * 1e-6
 
+        # Convert rate rotations to radians/yr, rate scale to 1/yr
+        drx_rad = drx_as * _ARC_SECOND_TO_RAD
+        dry_rad = dry_as * _ARC_SECOND_TO_RAD
+        drz_rad = drz_as * _ARC_SECOND_TO_RAD
+        dds_scaled = dds_ppm * 1e-6
+
         # Coordinate Frame uses opposite rotation sign convention
         if convention == "coordinate_frame":
             rx_rad = -rx_rad
             ry_rad = -ry_rad
             rz_rad = -rz_rad
+            drx_rad = -drx_rad
+            dry_rad = -dry_rad
+            drz_rad = -drz_rad
 
         src_ell = _get_ellipsoid(src_geo)
         dst_ell = _get_ellipsoid(dst_geo)
@@ -404,6 +459,9 @@ def extract_helmert(src_crs: CRS, dst_crs: CRS):
             tx, ty, tz = -tx, -ty, -tz
             rx_rad, ry_rad, rz_rad = -rx_rad, -ry_rad, -rz_rad
             ds = 1.0 / ds if ds != 0.0 else 1.0
+            dtx, dty, dtz = -dtx, -dty, -dtz
+            drx_rad, dry_rad, drz_rad = -drx_rad, -dry_rad, -drz_rad
+            dds_scaled = -dds_scaled
 
         helmert = HelmertParams(
             tx=tx,
@@ -415,6 +473,14 @@ def extract_helmert(src_crs: CRS, dst_crs: CRS):
             ds=ds,
             src_ellipsoid=src_ell,
             dst_ellipsoid=dst_ell,
+            dtx=dtx,
+            dty=dty,
+            dtz=dtz,
+            drx=drx_rad,
+            dry=dry_rad,
+            drz=drz_rad,
+            dds=dds_scaled,
+            t_epoch=t_epoch,
         )
 
         # Skip identity transforms (all params effectively zero)

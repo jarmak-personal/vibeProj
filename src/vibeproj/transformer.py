@@ -21,6 +21,22 @@ from vibeproj.pipeline import TransformPipeline
 from vibeproj.runtime import get_array_module, to_device
 
 
+def _resolve_epoch(user_epoch, src_crs):
+    """Resolve the evaluation epoch for time-dependent Helmert.
+
+    Priority: user-provided epoch > source CRS coordinate epoch > None.
+    """
+    if user_epoch is not None:
+        return float(user_epoch)
+    try:
+        ce = src_crs.coordinate_epoch
+        if ce is not None:
+            return float(ce)
+    except (AttributeError, TypeError):
+        pass
+    return None
+
+
 class Transformer:
     """GPU-accelerated coordinate transformer.
 
@@ -39,13 +55,18 @@ class Transformer:
     front-load compilation if you want deterministic latency.
     """
 
-    def __init__(self, crs_from, crs_to, *, always_xy=True):
+    def __init__(self, crs_from, crs_to, *, always_xy=True, datum_shift="accurate", epoch=None):
+        if datum_shift not in ("accurate", "fast"):
+            raise ValueError(f"datum_shift must be 'accurate' or 'fast', got {datum_shift!r}")
+
         src_params, dst_params, src_crs, dst_crs = resolve_transform(crs_from, crs_to)
 
         # Store raw inputs for pickle serialization
         self._crs_from_input = crs_from
         self._crs_to_input = crs_to
         self._always_xy = always_xy
+        self._datum_shift = datum_shift
+        self._epoch = epoch
 
         # Resolve display labels for __repr__
         src_epsg = src_crs.to_epsg()
@@ -62,11 +83,24 @@ class Transformer:
             and abs(src_ell.semi_major_metre - dst_ell.semi_major_metre) > 1.0
         )
         self._helmert = None
+        self._helmert_has_rates = False
+        self._epoch_applied = False
         if self._cross_datum:
             from vibeproj.crs import extract_helmert
 
-            self._helmert = extract_helmert(src_crs, dst_crs)
-            if self._helmert is None:
+            helmert_raw = extract_helmert(src_crs, dst_crs)
+            if helmert_raw is not None:
+                self._helmert_has_rates = helmert_raw.has_rates
+                if datum_shift == "accurate" and helmert_raw.has_rates:
+                    eval_epoch = _resolve_epoch(epoch, src_crs)
+                    if eval_epoch is not None:
+                        self._helmert = helmert_raw.at_epoch(eval_epoch)
+                        self._epoch_applied = True
+                    else:
+                        self._helmert = helmert_raw
+                else:
+                    self._helmert = helmert_raw
+            if self._helmert is None and helmert_raw is None:
                 # No Helmert available (grid-only datum shift)
                 src_datum = src_crs.datum.name if src_crs.datum else "unknown"
                 dst_datum = dst_crs.datum.name if dst_crs.datum else "unknown"
@@ -92,7 +126,9 @@ class Transformer:
         self._inv_pipeline_lock = threading.Lock()
 
     @staticmethod
-    def from_crs(crs_from, crs_to, *, always_xy=True) -> Transformer:
+    def from_crs(
+        crs_from, crs_to, *, always_xy=True, datum_shift="accurate", epoch=None
+    ) -> Transformer:
         """Create a Transformer from source and target CRS.
 
         Parameters
@@ -104,8 +140,19 @@ class Transformer:
             (longitude, latitude) for geographic CRS and (easting, northing)
             for projected CRS. This matches shapely and geopandas conventions.
             If False, uses the CRS native axis order (pyproj default).
+        datum_shift : str, default "accurate"
+            "accurate" — use 15-parameter time-dependent Helmert when available,
+            evaluating rate terms at the given *epoch*. Falls back to 7-parameter
+            when no rates are present or no epoch can be resolved.
+            "fast" — always use the base 7-parameter Helmert (ignores rate terms).
+        epoch : float, optional
+            Decimal year at which to evaluate the time-dependent Helmert
+            (e.g. 2024.0). Only used when *datum_shift="accurate"*.
+            If omitted, the source CRS coordinate epoch is used when available.
         """
-        return Transformer(crs_from, crs_to, always_xy=always_xy)
+        return Transformer(
+            crs_from, crs_to, always_xy=always_xy, datum_shift=datum_shift, epoch=epoch
+        )
 
     def __repr__(self) -> str:
         proj = self._dst_params.projection_name
@@ -136,13 +183,17 @@ class Transformer:
         -------
         str
             "sub-millimeter" — same datum, projection math only.
-            "sub-meter" — nearly identical datums (e.g. WGS84/NAD83).
+            "sub-decimeter" — cross-datum with 15-param time-dependent Helmert
+            evaluated at a known epoch.
+            "sub-meter" — cross-datum with 7-param Helmert.
             "degraded — no datum shift applied" — different datums; results
             may differ from pyproj by meters to hundreds of meters.
         """
         if self._cross_datum and self._helmert is None:
             return "degraded \u2014 no datum shift applied"
         if self._cross_datum and self._helmert is not None:
+            if self._epoch_applied:
+                return "sub-decimeter"
             return "sub-meter"
         return "sub-millimeter"
 
@@ -173,10 +224,18 @@ class Transformer:
             "crs_from": self._crs_from_input,
             "crs_to": self._crs_to_input,
             "always_xy": self._always_xy,
+            "datum_shift": self._datum_shift,
+            "epoch": self._epoch,
         }
 
     def __setstate__(self, state):
-        self.__init__(state["crs_from"], state["crs_to"], always_xy=state["always_xy"])
+        self.__init__(
+            state["crs_from"],
+            state["crs_to"],
+            always_xy=state["always_xy"],
+            datum_shift=state.get("datum_shift", "accurate"),
+            epoch=state.get("epoch"),
+        )
 
     def transform(self, x, y, z=None, direction="FORWARD"):
         """Transform coordinates.

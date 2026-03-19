@@ -37,6 +37,50 @@ class HelmertParams:
     src_ellipsoid: Ellipsoid
     dst_ellipsoid: Ellipsoid
 
+    # Time-dependent (15-parameter) rates — default 0 preserves 7-param behavior
+    dtx: float = 0.0  # X translation rate (m/yr)
+    dty: float = 0.0  # Y translation rate (m/yr)
+    dtz: float = 0.0  # Z translation rate (m/yr)
+    drx: float = 0.0  # X rotation rate (rad/yr)
+    dry: float = 0.0  # Y rotation rate (rad/yr)
+    drz: float = 0.0  # Z rotation rate (rad/yr)
+    dds: float = 0.0  # scale rate (ppm/yr * 1e-6)
+    t_epoch: float = 0.0  # reference epoch (decimal year)
+
+    @property
+    def has_rates(self) -> bool:
+        """True if time-dependent rate parameters are present."""
+        return (
+            self.dtx != 0.0
+            or self.dty != 0.0
+            or self.dtz != 0.0
+            or self.drx != 0.0
+            or self.dry != 0.0
+            or self.drz != 0.0
+            or self.dds != 0.0
+        )
+
+    def at_epoch(self, epoch: float) -> HelmertParams:
+        """Compute effective 7-parameter transformation at a given epoch.
+
+        Folds the rate terms into the base parameters:
+            param_eff = param + rate * (epoch - t_epoch)
+
+        Returns a standard (non-time-dependent) HelmertParams with rates zeroed.
+        """
+        dt = epoch - self.t_epoch
+        return HelmertParams(
+            tx=self.tx + self.dtx * dt,
+            ty=self.ty + self.dty * dt,
+            tz=self.tz + self.dtz * dt,
+            rx=self.rx + self.drx * dt,
+            ry=self.ry + self.dry * dt,
+            rz=self.rz + self.drz * dt,
+            ds=self.ds + self.dds * dt,
+            src_ellipsoid=self.src_ellipsoid,
+            dst_ellipsoid=self.dst_ellipsoid,
+        )
+
     def inverted(self) -> HelmertParams:
         """Return the inverse transformation (swap src/dst, negate params)."""
         return HelmertParams(
@@ -49,6 +93,14 @@ class HelmertParams:
             ds=1.0 / self.ds if self.ds != 0.0 else 1.0,
             src_ellipsoid=self.dst_ellipsoid,
             dst_ellipsoid=self.src_ellipsoid,
+            dtx=-self.dtx,
+            dty=-self.dty,
+            dtz=-self.dtz,
+            drx=-self.drx,
+            dry=-self.dry,
+            drz=-self.drz,
+            dds=-self.dds,
+            t_epoch=self.t_epoch,
         )
 
 
