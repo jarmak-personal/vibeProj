@@ -246,7 +246,9 @@ class Transformer:
             Input coordinates. With always_xy=True (default): x=longitude, y=latitude
             for geographic CRS. With always_xy=False: native CRS axis order.
         z : scalar, list, numpy array, or cupy array, optional
-            Vertical coordinate. Passed through unchanged (no vertical datum transform).
+            Ellipsoidal height in meters. When a Helmert datum shift is active,
+            z is transformed through the ECEF intermediate (correctness fix).
+            When no datum shift is needed, z is passed through unchanged.
         direction : str
             "FORWARD" or "INVERSE".
 
@@ -278,16 +280,28 @@ class Transformer:
             if not xp.issubdtype(y.dtype, xp.floating):
                 y = y.astype(xp.float64)
 
-        # Handle z passthrough
-        if z is not None and not is_scalar:
-            z_out = to_device(z, xp)
-            if not xp.issubdtype(z_out.dtype, xp.floating):
-                z_out = z_out.astype(xp.float64)
-        else:
-            z_out = z
+        # Prepare z for pipeline: only route through Helmert when active
+        z_pipeline = None  # z to pass into pipeline (None = no z transform)
+        z_passthrough = z  # z to return as-is when not routing through pipeline
+        if z is not None and self._helmert is not None:
+            if is_scalar:
+                z_pipeline = (
+                    xp.asarray([z], dtype="f8")
+                    if isinstance(z, (int, float))
+                    else xp.asarray([float(z)], dtype="f8")
+                )
+            else:
+                z_pipeline = to_device(z, xp)
+                if not xp.issubdtype(z_pipeline.dtype, xp.floating):
+                    z_pipeline = z_pipeline.astype(xp.float64)
+            z_passthrough = None  # pipeline will return z
+        elif z is not None and not is_scalar:
+            z_passthrough = to_device(z, xp)
+            if not xp.issubdtype(z_passthrough.dtype, xp.floating):
+                z_passthrough = z_passthrough.astype(xp.float64)
 
         if direction == "FORWARD":
-            rx, ry = self._pipeline.transform(x, y, xp)
+            result = self._pipeline.transform(x, y, xp, z=z_pipeline)
         else:
             if self._inv_pipeline is None:
                 with self._inv_pipeline_lock:
@@ -296,7 +310,13 @@ class Transformer:
                         self._inv_pipeline = TransformPipeline(
                             self._dst_params, self._src_params, helmert=inv_helmert
                         )
-            rx, ry = self._inv_pipeline.transform(x, y, xp)
+            result = self._inv_pipeline.transform(x, y, xp, z=z_pipeline)
+
+        if z_pipeline is not None:
+            rx, ry, z_out = result
+        else:
+            rx, ry = result
+            z_out = z_passthrough
 
         # Check for non-finite output values
         if rx.size > 0 and (xp.any(~xp.isfinite(rx)) or xp.any(~xp.isfinite(ry))):
@@ -312,6 +332,11 @@ class Transformer:
                 rx, ry = float(rx.get()[0]), float(ry.get()[0])
             else:
                 rx, ry = float(rx[0]), float(ry[0])
+            if z_out is not None and hasattr(z_out, "__len__"):
+                if hasattr(z_out, "get"):
+                    z_out = float(z_out.get()[0])
+                else:
+                    z_out = float(z_out[0])
 
         if z is not None:
             return rx, ry, z_out
@@ -326,6 +351,7 @@ class Transformer:
         direction="FORWARD",
         out_x=None,
         out_y=None,
+        out_z=None,
         precision="auto",
         stream=None,
     ):
@@ -339,11 +365,15 @@ class Transformer:
         x, y : cupy.ndarray or numpy.ndarray
             Coordinate arrays (fp64 storage per ADR-0002).
         z : cupy.ndarray or numpy.ndarray, optional
-            Vertical coordinate array. Passed through unchanged.
+            Ellipsoidal height array. Transformed through Helmert when a datum
+            shift is active; passed through unchanged otherwise.
         direction : str
             "FORWARD" or "INVERSE".
         out_x, out_y : cupy.ndarray or numpy.ndarray, optional
             Pre-allocated fp64 output arrays. Avoids allocation.
+        out_z : cupy.ndarray or numpy.ndarray, optional
+            Pre-allocated fp64 output height array. Only used when z is provided
+            and a Helmert datum shift is active.
         precision : str
             "fp64" = full double precision.
             "fp32" = fp32 compute with fp64 I/O (ADR-0002 mixed precision).
@@ -355,7 +385,7 @@ class Transformer:
         Returns
         -------
         tuple of arrays
-            Transformed (out_x, out_y) or (out_x, out_y, z). Same objects if pre-allocated.
+            Transformed (out_x, out_y) or (out_x, out_y, z_out). Same objects if pre-allocated.
         """
         xp = get_array_module(x)
 
@@ -369,18 +399,26 @@ class Transformer:
                 )
             pipeline = self._inv_pipeline
 
-        rx, ry = pipeline.transform(
+        # Route z through pipeline only when Helmert is active
+        z_pipeline = z if (z is not None and self._helmert is not None) else None
+
+        result = pipeline.transform(
             x,
             y,
             xp,
+            z=z_pipeline,
             out_x=out_x,
             out_y=out_y,
+            out_z=out_z,
             precision=precision,
             stream=stream,
         )
+        if z_pipeline is not None:
+            return result  # already (rx, ry, z_out)
         if z is not None:
+            rx, ry = result
             return rx, ry, z
-        return rx, ry
+        return result
 
     def transform_chunked(
         self,
@@ -404,7 +442,8 @@ class Transformer:
         x, y : array-like
             Input coordinate arrays (host memory).
         z : array-like, optional
-            Vertical coordinate. Passed through unchanged.
+            Ellipsoidal height. Transformed through Helmert when a datum
+            shift is active; passed through unchanged otherwise.
         direction : str
             "FORWARD" or "INVERSE".
         chunk_size : int, default 1_000_000
@@ -442,8 +481,13 @@ class Transformer:
                         )
             pipeline = self._inv_pipeline
 
+        # Determine if z needs to be chunked through Helmert
+        chunk_z = z is not None and self._helmert is not None
+        z_arr = np.asarray(z, dtype=np.float64) if z is not None else None
+
         out_x = np.empty(n, dtype=np.float64)
         out_y = np.empty(n, dtype=np.float64)
+        out_z = np.empty(n, dtype=np.float64) if chunk_z else None
 
         # Pre-allocate device buffers (reused across chunks)
         buf_size = min(chunk_size, n)
@@ -451,6 +495,9 @@ class Transformer:
         dev_y = cp.empty(buf_size, dtype=cp.float64)
         dev_ox = cp.empty(buf_size, dtype=cp.float64)
         dev_oy = cp.empty(buf_size, dtype=cp.float64)
+        if chunk_z:
+            dev_z = cp.empty(buf_size, dtype=cp.float64)
+            dev_oz = cp.empty(buf_size, dtype=cp.float64)
 
         for start in range(0, n, chunk_size):
             end = min(start + chunk_size, n)
@@ -460,19 +507,35 @@ class Transformer:
             dev_x[:size].set(x[start:end])
             dev_y[:size].set(y[start:end])
 
-            # Transform on GPU (zero-alloc via pre-allocated output buffers)
-            pipeline.transform(
-                dev_x[:size],
-                dev_y[:size],
-                cp,
-                out_x=dev_ox[:size],
-                out_y=dev_oy[:size],
-            )
-
-            # D2H: device → host numpy slice
-            out_x[start:end] = cp.asnumpy(dev_ox[:size])
-            out_y[start:end] = cp.asnumpy(dev_oy[:size])
+            if chunk_z:
+                dev_z[:size].set(z_arr[start:end])
+                result = pipeline.transform(
+                    dev_x[:size],
+                    dev_y[:size],
+                    cp,
+                    z=dev_z[:size],
+                    out_x=dev_ox[:size],
+                    out_y=dev_oy[:size],
+                    out_z=dev_oz[:size],
+                )
+                out_x[start:end] = cp.asnumpy(result[0])
+                out_y[start:end] = cp.asnumpy(result[1])
+                out_z[start:end] = cp.asnumpy(result[2])
+            else:
+                # Transform on GPU (zero-alloc via pre-allocated output buffers)
+                pipeline.transform(
+                    dev_x[:size],
+                    dev_y[:size],
+                    cp,
+                    out_x=dev_ox[:size],
+                    out_y=dev_oy[:size],
+                )
+                # D2H: device → host numpy slice
+                out_x[start:end] = cp.asnumpy(dev_ox[:size])
+                out_y[start:end] = cp.asnumpy(dev_oy[:size])
 
         if z is not None:
-            return out_x, out_y, np.asarray(z, dtype=np.float64)
+            if chunk_z:
+                return out_x, out_y, out_z
+            return out_x, out_y, z_arr
         return out_x, out_y

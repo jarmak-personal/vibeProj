@@ -104,7 +104,7 @@ class HelmertParams:
         )
 
 
-def geodetic_to_ecef(lat_rad, lon_rad, a, es, xp):
+def geodetic_to_ecef(lat_rad, lon_rad, a, es, xp, h=None):
     """Convert geodetic (lat, lon in radians) to ECEF (X, Y, Z) in meters.
 
     Parameters
@@ -117,6 +117,8 @@ def geodetic_to_ecef(lat_rad, lon_rad, a, es, xp):
         First eccentricity squared.
     xp : module
         Array module (numpy or cupy).
+    h : array_like, optional
+        Ellipsoidal height in meters. When None, height=0 (exact current behavior).
 
     Returns
     -------
@@ -129,13 +131,18 @@ def geodetic_to_ecef(lat_rad, lon_rad, a, es, xp):
     cos_lon = xp.cos(lon_rad)
 
     N = a / xp.sqrt(1.0 - es * sin_lat * sin_lat)
-    X = N * cos_lat * cos_lon
-    Y = N * cos_lat * sin_lon
-    Z = N * (1.0 - es) * sin_lat
+    if h is not None:
+        X = (N + h) * cos_lat * cos_lon
+        Y = (N + h) * cos_lat * sin_lon
+        Z = (N * (1.0 - es) + h) * sin_lat
+    else:
+        X = N * cos_lat * cos_lon
+        Y = N * cos_lat * sin_lon
+        Z = N * (1.0 - es) * sin_lat
     return X, Y, Z
 
 
-def ecef_to_geodetic(X, Y, Z, a, es, xp):
+def ecef_to_geodetic(X, Y, Z, a, es, xp, return_height=False):
     """Convert ECEF (X, Y, Z) to geodetic (lat, lon in radians).
 
     Uses iterative Bowring method (converges in ~3 iterations for sub-mm).
@@ -150,11 +157,15 @@ def ecef_to_geodetic(X, Y, Z, a, es, xp):
         First eccentricity squared.
     xp : module
         Array module (numpy or cupy).
+    return_height : bool, optional
+        When True, recover and return ellipsoidal height. Default False.
 
     Returns
     -------
     lat_rad, lon_rad : arrays
         Geodetic coordinates in radians.
+    h : arrays (only when return_height=True)
+        Ellipsoidal height in meters.
     """
     p = xp.sqrt(X * X + Y * Y)
     lon = xp.arctan2(Y, X)
@@ -167,10 +178,23 @@ def ecef_to_geodetic(X, Y, Z, a, es, xp):
         N = a / xp.sqrt(1.0 - es * sin_lat * sin_lat)
         lat = xp.arctan2(Z + es * N * sin_lat, p)
 
+    if return_height:
+        sin_lat = xp.sin(lat)
+        cos_lat = xp.cos(lat)
+        N = a / xp.sqrt(1.0 - es * sin_lat * sin_lat)
+        # Normal case: h = p / cos(lat) - N
+        h = p / cos_lat - N
+        # Near-pole guard: |cos(lat)| < 1e-10 → use Z-based formula
+        near_pole = xp.abs(cos_lat) < 1e-10
+        if xp.any(near_pole):
+            h_pole = xp.abs(Z) / xp.abs(sin_lat) - N * (1.0 - es)
+            h = xp.where(near_pole, h_pole, h)
+        return lat, lon, h
+
     return lat, lon
 
 
-def apply_helmert(lat_deg, lon_deg, params: HelmertParams, xp):
+def apply_helmert(lat_deg, lon_deg, params: HelmertParams, xp, h=None):
     """Apply Helmert 7-parameter datum shift.
 
     Parameters
@@ -181,11 +205,16 @@ def apply_helmert(lat_deg, lon_deg, params: HelmertParams, xp):
         Transformation parameters (Position Vector convention).
     xp : module
         Array module (numpy or cupy).
+    h : array_like, optional
+        Ellipsoidal height in meters. When provided, height is transformed
+        through the ECEF intermediate and recovered on the destination ellipsoid.
 
     Returns
     -------
     lat_deg_out, lon_deg_out : arrays
         Geodetic coordinates in degrees on the destination ellipsoid.
+    h_out : arrays (only when h is not None)
+        Transformed ellipsoidal height in meters.
     """
     lat_rad = lat_deg * DEG_TO_RAD
     lon_rad = lon_deg * DEG_TO_RAD
@@ -194,7 +223,7 @@ def apply_helmert(lat_deg, lon_deg, params: HelmertParams, xp):
     dst = params.dst_ellipsoid
 
     # Geodetic -> ECEF on source ellipsoid
-    X, Y, Z = geodetic_to_ecef(lat_rad, lon_rad, src.a, src.es, xp)
+    X, Y, Z = geodetic_to_ecef(lat_rad, lon_rad, src.a, src.es, xp, h=h)
 
     # Helmert: X' = ds * R * X + T  (Position Vector convention)
     tx, ty, tz = params.tx, params.ty, params.tz
@@ -206,6 +235,11 @@ def apply_helmert(lat_deg, lon_deg, params: HelmertParams, xp):
     Z2 = ds * (-ry * X + rx * Y + Z) + tz
 
     # ECEF -> geodetic on destination ellipsoid
-    lat_out, lon_out = ecef_to_geodetic(X2, Y2, Z2, dst.a, dst.es, xp)
-
-    return lat_out * RAD_TO_DEG, lon_out * RAD_TO_DEG
+    if h is not None:
+        lat_out, lon_out, h_out = ecef_to_geodetic(
+            X2, Y2, Z2, dst.a, dst.es, xp, return_height=True
+        )
+        return lat_out * RAD_TO_DEG, lon_out * RAD_TO_DEG, h_out
+    else:
+        lat_out, lon_out = ecef_to_geodetic(X2, Y2, Z2, dst.a, dst.es, xp)
+        return lat_out * RAD_TO_DEG, lon_out * RAD_TO_DEG

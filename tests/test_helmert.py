@@ -660,3 +660,298 @@ def test_parse_helmert_no_rates():
     assert dty == 0.0
     assert dtz == 0.0
     assert t_epoch == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Z-dimension (ellipsoidal height) support
+# ---------------------------------------------------------------------------
+
+
+def test_ecef_roundtrip_with_height():
+    """Geodetic -> ECEF -> geodetic roundtrip with ellipsoidal height."""
+    lat = np.array([0.7, -0.5, 1.2])  # radians
+    lon = np.array([0.3, 2.1, -1.5])
+    h = np.array([100.0, 5000.0, -30.0])
+
+    X, Y, Z = geodetic_to_ecef(lat, lon, WGS84.a, WGS84.es, np, h=h)
+    lat2, lon2, h2 = ecef_to_geodetic(X, Y, Z, WGS84.a, WGS84.es, np, return_height=True)
+
+    assert_allclose(lat2, lat, atol=1e-12)
+    assert_allclose(lon2, lon, atol=1e-12)
+    assert_allclose(h2, h, atol=1e-6)
+
+
+def test_ecef_roundtrip_with_height_near_pole():
+    """ECEF roundtrip at the North Pole with height (near-pole guard)."""
+    lat = np.array([np.pi / 2 - 1e-12])  # near-pole
+    lon = np.array([0.0])
+    h = np.array([500.0])
+
+    X, Y, Z = geodetic_to_ecef(lat, lon, WGS84.a, WGS84.es, np, h=h)
+    lat2, lon2, h2 = ecef_to_geodetic(X, Y, Z, WGS84.a, WGS84.es, np, return_height=True)
+
+    assert_allclose(lat2, lat, atol=1e-10)
+    assert_allclose(h2, h, atol=1e-3)
+
+
+def test_ecef_height_zero_matches_no_height():
+    """geodetic_to_ecef with h=0 should match h=None."""
+    lat = np.array([0.7, -0.5])
+    lon = np.array([0.3, 2.1])
+
+    X1, Y1, Z1 = geodetic_to_ecef(lat, lon, WGS84.a, WGS84.es, np)
+    X2, Y2, Z2 = geodetic_to_ecef(lat, lon, WGS84.a, WGS84.es, np, h=np.zeros(2))
+
+    assert_allclose(X1, X2, atol=1e-12)
+    assert_allclose(Y1, Y2, atol=1e-12)
+    assert_allclose(Z1, Z2, atol=1e-12)
+
+
+def test_apply_helmert_identity_with_z():
+    """Identity Helmert with z should return z unchanged."""
+    h = HelmertParams(
+        tx=0,
+        ty=0,
+        tz=0,
+        rx=0,
+        ry=0,
+        rz=0,
+        ds=1.0,
+        src_ellipsoid=WGS84,
+        dst_ellipsoid=WGS84,
+    )
+    lat = np.array([51.5, -33.9, 0.0])
+    lon = np.array([-0.1, 151.2, 0.0])
+    z = np.array([100.0, 5000.0, 0.0])
+
+    lat_out, lon_out, z_out = apply_helmert(lat, lon, h, np, h=z)
+
+    assert_allclose(lat_out, lat, atol=1e-10)
+    assert_allclose(lon_out, lon, atol=1e-10)
+    assert_allclose(z_out, z, atol=1e-6)
+
+
+def test_apply_helmert_cross_datum_z_changes():
+    """Cross-datum Helmert should modify z (height changes with ellipsoid)."""
+    h = HelmertParams(
+        tx=446.448,
+        ty=-125.157,
+        tz=542.060,
+        rx=0.1502 * 4.84813681e-6,
+        ry=0.2470 * 4.84813681e-6,
+        rz=0.8421 * 4.84813681e-6,
+        ds=1.0 + (-20.4894) * 1e-6,
+        src_ellipsoid=WGS84,
+        dst_ellipsoid=Ellipsoid.from_af(6377563.396, 299.3249646),
+    )
+    lat = np.array([51.5074])
+    lon = np.array([-0.1278])
+    z = np.array([45.0])
+
+    lat_out, lon_out, z_out = apply_helmert(lat, lon, h, np, h=z)
+
+    # z should change due to different ellipsoid
+    assert abs(z_out[0] - z[0]) > 1.0  # expect meters-level change
+
+
+def test_apply_helmert_roundtrip_with_z():
+    """Forward then inverse Helmert recovers original z."""
+    h = HelmertParams(
+        tx=446.448,
+        ty=-125.157,
+        tz=542.060,
+        rx=0.1502 * 4.84813681e-6,
+        ry=0.2470 * 4.84813681e-6,
+        rz=0.8421 * 4.84813681e-6,
+        ds=1.0 + (-20.4894) * 1e-6,
+        src_ellipsoid=WGS84,
+        dst_ellipsoid=Ellipsoid.from_af(6377563.396, 299.3249646),
+    )
+    lat = np.array([51.5074, 52.2053])
+    lon = np.array([-0.1278, 0.1218])
+    z = np.array([45.0, 150.0])
+
+    lat_s, lon_s, z_s = apply_helmert(lat, lon, h, np, h=z)
+    lat_b, lon_b, z_b = apply_helmert(lat_s, lon_s, h.inverted(), np, h=z_s)
+
+    assert_allclose(lat_b, lat, atol=1e-6)
+    assert_allclose(lon_b, lon, atol=1e-6)
+    assert_allclose(z_b, z, atol=0.02)  # ~14mm due to linearized rotation matrix
+
+
+def test_apply_helmert_without_z_unchanged():
+    """apply_helmert without z returns 2-tuple (backward compat)."""
+    h = HelmertParams(
+        tx=100.0,
+        ty=-200.0,
+        tz=300.0,
+        rx=0,
+        ry=0,
+        rz=0,
+        ds=1.0,
+        src_ellipsoid=WGS84,
+        dst_ellipsoid=WGS84,
+    )
+    lat = np.array([51.5])
+    lon = np.array([-0.1])
+
+    result = apply_helmert(lat, lon, h, np)
+    assert len(result) == 2
+
+
+# ---------------------------------------------------------------------------
+# Pipeline z passthrough and transform
+# ---------------------------------------------------------------------------
+
+
+def test_pipeline_z_passthrough_no_helmert():
+    """z passes through unchanged when no Helmert is active (all 4 modes)."""
+    from vibeproj.pipeline import TransformPipeline
+    from vibeproj.crs import resolve_transform
+
+    # forward: geo -> proj (same datum)
+    src, dst, _, _ = resolve_transform("EPSG:4326", "EPSG:32631")
+    pipe = TransformPipeline(src, dst)
+    lon = np.array([2.0])
+    lat = np.array([48.0])
+    z = np.array([100.0])
+    rx, ry, rz = pipe.transform(lon, lat, np, z=z)
+    assert_allclose(rz, z)
+
+    # inverse: proj -> geo (same datum)
+    src, dst, _, _ = resolve_transform("EPSG:32631", "EPSG:4326")
+    pipe = TransformPipeline(src, dst)
+    rx2, ry2, rz2 = pipe.transform(np.array([500000.0]), np.array([5300000.0]), np, z=z)
+    assert_allclose(rz2, z)
+
+
+def test_pipeline_z_transform_with_helmert_forward():
+    """forward mode: z is transformed through Helmert."""
+    t = Transformer.from_crs("EPSG:4326", "EPSG:27700")
+    assert t._helmert is not None
+
+    lon, lat, z = -0.1278, 51.5074, 45.0
+    x, y, z_out = t.transform(lon, lat, z=z)
+
+    # z should change when crossing datums
+    assert isinstance(z_out, float)
+    assert abs(z_out - z) > 1.0
+
+
+def test_pipeline_z_transform_with_helmert_longlat():
+    """longlat_to_longlat mode: z is transformed through Helmert."""
+    t = Transformer.from_crs("EPSG:4326", "EPSG:4277")
+    assert t._helmert is not None
+
+    lon, lat, z = -0.1278, 51.5074, 45.0
+    lon_out, lat_out, z_out = t.transform(lon, lat, z=z)
+
+    assert isinstance(z_out, float)
+    assert abs(z_out - z) > 1.0
+
+
+# ---------------------------------------------------------------------------
+# Transformer z tests
+# ---------------------------------------------------------------------------
+
+
+def test_transformer_cross_datum_z_scalar():
+    """Scalar z is correctly transformed through Helmert."""
+    t = Transformer.from_crs("EPSG:4326", "EPSG:27700")
+    x, y, z_out = t.transform(-0.1278, 51.5074, z=45.0)
+    assert isinstance(z_out, float)
+    assert abs(z_out - 45.0) > 1.0
+
+
+def test_transformer_cross_datum_z_array():
+    """Array z is correctly transformed through Helmert."""
+    t = Transformer.from_crs("EPSG:4326", "EPSG:27700")
+    lon = np.array([-0.1278, -1.2578])
+    lat = np.array([51.5074, 51.7520])
+    z = np.array([45.0, 100.0])
+
+    x, y, z_out = t.transform(lon, lat, z=z)
+    assert z_out.shape == z.shape
+    assert not np.allclose(z_out, z, atol=0.5)  # z should change
+
+
+def test_transformer_cross_datum_z_roundtrip():
+    """Forward then inverse cross-datum with z recovers original z."""
+    t = Transformer.from_crs("EPSG:4326", "EPSG:27700")
+    lon, lat, z = -0.1278, 51.5074, 45.0
+
+    x, y, z_fwd = t.transform(lon, lat, z=z)
+    lon2, lat2, z_back = t.transform(x, y, z=z_fwd, direction="INVERSE")
+
+    assert_allclose(z_back, z, atol=0.1)
+    assert_allclose(lon2, lon, atol=1e-4)
+    assert_allclose(lat2, lat, atol=1e-4)
+
+
+def test_transformer_same_datum_z_passthrough():
+    """Same-datum transform passes z through unchanged."""
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+    assert t._helmert is None
+
+    lon, lat, z = 2.0, 48.0, 123.456
+    x, y, z_out = t.transform(lon, lat, z=z)
+    assert z_out == z  # exact passthrough
+
+
+def test_transformer_cross_datum_z_vs_pyproj():
+    """Cross-datum z transform: x/y match pyproj, z is actively transformed.
+
+    pyproj passes z through unchanged for 2D target CRS (EPSG:27700).
+    Our implementation correctly transforms z through the ECEF intermediate,
+    so z will differ from pyproj's passthrough. We verify x/y match and that
+    z is reasonable (ellipsoidal height difference between WGS84 and Airy 1830).
+    """
+    pp = PyProjTransformer.from_crs("EPSG:4326", "EPSG:27700", always_xy=True)
+    exp_x, exp_y = pp.transform(-0.1278, 51.5074)
+
+    t = Transformer.from_crs("EPSG:4326", "EPSG:27700")
+    vp_x, vp_y, vp_z = t.transform(-0.1278, 51.5074, z=45.0)
+
+    # x/y should match pyproj within Helmert accuracy
+    assert_allclose(vp_x, exp_x, atol=10.0)
+    assert_allclose(vp_y, exp_y, atol=10.0)
+    # z should be modified (WGS84->Airy ellipsoid height difference is ~46m)
+    assert abs(vp_z - 45.0) > 1.0
+
+
+def test_transform_buffers_with_out_z():
+    """transform_buffers passes z through Helmert and returns it."""
+    t = Transformer.from_crs("EPSG:4326", "EPSG:27700")
+    lon = np.array([-0.1278])
+    lat = np.array([51.5074])
+    z = np.array([45.0])
+
+    x, y, z_out = t.transform_buffers(lon, lat, z=z)
+    assert z_out.shape == z.shape
+    assert abs(z_out[0] - z[0]) > 1.0  # z should change
+
+
+def test_transform_buffers_same_datum_z_passthrough():
+    """transform_buffers returns z unchanged when no Helmert."""
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+    lon = np.array([2.0])
+    lat = np.array([48.0])
+    z = np.array([123.456])
+
+    x, y, z_out = t.transform_buffers(lon, lat, z=z)
+    assert_allclose(z_out, z)
+
+
+def test_transform_chunked_with_z():
+    """transform_chunked handles z through Helmert correctly."""
+    t = Transformer.from_crs("EPSG:4326", "EPSG:27700")
+    lon = np.array([-0.1278, -1.2578])
+    lat = np.array([51.5074, 51.7520])
+    z = np.array([45.0, 100.0])
+
+    # Falls back to CPU transform (no CuPy)
+    x, y, z_out = t.transform_chunked(lon, lat, z=z)
+    assert z_out.shape == z.shape
+    # Compare with regular transform
+    x2, y2, z2 = t.transform(lon, lat, z=z)
+    assert_allclose(z_out, z2, atol=1e-10)

@@ -87,21 +87,24 @@ def _wrap_to_pi(angle, xp):
     return angle - 2.0 * math.pi * xp.round(angle / (2.0 * math.pi))
 
 
-def _apply_datum_shift(lat, lon, helmert: HelmertParams, xp):
-    """Apply Helmert datum shift. Tries fused GPU kernel first, falls back to xp."""
+def _apply_datum_shift(lat, lon, helmert: HelmertParams, xp, h=None):
+    """Apply Helmert datum shift. Tries fused GPU kernel first, falls back to xp.
+
+    Returns 2-tuple (lat, lon) when h is None, 3-tuple (lat, lon, h) when h is provided.
+    """
     cp = _get_cupy()
     if cp is not None and xp is cp:
         try:
             from vibeproj.fused_kernels import fused_helmert_shift
 
-            result = fused_helmert_shift(lat, lon, helmert, xp)
+            result = fused_helmert_shift(lat, lon, helmert, xp, h=h)
             if result is not None:
                 return result
         except ImportError:
             pass
     from vibeproj.helmert import apply_helmert
 
-    return apply_helmert(lat, lon, helmert, xp)
+    return apply_helmert(lat, lon, helmert, xp, h=h)
 
 
 class TransformPipeline:
@@ -152,7 +155,9 @@ class TransformPipeline:
         if self.mode in ("forward", "inverse"):
             self.computed = self.projection.setup(self.proj_params)
 
-    def transform(self, x, y, xp, *, out_x=None, out_y=None, precision="auto", stream=None):
+    def transform(
+        self, x, y, xp, *, z=None, out_x=None, out_y=None, out_z=None, precision="auto", stream=None
+    ):
         """Execute the transform pipeline.
 
         For forward (geographic -> projected):
@@ -163,31 +168,70 @@ class TransformPipeline:
             x = easting, y = northing
             Returns (latitude, longitude) in degrees.
 
+        z: optional ellipsoidal height. Transformed through Helmert when present,
+           passed through unchanged for projection-only transforms.
         out_x, out_y: optional pre-allocated output arrays (avoids allocation).
+        out_z: optional pre-allocated output height array.
         precision: "auto", "fp32", or "fp64" — compute precision for GPU kernels.
         stream: optional CUDA stream for async kernel execution.
+
+        Returns 2-tuple when z is None, 3-tuple when z is provided.
         """
         if self.mode == "forward":
             return self._forward(
-                x, y, xp, out_x=out_x, out_y=out_y, precision=precision, stream=stream
+                x,
+                y,
+                xp,
+                z=z,
+                out_x=out_x,
+                out_y=out_y,
+                out_z=out_z,
+                precision=precision,
+                stream=stream,
             )
         elif self.mode == "inverse":
             return self._inverse(
-                x, y, xp, out_x=out_x, out_y=out_y, precision=precision, stream=stream
+                x,
+                y,
+                xp,
+                z=z,
+                out_x=out_x,
+                out_y=out_y,
+                out_z=out_z,
+                precision=precision,
+                stream=stream,
             )
         elif self.mode == "proj_to_proj":
-            return self._proj_to_proj(x, y, xp)
+            return self._proj_to_proj(x, y, xp, z=z)
         else:
             # longlat -> longlat: apply datum shift if needed, otherwise identity
             if self._helmert is not None:
-                return _apply_datum_shift(x, y, self._helmert, xp)
+                result = _apply_datum_shift(x, y, self._helmert, xp, h=z)
+                if z is not None:
+                    return result  # already a 3-tuple
+                return result
+            if z is not None:
+                return x, y, z
             return x, y
 
-    def _forward(self, arg1, arg2, xp, *, out_x=None, out_y=None, precision="auto", stream=None):
+    def _forward(
+        self,
+        arg1,
+        arg2,
+        xp,
+        *,
+        z=None,
+        out_x=None,
+        out_y=None,
+        out_z=None,
+        precision="auto",
+        stream=None,
+    ):
         """Geographic -> Projected.
 
         Input follows source CRS axis order (lat/lon for EPSG:4326).
         Output follows destination CRS axis order.
+        z is transformed through Helmert when present, then passed through projection.
         """
         # Fast path: fused CUDA kernel (single launch, no intermediate arrays)
         # Skipped when datum shift is needed (fused kernels don't include Helmert).
@@ -207,6 +251,8 @@ class TransformPipeline:
                 stream=stream,
             )
             if fused is not None:
+                if z is not None:
+                    return (*fused, z)
                 return fused
 
         # Source axis order: geographic CRS is (lat, lon) when north_first
@@ -215,9 +261,14 @@ class TransformPipeline:
         else:
             lon, lat = arg1, arg2
 
-        # Datum shift: transform geographic coords to destination ellipsoid
+        # Datum shift: transform geographic coords (and z) to destination ellipsoid
+        z_out = z
         if self._helmert is not None:
-            lat, lon = _apply_datum_shift(lat, lon, self._helmert, xp)
+            result = _apply_datum_shift(lat, lon, self._helmert, xp, h=z)
+            if z is not None:
+                lat, lon, z_out = result
+            else:
+                lat, lon = result
 
         computed = self.computed
         a = computed.get("a", self.proj_params.ellipsoid.a)
@@ -232,7 +283,7 @@ class TransformPipeline:
         # Subtract central meridian
         lam = _wrap_to_pi(lam - lam0, xp)
 
-        # Core projection: returns (easting, northing) always
+        # Core projection: returns (easting, northing) always — 2D only
         easting, northing = self.projection.forward(lam, phi, self.proj_params, computed, xp)
 
         # Scale by semi-major axis and add false easting/northing
@@ -241,14 +292,32 @@ class TransformPipeline:
 
         # Output in destination CRS axis order
         if self.dst_north_first:
-            return northing, easting
-        return easting, northing
+            rx, ry = northing, easting
+        else:
+            rx, ry = easting, northing
 
-    def _inverse(self, arg1, arg2, xp, *, out_x=None, out_y=None, precision="auto", stream=None):
+        if z is not None:
+            return rx, ry, z_out
+        return rx, ry
+
+    def _inverse(
+        self,
+        arg1,
+        arg2,
+        xp,
+        *,
+        z=None,
+        out_x=None,
+        out_y=None,
+        out_z=None,
+        precision="auto",
+        stream=None,
+    ):
         """Projected -> Geographic.
 
         Input follows source CRS axis order.
         Output follows destination CRS axis order (lat/lon for EPSG:4326).
+        z passes through projection inverse (2D), then is transformed by Helmert.
         """
         # Fast path: fused CUDA kernel
         # Skipped when datum shift is needed (fused kernels don't include Helmert).
@@ -268,6 +337,8 @@ class TransformPipeline:
                 stream=stream,
             )
             if fused is not None:
+                if z is not None:
+                    return (*fused, z)
                 return fused
 
         # Source is projected: interpret per its axis order
@@ -286,7 +357,7 @@ class TransformPipeline:
         x = (easting - x0) / a
         y = (northing - y0) / a
 
-        # Core inverse projection
+        # Core inverse projection — 2D only, z passes through
         lam, phi = self.projection.inverse(x, y, self.proj_params, computed, xp)
 
         # Add back central meridian
@@ -296,21 +367,33 @@ class TransformPipeline:
         lat = phi * RAD_TO_DEG
         lon = lam * RAD_TO_DEG
 
-        # Datum shift: transform geographic coords to destination ellipsoid
+        # Datum shift: transform geographic coords (and z) to destination ellipsoid
+        z_out = z
         if self._helmert is not None:
-            lat, lon = _apply_datum_shift(lat, lon, self._helmert, xp)
+            result = _apply_datum_shift(lat, lon, self._helmert, xp, h=z)
+            if z is not None:
+                lat, lon, z_out = result
+            else:
+                lat, lon = result
 
         # Output in destination CRS axis order (geographic)
         if self.dst_north_first:
-            return lat, lon
-        return lon, lat
+            rx, ry = lat, lon
+        else:
+            rx, ry = lon, lat
 
-    def _proj_to_proj(self, x, y, xp):
+        if z is not None:
+            return rx, ry, z_out
+        return rx, ry
+
+    def _proj_to_proj(self, x, y, xp, *, z=None):
         """Projected -> Projected via geographic intermediate.
 
         Decomposes into two fused kernel calls when available:
         1. Source projected -> geographic (inverse)
         2. Geographic -> destination projected (forward)
+
+        z passes through both projection steps (2D) and is transformed by Helmert.
         """
         # Build sub-pipelines lazily
         if not hasattr(self, "_p2p_inv"):
@@ -325,11 +408,21 @@ class TransformPipeline:
             self._p2p_fwd = TransformPipeline(geo, self.dst)
 
         # Step 1: source projected -> geographic (may use fused inverse kernel)
+        # z passes through unchanged (projection is 2D)
         lat, lon = self._p2p_inv.transform(x, y, xp)
 
-        # Step 2: datum shift (if cross-datum)
+        # Step 2: datum shift (if cross-datum) — transforms z when present
+        z_out = z
         if self._helmert is not None:
-            lat, lon = _apply_datum_shift(lat, lon, self._helmert, xp)
+            result = _apply_datum_shift(lat, lon, self._helmert, xp, h=z)
+            if z is not None:
+                lat, lon, z_out = result
+            else:
+                lat, lon = result
 
         # Step 3: geographic -> destination projected (may use fused forward kernel)
-        return self._p2p_fwd.transform(lat, lon, xp)
+        # z passes through unchanged (projection is 2D)
+        result = self._p2p_fwd.transform(lat, lon, xp)
+        if z is not None:
+            return (*result, z_out)
+        return result

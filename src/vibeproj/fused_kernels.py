@@ -2251,12 +2251,15 @@ extern "C" __global__ void helmert_shift(
     const double* __restrict__ in_lon,
     double* __restrict__ out_lat,
     double* __restrict__ out_lon,
+    const double* __restrict__ in_h,
+    double* __restrict__ out_h,
     double src_a, double src_es,
     double dst_a, double dst_es,
     double tx, double ty, double tz,
     double rx, double ry, double rz,
     double ds,
-    int n
+    int n,
+    int has_z
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n) return;
@@ -2268,9 +2271,18 @@ extern "C" __global__ void helmert_shift(
     double sin_lat = sin(lat), cos_lat = cos(lat);
     double sin_lon = sin(lon), cos_lon = cos(lon);
     double N = src_a / sqrt(1.0 - src_es * sin_lat * sin_lat);
-    double X = N * cos_lat * cos_lon;
-    double Y = N * cos_lat * sin_lon;
-    double Z = N * (1.0 - src_es) * sin_lat;
+
+    double X, Y, Z;
+    if (has_z) {
+        double h_val = in_h[idx];
+        X = (N + h_val) * cos_lat * cos_lon;
+        Y = (N + h_val) * cos_lat * sin_lon;
+        Z = (N * (1.0 - src_es) + h_val) * sin_lat;
+    } else {
+        X = N * cos_lat * cos_lon;
+        Y = N * cos_lat * sin_lon;
+        Z = N * (1.0 - src_es) * sin_lat;
+    }
 
     /* Helmert: X' = ds * R * X + T  (Position Vector convention) */
     double X2 = ds * ( X - rz * Y + ry * Z) + tx;
@@ -2290,10 +2302,25 @@ extern "C" __global__ void helmert_shift(
 
     out_lat[idx] = lat_out * 57.29577951308232;
     out_lon[idx] = lon_out * 57.29577951308232;
+
+    if (has_z) {
+        /* Recover ellipsoidal height on destination ellipsoid */
+        double sin_lat_f = sin(lat_out);
+        double cos_lat_f = cos(lat_out);
+        double N_f = dst_a / sqrt(1.0 - dst_es * sin_lat_f * sin_lat_f);
+        double h_out_val;
+        if (fabs(cos_lat_f) < 1e-10) {
+            /* Near-pole: use Z-based formula */
+            h_out_val = fabs(Z2) / fabs(sin_lat_f) - N_f * (1.0 - dst_es);
+        } else {
+            h_out_val = p / cos_lat_f - N_f;
+        }
+        out_h[idx] = h_out_val;
+    }
 }
 """
 
-_helmert_kernel_cache = None
+_helmert_kernel_cache = None  # Reset on source change (z-dimension support added)
 _helmert_kernel_lock = threading.Lock()
 
 
@@ -2318,7 +2345,9 @@ def compile_helmert_kernel():
     _get_helmert_kernel()
 
 
-def fused_helmert_shift(lat, lon, helmert_params, xp, out_lat=None, out_lon=None, stream=None):
+def fused_helmert_shift(
+    lat, lon, helmert_params, xp, h=None, out_lat=None, out_lon=None, out_h=None, stream=None
+):
     """Execute the Helmert datum shift on GPU.
 
     Parameters
@@ -2329,14 +2358,18 @@ def fused_helmert_shift(lat, lon, helmert_params, xp, out_lat=None, out_lon=None
         Transformation parameters.
     xp : module
         Array module (must be cupy).
+    h : cupy.ndarray, optional
+        Ellipsoidal height in meters. When provided, height is transformed.
     out_lat, out_lon : cupy.ndarray, optional
         Pre-allocated output arrays.
+    out_h : cupy.ndarray, optional
+        Pre-allocated output height array (only used when h is not None).
     stream : cupy.cuda.Stream, optional
         CUDA stream for async execution.
 
     Returns
     -------
-    (out_lat, out_lon) or None if not on GPU.
+    (out_lat, out_lon) or (out_lat, out_lon, out_h) or None if not on GPU.
     """
     try:
         import cupy as cp
@@ -2364,6 +2397,20 @@ def fused_helmert_shift(lat, lon, helmert_params, xp, out_lat=None, out_lon=None
             f"out_lon must be float64 (kernel writes double*), got {out_lon.dtype}"
         )
 
+    has_z = h is not None
+    if has_z:
+        if out_h is None:
+            out_h = cp.empty(n, dtype=cp.float64)
+        elif out_h.dtype != np.float64:
+            raise CoordinateValidationError(
+                f"out_h must be float64 (kernel writes double*), got {out_h.dtype}"
+            )
+        in_h = h
+    else:
+        # Dummy pointers — kernel will not read/write these when has_z=0
+        in_h = lat
+        out_h_dummy = out_lat
+
     block = 256
     grid = max(1, (n + block - 1) // block)
 
@@ -2375,6 +2422,8 @@ def fused_helmert_shift(lat, lon, helmert_params, xp, out_lat=None, out_lon=None
         lon,
         out_lat,
         out_lon,
+        in_h,
+        out_h if has_z else out_h_dummy,
         np.float64(src.a),
         np.float64(src.es),
         np.float64(dst.a),
@@ -2387,6 +2436,7 @@ def fused_helmert_shift(lat, lon, helmert_params, xp, out_lat=None, out_lon=None
         np.float64(helmert_params.rz),
         np.float64(helmert_params.ds),
         np.int32(n),
+        np.int32(1 if has_z else 0),
     )
 
     if stream is not None:
@@ -2396,4 +2446,6 @@ def fused_helmert_shift(lat, lon, helmert_params, xp, out_lat=None, out_lon=None
     else:
         kernel((grid,), (block,), args)
 
+    if has_z:
+        return out_lat, out_lon, out_h
     return out_lat, out_lon
