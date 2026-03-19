@@ -32,3 +32,15 @@ if ! uv run python scripts/check_projections.py --all; then
     echo "Projection registry inconsistency detected. See errors above."
     exit 1
 fi
+
+# GPU fused kernel tests — run if CuPy is available, skip gracefully otherwise
+if uv run python -c "import cupy" 2>/dev/null; then
+    echo "pre-commit: fused kernel tests (GPU detected)"
+    if ! uv run pytest tests/test_fused_kernels.py tests/test_helmert.py -x -q; then
+        echo ""
+        echo "GPU kernel tests failed."
+        exit 1
+    fi
+else
+    echo "pre-commit: skipping GPU tests (CuPy not available)"
+fi

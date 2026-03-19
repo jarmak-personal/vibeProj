@@ -87,17 +87,18 @@ def _wrap_to_pi(angle, xp):
     return angle - 2.0 * math.pi * xp.round(angle / (2.0 * math.pi))
 
 
-def _apply_datum_shift(lat, lon, helmert: HelmertParams, xp, h=None):
+def _apply_datum_shift(lat, lon, helmert: HelmertParams, xp, h=None, stream=None):
     """Apply Helmert datum shift. Tries fused GPU kernel first, falls back to xp.
 
     Returns 2-tuple (lat, lon) when h is None, 3-tuple (lat, lon, h) when h is provided.
+    stream: optional CUDA stream forwarded to the fused Helmert kernel.
     """
     cp = _get_cupy()
     if cp is not None and xp is cp:
         try:
             from vibeproj.fused_kernels import fused_helmert_shift
 
-            result = fused_helmert_shift(lat, lon, helmert, xp, h=h)
+            result = fused_helmert_shift(lat, lon, helmert, xp, h=h, stream=stream)
             if result is not None:
                 return result
         except ImportError:
@@ -202,11 +203,11 @@ class TransformPipeline:
                 stream=stream,
             )
         elif self.mode == "proj_to_proj":
-            return self._proj_to_proj(x, y, xp, z=z)
+            return self._proj_to_proj(x, y, xp, z=z, stream=stream)
         else:
             # longlat -> longlat: apply datum shift if needed, otherwise identity
             if self._helmert is not None:
-                result = _apply_datum_shift(x, y, self._helmert, xp, h=z)
+                result = _apply_datum_shift(x, y, self._helmert, xp, h=z, stream=stream)
                 if z is not None:
                     return result  # already a 3-tuple
                 return result
@@ -264,7 +265,7 @@ class TransformPipeline:
         # Datum shift: transform geographic coords (and z) to destination ellipsoid
         z_out = z
         if self._helmert is not None:
-            result = _apply_datum_shift(lat, lon, self._helmert, xp, h=z)
+            result = _apply_datum_shift(lat, lon, self._helmert, xp, h=z, stream=stream)
             if z is not None:
                 lat, lon, z_out = result
             else:
@@ -370,7 +371,7 @@ class TransformPipeline:
         # Datum shift: transform geographic coords (and z) to destination ellipsoid
         z_out = z
         if self._helmert is not None:
-            result = _apply_datum_shift(lat, lon, self._helmert, xp, h=z)
+            result = _apply_datum_shift(lat, lon, self._helmert, xp, h=z, stream=stream)
             if z is not None:
                 lat, lon, z_out = result
             else:
@@ -386,7 +387,7 @@ class TransformPipeline:
             return rx, ry, z_out
         return rx, ry
 
-    def _proj_to_proj(self, x, y, xp, *, z=None):
+    def _proj_to_proj(self, x, y, xp, *, z=None, stream=None):
         """Projected -> Projected via geographic intermediate.
 
         Decomposes into two fused kernel calls when available:
@@ -394,6 +395,7 @@ class TransformPipeline:
         2. Geographic -> destination projected (forward)
 
         z passes through both projection steps (2D) and is transformed by Helmert.
+        stream: optional CUDA stream for async kernel execution.
         """
         # Build sub-pipelines lazily
         if not hasattr(self, "_p2p_inv"):
@@ -409,12 +411,12 @@ class TransformPipeline:
 
         # Step 1: source projected -> geographic (may use fused inverse kernel)
         # z passes through unchanged (projection is 2D)
-        lat, lon = self._p2p_inv.transform(x, y, xp)
+        lat, lon = self._p2p_inv.transform(x, y, xp, stream=stream)
 
         # Step 2: datum shift (if cross-datum) — transforms z when present
         z_out = z
         if self._helmert is not None:
-            result = _apply_datum_shift(lat, lon, self._helmert, xp, h=z)
+            result = _apply_datum_shift(lat, lon, self._helmert, xp, h=z, stream=stream)
             if z is not None:
                 lat, lon, z_out = result
             else:
@@ -422,7 +424,7 @@ class TransformPipeline:
 
         # Step 3: geographic -> destination projected (may use fused forward kernel)
         # z passes through unchanged (projection is 2D)
-        result = self._p2p_fwd.transform(lat, lon, xp)
+        result = self._p2p_fwd.transform(lat, lon, xp, stream=stream)
         if z is not None:
             return (*result, z_out)
         return result
