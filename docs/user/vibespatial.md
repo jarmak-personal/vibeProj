@@ -50,6 +50,12 @@ y_out = cp.empty_like(y_in)
 rx, ry = t.transform_buffers(x_in, y_in, out_x=x_out, out_y=y_out)
 
 assert rx is x_out  # same object — no copy
+
+# 3D: ellipsoidal height is transformed through Helmert for cross-datum,
+# or passed through unchanged for same-datum transforms
+z_in = cp.asarray(height_data, dtype=cp.float64)
+z_out = cp.empty_like(z_in)
+rx, ry, rz = t.transform_buffers(x_in, y_in, z_in, out_x=x_out, out_y=y_out, out_z=z_out)
 ```
 
 ## Integration with vibeSpatial's coordinate buffers

@@ -18,6 +18,9 @@ GPU-accelerated coordinate projection library. 20 projections, each with a fused
   math runs on our own GPU kernel (`helmert_shift` in fused_kernels.py) or NumPy. The 15-param variant
   adds 7 rate-of-change parameters + reference epoch for sub-decimeter accuracy on modern datum pairs
   (e.g. ITRF↔ETRS89). Controlled via `datum_shift="accurate"` (default) or `datum_shift="fast"`.
+  Supports 3D transforms: when `z` (ellipsoidal height) is provided, it is transformed through the
+  ECEF intermediate — height changes when shifting between ellipsoids. When `z=None`, exact 2D behavior
+  is preserved with zero overhead. The CUDA kernel uses a `has_z` flag (one int comparison per thread).
   Zero overhead for same-datum transforms (`helmert=None`).
 - **GPU detection** (`src/vibeproj/gpu_detect.py`) — queries `SingleToDoublePrecisionPerfRatio` to classify
   consumer (1:64) vs datacenter (1:2) GPU. Auto precision always uses fp64 (projection math is SFU-bound).
@@ -48,9 +51,10 @@ GPU-accelerated coordinate projection library. 20 projections, each with a fused
 ## Running tests
 
 ```bash
-uv run pytest                              # all 85 tests
+uv run pytest                              # all 198 tests
 uv run pytest tests/test_fused_kernels.py  # GPU kernel tests (needs CuPy + GPU)
 uv run pytest tests/test_transformer.py    # CPU xp path tests
+uv run pytest tests/test_helmert.py        # Helmert datum shift + z-dimension tests
 ```
 
 ## Datum shift modes
@@ -81,4 +85,7 @@ from vibeproj import Transformer
 t = Transformer.from_crs(src_crs, dst_crs)
 # Zero-copy: reads device buffers, writes to pre-allocated device buffers
 t.transform_buffers(buf.x, buf.y, out_x=new_x, out_y=new_y)
+
+# 3D: z is transformed through Helmert when crossing datums, passthrough otherwise
+t.transform_buffers(buf.x, buf.y, buf.z, out_x=new_x, out_y=new_y, out_z=new_z)
 ```

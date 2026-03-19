@@ -33,7 +33,7 @@ Transformer.from_crs("EPSG:4326", "EPSG:32631")
 | `fused_kernels.py` | 40 CUDA kernel source strings (20 projections x fwd/inv). Compiled and cached via CuPy `RawKernel`. |
 | `projections/` | NumPy/CuPy element-wise implementations. Each is a `Projection` subclass with `setup()`, `forward()`, `inverse()`. |
 | `ellipsoid.py` | Reference ellipsoid definitions (WGS84, GRS80, sphere). |
-| `helmert.py` | Helmert 7-parameter datum transformation. `HelmertParams` dataclass, geodetic/ECEF conversion, `apply_helmert()`. |
+| `helmert.py` | Helmert 7/15-parameter datum transformation. `HelmertParams` dataclass, geodetic/ECEF conversion (with optional ellipsoidal height), `apply_helmert()`. Supports 3D: when z is provided, height is transformed through the ECEF intermediate. |
 | `runtime.py` | GPU/CPU detection and array module selection. |
 | `gpu_detect.py` | Consumer vs datacenter GPU classification. |
 | `_ds_device_fns.py` | Double-single fp32 arithmetic CUDA device functions. |
@@ -43,7 +43,7 @@ Transformer.from_crs("EPSG:4326", "EPSG:32631")
 A forward transform (geographic -> projected) executes these stages:
 
 1. **Axis swap** -- CRS-dependent. EPSG:4326 is (lat, lon); some projected CRS are (E, N).
-2. **Datum shift** -- Helmert 7-parameter (if cross-datum). Converts geodetic coords from source ellipsoid to destination ellipsoid via ECEF intermediate. Skipped entirely when `helmert is None` (same-datum).
+2. **Datum shift** -- Helmert 7/15-parameter (if cross-datum). Converts geodetic coords from source ellipsoid to destination ellipsoid via ECEF intermediate. When z (ellipsoidal height) is provided, it is included in the ECEF conversion and recovered on the destination ellipsoid. Skipped entirely when `helmert is None` (same-datum). Projection stages (3-8) are inherently 2D — z passes through unchanged.
 3. **Degree to radian** -- `lat * pi/180`, `lon * pi/180`.
 4. **Central meridian** -- `lon -= lon_0`, wrapped to [-pi, pi].
 5. **Projection core** -- the actual math (Transverse Mercator, Lambert, etc.).

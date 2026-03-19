@@ -115,6 +115,23 @@ elif projection_name == "webmerc":
 Parameters are cast to the compute dtype (`np.float64` or `np.float32`)
 and passed as kernel arguments.
 
+## Helmert datum shift kernel
+
+The `helmert_shift` kernel in `_HELMERT_SHIFT_SOURCE` runs the full
+geodetic→ECEF→Helmert→ECEF→geodetic pipeline on the GPU. It supports
+3D transforms via `in_h`/`out_h` array pointers and a `has_z` int flag:
+
+- `has_z=0`: height is assumed zero, no height recovery — one integer
+  comparison per thread (negligible overhead vs 2D-only).
+- `has_z=1`: reads ellipsoidal height from `in_h`, includes it in ECEF
+  conversion, recovers height on the destination ellipsoid via
+  `h = p / cos(lat) - N` (with a near-pole guard using the Z-based formula).
+
+The Helmert kernel is separate from the 40 fused projection kernels —
+projections are inherently 2D. For cross-datum transforms, the pipeline
+runs the Helmert kernel first (or after inverse projection), then the
+projection kernel. z passes through the projection kernel unchanged.
+
 ## Double-single kernels
 
 The `_DS_SOURCE_MAP` contains ds-specific kernel sources that use

@@ -113,6 +113,7 @@ def test_my_roundtrip():
 | Iterative inverse (Winkel Tripel) | 0.005 degrees | Newton convergence limit |
 | Cross-datum vs pyproj | 10 m | Helmert variant differences; pyproj may use grid shifts |
 | Helmert roundtrip (fwd+inv) | 1e-4 degrees | Linearized rotation matrix is approximate |
+| Helmert z roundtrip (fwd+inv) | 0.02 m | ~14mm due to linearized rotation matrix |
 
 ## Linting
 

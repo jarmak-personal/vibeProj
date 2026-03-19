@@ -76,6 +76,21 @@ t = Transformer.from_crs("EPSG:4326", "EPSG:32631", always_xy=False)
 x, y = t.transform(49.0, 2.0)           # (lat, lon) in, (easting, northing) out
 ```
 
+### Cross-datum transforms (Helmert)
+
+```python
+# Cross-datum: Helmert 7/15-parameter shift applied automatically
+t = Transformer.from_crs("EPSG:4326", "EPSG:27700")  # WGS84 → OSGB36
+x, y = t.transform(-0.1278, 51.5074)
+
+# With ellipsoidal height — z is transformed through the ECEF intermediate
+x, y, z = t.transform(-0.1278, 51.5074, z=45.0)
+
+# Same-datum: z passes through unchanged, zero overhead
+t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+x, y, z = t.transform(2.0, 49.0, z=45.0)  # z == 45.0
+```
+
 ### vibeSpatial Integration (zero-copy GPU)
 
 ```python
@@ -84,6 +99,10 @@ t = Transformer.from_crs(src_crs, dst_crs, always_xy=True)
 new_x = cp.empty_like(buf.x)
 new_y = cp.empty_like(buf.y)
 t.transform_buffers(buf.x, buf.y, out_x=new_x, out_y=new_y)
+
+# 3D: z is transformed through Helmert when crossing datums
+new_z = cp.empty_like(buf.z)
+t.transform_buffers(buf.x, buf.y, buf.z, out_x=new_x, out_y=new_y, out_z=new_z)
 ```
 
 `transform_buffers()` accepts pre-allocated CuPy output arrays, writes results directly into them, and returns the same objects. No host round-trip, no intermediate allocation. Designed for vibeSpatial's `OwnedGeometryArray` coordinate buffers.
@@ -93,6 +112,7 @@ t.transform_buffers(buf.x, buf.y, out_x=new_x, out_y=new_y)
 - **Pure Python + CuPy** — no compiled extensions, no CMake
 - **Fused NVRTC kernels** — each projection's full pipeline (axis swap, deg/rad, central meridian, projection math, scale/offset) runs in a single CUDA kernel launch via CuPy `RawKernel`
 - **NumPy fallback** — all projections work on CPU when CuPy is unavailable
+- **Helmert datum shifts** — 7/15-parameter (time-dependent) datum transformation with 3D ellipsoidal height support, runs on its own GPU kernel
 - **pyproj for CRS metadata** — EPSG codes resolved via pyproj, transform math is ours
 - **fp64 I/O** — input/output arrays always double precision (ADR-0002 compliant)
 - **Auto GPU detection** — queries `SingleToDoublePrecisionPerfRatio` to classify consumer vs datacenter GPU
@@ -100,6 +120,6 @@ t.transform_buffers(buf.x, buf.y, out_x=new_x, out_y=new_y)
 ## Test
 
 ```bash
-uv run pytest                    # all tests (85 total)
+uv run pytest                    # all tests (198 total)
 uv run pytest tests/test_fused_kernels.py  # GPU kernel tests (requires CuPy)
 ```

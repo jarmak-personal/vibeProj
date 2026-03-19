@@ -23,16 +23,17 @@ Create a transformer between two coordinate reference systems.
 t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
 ```
 
-### `Transformer.transform(x, y, direction="FORWARD")`
+### `Transformer.transform(x, y, z=None, direction="FORWARD")`
 
 Transform coordinates.
 
 **Parameters:**
 
 - `x`, `y` -- Input coordinates. Accepts scalars, lists, NumPy arrays, or CuPy arrays. For geographic CRS, `x` = latitude, `y` = longitude (pyproj convention).
+- `z` -- Optional ellipsoidal height in meters. When a Helmert datum shift is active (cross-datum transform), z is transformed through the ECEF intermediate. When no datum shift is needed, z is passed through unchanged.
 - `direction` -- `"FORWARD"` or `"INVERSE"`.
 
-**Returns:** Tuple `(x_out, y_out)`. Scalars if input was scalar, arrays otherwise.
+**Returns:** Tuple `(x_out, y_out)` or `(x_out, y_out, z_out)` if z was provided. Scalars if input was scalar, arrays otherwise.
 
 ```python
 # Forward: geographic -> projected
@@ -43,9 +44,12 @@ lat, lon = t.transform(easting, northing, direction="INVERSE")
 
 # Array input
 x, y = t.transform(lat_array, lon_array)
+
+# With ellipsoidal height (cross-datum: z is transformed; same-datum: z passthrough)
+x, y, z_out = t.transform(lon, lat, z=45.0)
 ```
 
-### `Transformer.transform_buffers(x, y, *, direction="FORWARD", out_x=None, out_y=None, precision="auto")`
+### `Transformer.transform_buffers(x, y, z=None, *, direction="FORWARD", out_x=None, out_y=None, out_z=None, precision="auto")`
 
 Zero-copy transform for device-resident arrays. Skips scalar detection
 and dtype conversion for maximum throughput.
@@ -53,17 +57,23 @@ and dtype conversion for maximum throughput.
 **Parameters:**
 
 - `x`, `y` -- Input coordinate arrays (fp64).
+- `z` -- Optional ellipsoidal height array. Transformed through Helmert when a datum shift is active; passed through unchanged otherwise.
 - `direction` -- `"FORWARD"` or `"INVERSE"`.
 - `out_x`, `out_y` -- Optional pre-allocated output arrays. When provided, results are written directly into these arrays and the same objects are returned.
+- `out_z` -- Optional pre-allocated output height array. Only used when z is provided and a Helmert datum shift is active.
 - `precision` -- Compute precision: `"auto"`, `"fp64"`, `"fp32"`, or `"ds"`.
 
-**Returns:** Tuple `(out_x, out_y)`.
+**Returns:** Tuple `(out_x, out_y)` or `(out_x, out_y, z_out)` if z was provided.
 
 ```python
 out_x = cp.empty(n, dtype=cp.float64)
 out_y = cp.empty(n, dtype=cp.float64)
 rx, ry = t.transform_buffers(lat, lon, out_x=out_x, out_y=out_y)
 assert rx is out_x  # same object, no allocation
+
+# With height (cross-datum transforms)
+out_z = cp.empty(n, dtype=cp.float64)
+rx, ry, rz = t.transform_buffers(lat, lon, h, out_x=out_x, out_y=out_y, out_z=out_z)
 ```
 
 ## Pipeline API
@@ -111,6 +121,7 @@ x, y = pipe.transform(lat_array, lon_array, np)
 Read-only property indicating the accuracy classification of this transform.
 
 - `"sub-millimeter"` -- same datum, projection math only.
+- `"sub-decimeter"` -- cross-datum with 15-param time-dependent Helmert at a known epoch.
 - `"sub-meter"` -- cross-datum with Helmert 7-parameter shift applied (~1--5m).
 - `"degraded — no datum shift applied"` -- cross-datum, no Helmert available (grid-only).
 
