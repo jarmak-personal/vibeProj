@@ -1821,6 +1821,10 @@ def compile_kernels(projections=None, *, precision="auto"):
     precision : str
         Compute precision: "auto"/"fp64"/"fp32"/"ds".
     """
+    try:
+        import cupy  # noqa: F401
+    except (ImportError, ModuleNotFoundError):
+        return
     compute_dtype = {"auto": "float64", "fp64": "float64", "fp32": "float32", "ds": "ds"}.get(
         precision, "float64"
     )
@@ -2342,6 +2346,10 @@ def _get_helmert_kernel():
 
 def compile_helmert_kernel():
     """Pre-compile the Helmert datum shift kernel."""
+    try:
+        import cupy  # noqa: F401
+    except (ImportError, ModuleNotFoundError):
+        return
     _get_helmert_kernel()
 
 
