@@ -185,10 +185,11 @@ def ecef_to_geodetic(X, Y, Z, a, es, xp, return_height=False):
         # Normal case: h = p / cos(lat) - N
         h = p / cos_lat - N
         # Near-pole guard: |cos(lat)| < 1e-10 → use Z-based formula
+        # Always compute both and select via where() — avoids an implicit
+        # D→H sync that xp.any() would cause on CuPy arrays.
         near_pole = xp.abs(cos_lat) < 1e-10
-        if xp.any(near_pole):
-            h_pole = xp.abs(Z) / xp.abs(sin_lat) - N * (1.0 - es)
-            h = xp.where(near_pole, h_pole, h)
+        h_pole = xp.abs(Z) / xp.abs(sin_lat) - N * (1.0 - es)
+        h = xp.where(near_pole, h_pole, h)
         return lat, lon, h
 
     return lat, lon

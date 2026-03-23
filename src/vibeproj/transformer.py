@@ -318,8 +318,9 @@ class Transformer:
             rx, ry = result
             z_out = z_passthrough
 
-        # Check for non-finite output values
-        if rx.size > 0 and (xp.any(~xp.isfinite(rx)) or xp.any(~xp.isfinite(ry))):
+        # Check for non-finite output values (CPU only — on GPU this would
+        # force an implicit D→H sync + device stall on every call)
+        if xp is np and rx.size > 0 and (xp.any(~xp.isfinite(rx)) or xp.any(~xp.isfinite(ry))):
             warnings.warn(
                 "Transform produced non-finite values (NaN or inf). "
                 "Input coordinates may be outside the projection's valid domain.",
