@@ -1,5 +1,10 @@
 # API Reference
 
+:::{tip}
+Full auto-generated API docs for every module, class, and function are
+available in the [API Reference](/api/index) section (powered by sphinx-autoapi).
+:::
+
 ## Transformer
 
 The primary user-facing class.

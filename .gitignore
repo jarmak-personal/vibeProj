@@ -8,4 +8,5 @@ build/
 *.egg
 .ruff_cache/
 docs/_build/
+docs/api/
 uv.lock

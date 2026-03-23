@@ -8,7 +8,22 @@ release = "0.1.5"
 extensions = [
     "myst_parser",
     "sphinx.ext.intersphinx",
+    "autoapi.extension",
 ]
+
+# -- AutoAPI -----------------------------------------------------------------
+autoapi_dirs = ["../src/vibeproj"]
+autoapi_type = "python"
+autoapi_root = "api"
+autoapi_options = [
+    "members",
+    "undoc-members",
+    "show-inheritance",
+    "show-module-summary",
+    "imported-members",
+]
+autoapi_ignore = ["*/_ds_device_fns.py"]
+autoapi_keep_files = True
 
 intersphinx_mapping = {
     "vibespatial": ("https://jarmak-personal.github.io/vibeSpatial/", None),
