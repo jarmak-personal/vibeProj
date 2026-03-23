@@ -318,8 +318,11 @@ class Transformer:
             rx, ry = result
             z_out = z_passthrough
 
-        # Check for non-finite output values (CPU only — on GPU this would
-        # force an implicit D→H sync + device stall on every call)
+        # Check for non-finite output values.
+        # For GPU arrays, skip this check — it forces an implicit D→H sync
+        # (xp.any() returns a device scalar whose truthiness triggers .get()).
+        # The transform_buffers() zero-copy path already skips this.
+        # Only check on CPU (NumPy) where there is no sync cost.
         if xp is np and rx.size > 0 and (xp.any(~xp.isfinite(rx)) or xp.any(~xp.isfinite(ry))):
             warnings.warn(
                 "Transform produced non-finite values (NaN or inf). "

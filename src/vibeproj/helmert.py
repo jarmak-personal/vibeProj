@@ -183,13 +183,17 @@ def ecef_to_geodetic(X, Y, Z, a, es, xp, return_height=False):
         cos_lat = xp.cos(lat)
         N = a / xp.sqrt(1.0 - es * sin_lat * sin_lat)
         # Normal case: h = p / cos(lat) - N
-        h = p / cos_lat - N
-        # Near-pole guard: |cos(lat)| < 1e-10 → use Z-based formula
-        # Always compute both and select via where() — avoids an implicit
-        # D→H sync that xp.any() would cause on CuPy arrays.
+        # Near-pole guard: |cos(lat)| < 1e-10 → use Z-based formula.
+        # Always compute both branches and select via xp.where() to avoid
+        # an implicit D→H sync from xp.any(near_pole) on GPU arrays.
+        h_normal = p / cos_lat - N
+        # Guard denominator to avoid division-by-zero warning at the equator
+        # where sin_lat ~ 0. The pole formula is only *selected* when
+        # near_pole is True (|cos_lat| < 1e-10 => |sin_lat| ~ 1.0),
+        # so the guard value never affects the result.
+        h_pole = xp.abs(Z) / xp.maximum(xp.abs(sin_lat), 1e-20) - N * (1.0 - es)
         near_pole = xp.abs(cos_lat) < 1e-10
-        h_pole = xp.abs(Z) / xp.abs(sin_lat) - N * (1.0 - es)
-        h = xp.where(near_pole, h_pole, h)
+        h = xp.where(near_pole, h_pole, h_normal)
         return lat, lon, h
 
     return lat, lon

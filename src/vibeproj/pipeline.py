@@ -344,6 +344,28 @@ class TransformPipeline:
             else:
                 lat, lon = result
 
+            # After Helmert, try fused projection kernel on the shifted coords.
+            # Helmert output is always (lat, lon) = north_first=True.
+            # This benefits from L2 cache residency of the Helmert output.
+            fused = _try_fused(
+                lat,
+                lon,
+                xp,
+                projection_name=self.projection.name,
+                direction="forward",
+                computed=self.computed,
+                src_north_first=True,  # Helmert always outputs (lat, lon)
+                dst_north_first=self.dst_north_first,
+                out_x=out_x,
+                out_y=out_y,
+                precision=precision,
+                stream=stream,
+            )
+            if fused is not None:
+                if z is not None:
+                    return (*fused, z_out)
+                return fused
+
         computed = self.computed
         a = computed.get("a", self.proj_params.ellipsoid.a)
         x0 = computed.get("x0", self.proj_params.x_0)
@@ -405,8 +427,8 @@ class TransformPipeline:
         z passes through projection inverse (2D), then is transformed by Helmert.
         """
         # Fast path: fused CUDA kernel
-        # Skipped when datum shift is needed (fused kernels don't include Helmert).
         if self._helmert is None:
+            # No datum shift: run fused inverse with final output axis order.
             fused = _try_fused(
                 arg1,
                 arg2,
@@ -425,6 +447,53 @@ class TransformPipeline:
                 if z is not None:
                     return (*fused, z)
                 return fused
+        else:
+            # With datum shift: fused inverse -> Helmert -> axis reorder.
+            # Fused inverse outputs (lat, lon) for Helmert input.
+            fused = _try_fused(
+                arg1,
+                arg2,
+                xp,
+                projection_name=self.projection.name,
+                direction="inverse",
+                computed=self.computed,
+                src_north_first=self.src_north_first,
+                dst_north_first=True,  # Helmert expects (lat, lon)
+                precision=precision,
+                stream=stream,
+            )
+            if fused is not None:
+                lat, lon = fused
+                z_out = z
+                result = _apply_datum_shift(
+                    lat,
+                    lon,
+                    self._helmert,
+                    xp,
+                    h=z,
+                    stream=stream,
+                )
+                if z is not None:
+                    lat, lon, z_out = result
+                else:
+                    lat, lon = result
+                if self.dst_north_first:
+                    rx, ry = lat, lon
+                else:
+                    rx, ry = lon, lat
+                # Write into pre-allocated output buffers when provided
+                if out_x is not None:
+                    out_x[:] = rx
+                    rx = out_x
+                if out_y is not None:
+                    out_y[:] = ry
+                    ry = out_y
+                if z is not None:
+                    if out_z is not None:
+                        out_z[:] = z_out
+                        z_out = out_z
+                    return rx, ry, z_out
+                return rx, ry
 
         # Source is projected: interpret per its axis order
         if self.src_north_first:

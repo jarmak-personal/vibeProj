@@ -187,7 +187,7 @@ __device__ inline {real_t} phi2({real_t} ts, {real_t} e) {{
         {real_t} e_sin = e * sin(phi);
         {real_t} dphi = HALF_PI - ({real_t})2.0 * atan(ts * pow((({real_t})1.0 - e_sin) / (({real_t})1.0 + e_sin), half_e)) - phi;
         phi += dphi;
-        if (fabs(dphi) < ({real_t})1e-14) break;
+        if (fabs(dphi) < {tol}) break;
     }}
     return phi;
 }}
@@ -211,7 +211,7 @@ __device__ inline {real_t} phi_from_q({real_t} q, {real_t} e, {real_t} es) {{
             * (q / (({real_t})1.0 - es) - sin_phi / one_minus
                + (({real_t})0.5 / e) * log((({real_t})1.0 - e_sin) / (({real_t})1.0 + e_sin)));
         phi += dphi;
-        if (fabs(dphi) < ({real_t})1e-14) break;
+        if (fabs(dphi) < {tol}) break;
     }}
     return phi;
 }}
@@ -268,7 +268,7 @@ _INV_POSTAMBLE = """
 """
 
 _FWD_SIGNATURE = """
-extern "C" __global__ void {func}(
+extern "C" __global__ void __launch_bounds__(256) {func}(
     const double* __restrict__ in_x, const double* __restrict__ in_y,
     double* __restrict__ out_x, double* __restrict__ out_y,
 """
@@ -287,8 +287,8 @@ _EQC_FORWARD_SOURCE = (
 ) {{"""
     + _FWD_PREAMBLE
     + """
-    {real_t} easting  = lam * cos_lat_ts * a + x0;
-    {real_t} northing = phi * a + y0;
+    double easting  = (double)(lam * cos_lat_ts) * (double)a + (double)x0;
+    double northing = (double)phi * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -321,8 +321,8 @@ _SINU_FORWARD_SOURCE = (
 ) {{"""
     + _FWD_PREAMBLE
     + """
-    {real_t} easting  = lam * cos(phi) * a + x0;
-    {real_t} northing = phi * a + y0;
+    double easting  = (double)(lam * cos(phi)) * (double)a + (double)x0;
+    double northing = (double)phi * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -358,8 +358,8 @@ _MERC_FORWARD_SOURCE = (
     {real_t} e_sin_phi = e * sin(phi);
     {real_t} y_proj = log(tan(({real_t})0.25 * {pi} + ({real_t})0.5 * phi)
                      * pow((({real_t})1.0 - e_sin_phi) / (({real_t})1.0 + e_sin_phi), ({real_t})0.5 * e));
-    {real_t} easting  = lam * a + x0;
-    {real_t} northing = y_proj * a + y0;
+    double easting  = (double)lam * (double)a + (double)x0;
+    double northing = (double)y_proj * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -375,9 +375,11 @@ _MERC_INVERSE_SOURCE = (
     + """
     {real_t} lam = cx;
     {real_t} phi = ({real_t})2.0 * atan(exp(cy)) - ({real_t})0.5 * {pi};
-    for (int i = 0; i < 7; i++) {{
+    for (int i = 0; i < 15; i++) {{
         {real_t} e_sin = e * sin(phi);
-        phi = ({real_t})2.0 * atan(exp(cy) * pow((({real_t})1.0 + e_sin) / (({real_t})1.0 - e_sin), ({real_t})0.5 * e)) - ({real_t})0.5 * {pi};
+        {real_t} phi_new = ({real_t})2.0 * atan(exp(cy) * pow((({real_t})1.0 + e_sin) / (({real_t})1.0 - e_sin), ({real_t})0.5 * e)) - ({real_t})0.5 * {pi};
+        if (fabs(phi_new - phi) < {tol}) {{ phi = phi_new; break; }}
+        phi = phi_new;
     }}
 """
     + _INV_POSTAMBLE
@@ -396,8 +398,8 @@ _WEBMERC_FORWARD_SOURCE = (
 ) {{"""
     + _FWD_PREAMBLE
     + """
-    {real_t} easting  = lam * a + x0;
-    {real_t} northing = log(tan(({real_t})0.25 * {pi} + ({real_t})0.5 * phi)) * a + y0;
+    double easting  = (double)lam * (double)a + (double)x0;
+    double northing = (double)log(tan(({real_t})0.25 * {pi} + ({real_t})0.5 * phi)) * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -453,8 +455,8 @@ _TM_FORWARD_SOURCE = (
     clenshaw_complex(gtu0, gtu1, gtu2, gtu3, gtu4, gtu5,
                      sin_arg_r, cos_arg_r, sinh_arg_i, cosh_arg_i, &dCn, &dCe);
     Cn += dCn; Ce += dCe;
-    {real_t} easting  = Qn * Ce * a + x0;
-    {real_t} northing = (Qn * Cn + Zb) * a + y0;
+    double easting  = (double)(Qn * Ce) * (double)a + (double)x0;
+    double northing = (double)(Qn * Cn + Zb) * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -511,8 +513,8 @@ _LCC_FORWARD_SOURCE = (
     {real_t} ts = tsfn(phi, sin_phi, e);
     {real_t} rho = F * pow(ts, nn) * k0;
     {real_t} theta = nn * lam;
-    {real_t} easting  = rho * sin(theta) * a + x0;
-    {real_t} northing = (rho0 - rho * cos(theta)) * a + y0;
+    double easting  = (double)(rho * sin(theta)) * (double)a + (double)x0;
+    double northing = (double)(rho0 - rho * cos(theta)) * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -559,8 +561,8 @@ _STERE_FORWARD_SOURCE = (
     {real_t} t = tsfn(phi_adj, sin_phi_adj, e);
     {real_t} rho = akm1 * t;
     {real_t} lam_adj = sign * lam;
-    {real_t} easting  = rho * sin(lam_adj) * a + x0;
-    {real_t} northing = (-sign * rho * cos(lam_adj)) * a + y0;
+    double easting  = (double)(rho * sin(lam_adj)) * (double)a + (double)x0;
+    double northing = (double)(-sign * rho * cos(lam_adj)) * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -605,8 +607,8 @@ _AEA_FORWARD_SOURCE = (
     if (rho_sq < ({real_t})0.0) rho_sq = ({real_t})0.0;
     {real_t} rho = sqrt(rho_sq) / nn;
     {real_t} theta = nn * lam;
-    {real_t} easting  = rho * sin(theta) * a + x0;
-    {real_t} northing = (rho0 - rho * cos(theta)) * a + y0;
+    double easting  = (double)(rho * sin(theta)) * (double)a + (double)x0;
+    double northing = (double)(rho0 - rho * cos(theta)) * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -677,8 +679,8 @@ _LAEA_FORWARD_SOURCE = (
         ex = rho * sin_lam;
         ey = rho * cos_lam;
     }}
-    {real_t} easting  = ex * a + x0;
-    {real_t} northing = ey * a + y0;
+    double easting  = (double)ex * (double)a + (double)x0;
+    double northing = (double)ey * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -746,8 +748,8 @@ _EQEARTH_FORWARD_SOURCE = (
     {real_t} t2 = theta * theta;
     {real_t} t6 = t2 * t2 * t2;
     {real_t} d = A1 + ({real_t})3.0*A2*t2 + t6*(({real_t})7.0*A3 + ({real_t})9.0*A4*t2);
-    {real_t} easting  = (rqda * M * lam * cos(theta) / d) * a + x0;
-    {real_t} northing = (rqda * theta * (A1 + A2*t2 + t6*(A3 + A4*t2))) * a + y0;
+    double easting  = (double)(rqda * M * lam * cos(theta) / d) * (double)a + (double)x0;
+    double northing = (double)(rqda * theta * (A1 + A2*t2 + t6*(A3 + A4*t2))) * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -773,7 +775,9 @@ _EQEARTH_INVERSE_SOURCE = (
         {real_t} t6 = t2 * t2 * t2;
         {real_t} fy = theta * (A1 + A2*t2 + t6*(A3 + A4*t2)) - cys;
         {real_t} fpy = A1 + ({real_t})3.0*A2*t2 + t6*(({real_t})7.0*A3 + ({real_t})9.0*A4*t2);
-        theta = theta - fy / fpy;
+        {real_t} dtheta = fy / fpy;
+        theta = theta - dtheta;
+        if (fabs(dtheta) < {tol}) break;
     }}
     {real_t} t2 = theta * theta;
     {real_t} t6 = t2 * t2 * t2;
@@ -803,8 +807,8 @@ _CEA_FORWARD_SOURCE = (
     + """
     {real_t} sin_phi = sin(phi);
     {real_t} q = qsfn(sin_phi, e);
-    {real_t} easting  = lam * k0 * a + x0;
-    {real_t} northing = (({real_t})0.5 * q / k0) * a + y0;
+    double easting  = (double)(lam * k0) * (double)a + (double)x0;
+    double northing = (double)(({real_t})0.5 * q / k0) * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -841,8 +845,8 @@ _ORTHO_FORWARD_SOURCE = (
     + _FWD_PREAMBLE
     + """
     {real_t} sin_phi = sin(phi), cos_phi = cos(phi), cos_lam = cos(lam);
-    {real_t} easting  = (cos_phi * sin(lam)) * a + x0;
-    {real_t} northing = (cos_phi0 * sin_phi - sin_phi0 * cos_phi * cos_lam) * a + y0;
+    double easting  = (double)(cos_phi * sin(lam)) * (double)a + (double)x0;
+    double northing = (double)(cos_phi0 * sin_phi - sin_phi0 * cos_phi * cos_lam) * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -883,8 +887,8 @@ _GNOM_FORWARD_SOURCE = (
     + """
     {real_t} sin_phi = sin(phi), cos_phi = cos(phi), cos_lam = cos(lam);
     {real_t} cos_c = sin_phi0 * sin_phi + cos_phi0 * cos_phi * cos_lam;
-    {real_t} easting  = (cos_phi * sin(lam) / cos_c) * a + x0;
-    {real_t} northing = ((cos_phi0 * sin_phi - sin_phi0 * cos_phi * cos_lam) / cos_c) * a + y0;
+    double easting  = (double)(cos_phi * sin(lam) / cos_c) * (double)a + (double)x0;
+    double northing = (double)((cos_phi0 * sin_phi - sin_phi0 * cos_phi * cos_lam) / cos_c) * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -929,10 +933,10 @@ _MOLL_FORWARD_SOURCE = (
         {real_t} dtheta = -(({real_t})2.0 * theta + sin(({real_t})2.0 * theta) - pi_sin_phi)
                          / (({real_t})2.0 + ({real_t})2.0 * cos(({real_t})2.0 * theta));
         theta += dtheta;
-        if (fabs(dtheta) < ({real_t})1e-14) break;
+        if (fabs(dtheta) < {tol}) break;
     }}
-    {real_t} easting  = (lam * ({real_t})2.0 * SQRT2 / {pi} * cos(theta)) * a + x0;
-    {real_t} northing = (SQRT2 * sin(theta)) * a + y0;
+    double easting  = (double)(lam * ({real_t})2.0 * SQRT2 / {pi} * cos(theta)) * (double)a + (double)x0;
+    double northing = (double)(SQRT2 * sin(theta)) * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -1032,7 +1036,7 @@ _OMERC_INVERSE_SOURCE = (
         {real_t} e_sin = e * sin(phi);
         {real_t} phi_new = ({real_t})0.5 * {pi} - ({real_t})2.0 * atan(
             t * pow((({real_t})1.0 - e_sin) / (({real_t})1.0 + e_sin), ({real_t})0.5 * e));
-        if (fabs(phi_new - phi) < ({real_t})1e-14) {{ phi = phi_new; break; }}
+        if (fabs(phi_new - phi) < {tol}) {{ phi = phi_new; break; }}
         phi = phi_new;
     }}
 
@@ -1120,7 +1124,7 @@ _KROVAK_INVERSE_SOURCE = (
         {real_t} phi_new = ({real_t})2.0 * atan(
             t * pow((({real_t})1.0 + e_sin) / (({real_t})1.0 - e_sin), ({real_t})0.5 * e)
         ) - ({real_t})0.5 * {pi};
-        if (fabs(phi_new - phi) < ({real_t})1e-14) {{ phi = phi_new; break; }}
+        if (fabs(phi_new - phi) < {tol}) {{ phi = phi_new; break; }}
         phi = phi_new;
     }}
 
@@ -1153,10 +1157,10 @@ _ECK4_FORWARD_SOURCE = (
         {real_t} V = theta + sin_t * cos_t + ({real_t})2.0 * sin_t - p;
         {real_t} dtheta = -V / (({real_t})1.0 + cos(({real_t})2.0 * theta) + ({real_t})2.0 * cos_t);
         theta += dtheta;
-        if (fabs(dtheta) < ({real_t})1e-14) break;
+        if (fabs(dtheta) < {tol}) break;
     }}
-    {real_t} easting  = (C_x * lam * (({real_t})1.0 + cos(theta))) * a + x0;
-    {real_t} northing = (C_y * sin(theta)) * a + y0;
+    double easting  = (double)(C_x * lam * (({real_t})1.0 + cos(theta))) * (double)a + (double)x0;
+    double northing = (double)(C_y * sin(theta)) * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -1204,10 +1208,10 @@ _ECK6_FORWARD_SOURCE = (
         {real_t} V = theta + sin(theta) - p;
         {real_t} dtheta = -V / (({real_t})1.0 + cos(theta));
         theta += dtheta;
-        if (fabs(dtheta) < ({real_t})1e-14) break;
+        if (fabs(dtheta) < {tol}) break;
     }}
-    {real_t} easting  = (C_x * lam * (({real_t})1.0 + cos(theta))) * a + x0;
-    {real_t} northing = (C_y * theta) * a + y0;
+    double easting  = (double)(C_x * lam * (({real_t})1.0 + cos(theta))) * (double)a + (double)x0;
+    double northing = (double)(C_y * theta) * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -1253,8 +1257,8 @@ _STEREA_FORWARD_SOURCE = (
     {real_t} sin_chi = sin(chi), cos_chi = cos(chi);
     {real_t} cos_lam_s = cos(lam_s), sin_lam_s = sin(lam_s);
     {real_t} k_den = ({real_t})1.0 + sin_chi0*sin_chi + cos_chi0*cos_chi*cos_lam_s;
-    {real_t} easting  = (({real_t})2.0 * R * k0 * cos_chi * sin_lam_s / k_den) * a + x0;
-    {real_t} northing = (({real_t})2.0 * R * k0 * (cos_chi0*sin_chi - sin_chi0*cos_chi*cos_lam_s) / k_den) * a + y0;
+    double easting  = (double)(({real_t})2.0 * R * k0 * cos_chi * sin_lam_s / k_den) * (double)a + (double)x0;
+    double northing = (double)(({real_t})2.0 * R * k0 * (cos_chi0*sin_chi - sin_chi0*cos_chi*cos_lam_s) / k_den) * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -1286,7 +1290,7 @@ _STEREA_INVERSE_SOURCE = (
         {real_t} psi_c = log(tan(({real_t})0.25*{pi} + ({real_t})0.5*phi) * pow((({real_t})1.0-es)/(({real_t})1.0+es), ({real_t})0.5*e));
         {real_t} dphi = (psi - psi_c) * cos(phi) * (({real_t})1.0 - e*e*sp*sp) / (({real_t})1.0 - e*e);
         phi += dphi;
-        if (fabs(dphi) < ({real_t})1e-14) break;
+        if (fabs(dphi) < {tol}) break;
     }}
 """
     + _INV_POSTAMBLE
@@ -1317,8 +1321,8 @@ _GEOS_FORWARD_SOURCE = (
     {real_t} Sz = r_earth * sin_pgc;
     // Sweep Y (GOES-R PUG): x = arcsin(-s_y/|s|), y = arctan(s_z/s_x)
     {real_t} sn = sqrt(Sx*Sx + Sy*Sy + Sz*Sz);
-    {real_t} easting  = asin(fmin(fmax(-Sy / sn, ({real_t})-1.0), ({real_t})1.0)) + x0;
-    {real_t} northing = atan2(Sz, Sx) + y0;
+    double easting  = (double)asin(fmin(fmax(-Sy / sn, ({real_t})-1.0), ({real_t})1.0)) + (double)x0;
+    double northing = (double)atan2(Sz, Sx) + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -1372,9 +1376,9 @@ _ROBIN_FORWARD_SOURCE = (
     int ti1 = ti < 18 ? ti+1 : 18;
     {real_t} X = TX[ti] + frac * (TX[ti1] - TX[ti]);
     {real_t} Y = TY[ti] + frac * (TY[ti1] - TY[ti]);
-    {real_t} easting  = (FXC * X * lam / {pi}) * a + x0;
+    double easting  = (double)(FXC * X * lam / {pi}) * (double)a + (double)x0;
     {real_t} sgn = phi < ({real_t})0.0 ? ({real_t})-1.0 : ({real_t})1.0;
-    {real_t} northing = (FYC * Y * sgn) * a + y0;
+    double northing = (double)(FYC * Y * sgn) * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -1423,8 +1427,8 @@ _WINTRI_FORWARD_SOURCE = (
     {real_t} cos_phi = cos(phi);
     {real_t} alpha = acos(fmin(fmax(cos_phi * cos(lam * ({real_t})0.5), ({real_t})-1.0), ({real_t})1.0));
     {real_t} sinc_a = fabs(alpha) < ({real_t})1e-10 ? ({real_t})1.0 : sin(alpha) / alpha;
-    {real_t} easting  = ((({real_t})2.0 * cos_phi * sin(lam*({real_t})0.5) / sinc_a + lam*cos_phi1) * ({real_t})0.5) * a + x0;
-    {real_t} northing = ((sin(phi) / sinc_a + phi) * ({real_t})0.5) * a + y0;
+    double easting  = (double)((({real_t})2.0 * cos_phi * sin(lam*({real_t})0.5) / sinc_a + lam*cos_phi1) * ({real_t})0.5) * (double)a + (double)x0;
+    double northing = (double)((sin(phi) / sinc_a + phi) * ({real_t})0.5) * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -1472,8 +1476,8 @@ _NATEARTH_FORWARD_SOURCE = (
     const {real_t} A0=({real_t})0.8707,A1=({real_t})-0.131979,A2=({real_t})-0.013791,A3=({real_t})0.003971,A4=({real_t})-0.001529;
     const {real_t} B0=({real_t})1.007226,B1=({real_t})0.015085,B2=({real_t})-0.044475,B3=({real_t})0.028874,B4=({real_t})-0.005916;
     {real_t} p2 = phi*phi, p4 = p2*p2;
-    {real_t} easting  = (lam * (A0 + p2*(A1 + p2*(A2 + p4*(A3 + p2*A4))))) * a + x0;
-    {real_t} northing = (phi * (B0 + p2*(B1 + p4*(B2 + p2*(B3 + p2*B4))))) * a + y0;
+    double easting  = (double)(lam * (A0 + p2*(A1 + p2*(A2 + p4*(A3 + p2*A4))))) * (double)a + (double)x0;
+    double northing = (double)(phi * (B0 + p2*(B1 + p4*(B2 + p2*(B3 + p2*B4))))) * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -1495,7 +1499,7 @@ _NATEARTH_INVERSE_SOURCE = (
         {real_t} fy = phi*(B0+p2*(B1+p4*(B2+p2*(B3+p2*B4)))) - cy;
         {real_t} fpy = B0+p2*(({real_t})3.0*B1+p4*(({real_t})7.0*B2+p2*(({real_t})9.0*B3+({real_t})11.0*p2*B4)));
         phi -= fy / fpy;
-        if (fabs(fy) < ({real_t})1e-14) break;
+        if (fabs(fy) < {tol}) break;
     }}
     {real_t} p2 = phi*phi, p4 = p2*p2;
     {real_t} lam = cx / (A0 + p2*(A1 + p2*(A2 + p4*(A3 + p2*A4))));
@@ -1521,8 +1525,8 @@ _AEQD_FORWARD_SOURCE = (
     {real_t} cos_c = fmin(fmax(sin_phi0*sp + cos_phi0*cp*cl, ({real_t})-1.0), ({real_t})1.0);
     {real_t} c2 = acos(cos_c);
     {real_t} k = fabs(c2) < ({real_t})1e-10 ? ({real_t})1.0 : c2 / sin(c2);
-    {real_t} easting  = (k * cp * sl) * a + x0;
-    {real_t} northing = (k * (cos_phi0*sp - sin_phi0*cp*cl)) * a + y0;
+    double easting  = (double)(k * cp * sl) * (double)a + (double)x0;
+    double northing = (double)(k * (cos_phi0*sp - sin_phi0*cp*cl)) * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -1554,7 +1558,7 @@ _AEQD_INVERSE_SOURCE = (
 _TM_FORWARD_DS_SOURCE = (
     _DS_TM_DEVICE_FNS
     + """
-extern "C" __global__ void tm_forward_ds(
+extern "C" __global__ void __launch_bounds__(256) tm_forward_ds(
     const double* __restrict__ in_x, const double* __restrict__ in_y,
     double* __restrict__ out_x, double* __restrict__ out_y,
     double cbg0, double cbg1, double cbg2, double cbg3, double cbg4, double cbg5,
@@ -1621,7 +1625,7 @@ extern "C" __global__ void tm_forward_ds(
 _TM_INVERSE_DS_SOURCE = (
     _DS_TM_DEVICE_FNS
     + """
-extern "C" __global__ void tm_inverse_ds(
+extern "C" __global__ void __launch_bounds__(256) tm_inverse_ds(
     const double* __restrict__ in_x, const double* __restrict__ in_y,
     double* __restrict__ out_x, double* __restrict__ out_y,
     double cgb0, double cgb1, double cgb2, double cgb3, double cgb4, double cgb5,
@@ -1745,6 +1749,12 @@ _PI_LITERALS = {
     "float32": "3.14159265f",
 }
 
+# Convergence tolerance per precision: fp64 can reach 1e-14, fp32 can only reach ~1e-7
+_TOL_LITERALS = {
+    "float64": "1e-14",
+    "float32": "1e-7f",
+}
+
 _TYPE_MAP = {
     "float64": "double",
     "float32": "float",
@@ -1789,7 +1799,9 @@ def _get_kernel(projection_name: str, direction: str, compute_dtype: str):
         else:
             template, func_name = _SOURCE_MAP[(projection_name, direction)]
             source = template.format(
-                real_t=_TYPE_MAP[compute_dtype], pi=_PI_LITERALS[compute_dtype]
+                real_t=_TYPE_MAP[compute_dtype],
+                pi=_PI_LITERALS[compute_dtype],
+                tol=_TOL_LITERALS[compute_dtype],
             )
 
         kernel = cp.RawKernel(source, func_name)
@@ -2239,7 +2251,9 @@ def fused_transform(
     if stream is not None:
         with stream:
             kernel((grid,), (block,), args)
-        stream.synchronize()
+        # No synchronize() — caller owns the stream lifecycle.
+        # Synchronizing here would stall the pipeline between Helmert
+        # and projection kernels that are sequenced on the same stream.
     else:
         kernel((grid,), (block,), args)
     return out_x, out_y
@@ -2250,7 +2264,7 @@ def fused_transform(
 # ===================================================================
 
 _HELMERT_SHIFT_SOURCE = """\
-extern "C" __global__ void helmert_shift(
+extern "C" __global__ void __launch_bounds__(256) helmert_shift(
     const double* __restrict__ in_lat,
     const double* __restrict__ in_lon,
     double* __restrict__ out_lat,
@@ -2301,7 +2315,9 @@ extern "C" __global__ void helmert_shift(
     for (int i = 0; i < 10; i++) {
         double sin_lat_i = sin(lat_out);
         double N_i = dst_a / sqrt(1.0 - dst_es * sin_lat_i * sin_lat_i);
-        lat_out = atan2(Z2 + dst_es * N_i * sin_lat_i, p);
+        double lat_new = atan2(Z2 + dst_es * N_i * sin_lat_i, p);
+        if (fabs(lat_new - lat_out) < 1e-14) { lat_out = lat_new; break; }
+        lat_out = lat_new;
     }
 
     out_lat[idx] = lat_out * 57.29577951308232;
@@ -2450,7 +2466,9 @@ def fused_helmert_shift(
     if stream is not None:
         with stream:
             kernel((grid,), (block,), args)
-        stream.synchronize()
+        # No synchronize() — caller owns the stream lifecycle.
+        # When Helmert feeds into a projection kernel on the same stream,
+        # CUDA execution order is guaranteed without explicit sync.
     else:
         kernel((grid,), (block,), args)
 

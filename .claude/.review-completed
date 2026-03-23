@@ -1,0 +1,6 @@
+{
+  "timestamp": "2026-03-23T05:08:51Z",
+  "staged_hash": "b38bf0f3beb8e753e4e1c99fe55f128af6e1b7c2a5586e9df2093d8560a4c09f",
+  "files": ["src/vibeproj/fused_kernels.py","src/vibeproj/helmert.py","src/vibeproj/pipeline.py","src/vibeproj/transformer.py"],
+  "verdict": "LAND"
+}
