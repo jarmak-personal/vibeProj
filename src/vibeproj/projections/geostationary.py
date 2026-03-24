@@ -30,6 +30,7 @@ class Geostationary(Projection):
         H = h + r_eq  # distance from Earth center to satellite
         return {
             "a": e.a,
+            "h": h,
             "H": H,
             "r_eq2": r_eq * r_eq,
             "r_pol2": r_pol * r_pol,
@@ -42,6 +43,7 @@ class Geostationary(Projection):
 
     def forward(self, lam, phi, params, computed, xp):
         H = computed["H"]
+        h = computed["h"]
         r_eq2 = computed["r_eq2"]
         r_pol2 = computed["r_pol2"]
         a = computed["a"]
@@ -61,29 +63,31 @@ class Geostationary(Projection):
         Sy = -r_earth * cos_phi_gc * xp.sin(lam)
         Sz = r_earth * sin_phi_gc
 
-        # Sweep Y (GOES-R PUG): x = arcsin(-s_y/|s|), y = arctan(s_z/s_x)
+        # Sweep Y (GOES-R PUG): x = atan2(-Sy, Sx), y = asin(Sz/|S|)
         sn = xp.sqrt(Sx * Sx + Sy * Sy + Sz * Sz)
-        x = xp.arcsin(xp.clip(-Sy / sn, -1.0, 1.0)) / a
-        y = xp.arctan2(Sz, Sx) / a
+        x = xp.arctan2(-Sy, Sx) * (h / a)
+        y = xp.arcsin(xp.clip(Sz / sn, -1.0, 1.0)) * (h / a)
         return x, y
 
     def inverse(self, x, y, params, computed, xp):
         H = computed["H"]
+        h = computed["h"]
         r_eq2 = computed["r_eq2"]
         r_pol2 = computed["r_pol2"]
         a = computed["a"]
 
-        x_proj = x * a
-        y_proj = y * a
+        # Recover scanning angles (pipeline passes x_norm = x_physical / a)
+        x_angle = x * a / h
+        y_angle = y * a / h
 
-        sin_x = xp.sin(x_proj)
-        cos_x = xp.cos(x_proj)
-        sin_y = xp.sin(y_proj)
-        cos_y = xp.cos(y_proj)
+        sin_x = xp.sin(x_angle)
+        cos_x = xp.cos(x_angle)
+        sin_y = xp.sin(y_angle)
+        cos_y = xp.cos(y_angle)
 
-        # Back-project: ray-ellipsoid intersection
-        a_coeff = sin_x * sin_x + cos_x * cos_x * (cos_y * cos_y + sin_y * sin_y * r_eq2 / r_pol2)
-        b_coeff = -2 * H * cos_x * cos_y
+        # Ray-ellipsoid intersection (sweep Y geometry)
+        a_coeff = cos_y * cos_y + sin_y * sin_y * r_eq2 / r_pol2
+        b_coeff = -2 * H * cos_y * cos_x
         c_coeff = H * H - a * a
 
         discrim = b_coeff * b_coeff - 4 * a_coeff * c_coeff
@@ -91,14 +95,14 @@ class Geostationary(Projection):
 
         r_s = (-b_coeff - xp.sqrt(discrim)) / (2 * a_coeff)
 
-        Sx = r_s * cos_x * cos_y
-        Sy = -r_s * sin_x
-        Sz = r_s * cos_x * sin_y
+        # Reconstruct ground point from scanning angles (sweep Y)
+        P_x = H - r_s * cos_y * cos_x
+        P_y = r_s * cos_y * sin_x
+        P_z = r_s * sin_y
 
-        # Y_ecef = -Sy (from sign convention), X_ecef = H - Sx
-        lam = xp.arctan2(-Sy, H - Sx)
+        lam = xp.arctan2(P_y, P_x)
         # Geocentric → geodetic latitude (CGMS standard: r_eq²/r_pol² factor)
-        phi = xp.arctan(Sz * r_eq2 / (xp.sqrt((H - Sx) ** 2 + Sy**2) * r_pol2))
+        phi = xp.arctan(P_z * r_eq2 / (xp.sqrt(P_x**2 + P_y**2) * r_pol2))
 
         return lam, phi
 

@@ -80,9 +80,8 @@ class PolarStereographic(Projection):
         t = xp.tan(0.5 * (_HALF_PI - phi_adj)) / ((1.0 - e_sin) / (1.0 + e_sin)) ** (0.5 * e)
         rho = akm1 * t
 
-        lam_adj = sign * lam
-        x = rho * xp.sin(lam_adj)
-        y = -sign * rho * xp.cos(lam_adj)
+        x = rho * xp.sin(lam)
+        y = -sign * rho * xp.cos(lam)
         return x, y
 
     def inverse(self, x, y, params, computed, xp):
@@ -113,7 +112,6 @@ class PolarStereographic(Projection):
 
         lam = xp.arctan2(x_adj, y_adj)
         phi = sign * phi
-        lam = sign * lam
         return lam, phi
 
 

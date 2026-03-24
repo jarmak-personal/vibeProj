@@ -44,7 +44,7 @@ class NaturalEarth(Projection):
     def forward(self, lam, phi, params, computed, xp):
         p2 = phi * phi
         p4 = p2 * p2
-        x = lam * (_A0 + p2 * (_A1 + p2 * (_A2 + p4 * (_A3 + p2 * _A4))))
+        x = lam * (_A0 + p2 * (_A1 + p2 * (_A2 + p4 * p2 * (_A3 + p2 * _A4))))
         y = phi * (_B0 + p2 * (_B1 + p4 * (_B2 + p2 * (_B3 + p2 * _B4))))
         return x, y
 
@@ -66,7 +66,7 @@ class NaturalEarth(Projection):
                     break
         p2 = phi * phi
         p4 = p2 * p2
-        lam = x / (_A0 + p2 * (_A1 + p2 * (_A2 + p4 * (_A3 + p2 * _A4))))
+        lam = x / (_A0 + p2 * (_A1 + p2 * (_A2 + p4 * p2 * (_A3 + p2 * _A4))))
         return lam, phi
 
 

@@ -560,9 +560,8 @@ _STERE_FORWARD_SOURCE = (
     {real_t} sin_phi_adj = sin(phi_adj);
     {real_t} t = tsfn(phi_adj, sin_phi_adj, e);
     {real_t} rho = akm1 * t;
-    {real_t} lam_adj = sign * lam;
-    double easting  = (double)(rho * sin(lam_adj)) * (double)a + (double)x0;
-    double northing = (double)(-sign * rho * cos(lam_adj)) * (double)a + (double)y0;
+    double easting  = (double)(rho * sin(lam)) * (double)a + (double)x0;
+    double northing = (double)(-sign * rho * cos(lam)) * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -582,7 +581,7 @@ _STERE_INVERSE_SOURCE = (
     {real_t} rho = sqrt(cx * cx + y_adj * y_adj);
     {real_t} ts = rho / akm1;
     {real_t} phi = sign * phi2(ts, e);
-    {real_t} lam = sign * atan2(cx, y_adj);
+    {real_t} lam = atan2(cx, y_adj);
 """
     + _INV_POSTAMBLE
     + "}}"
@@ -1304,7 +1303,7 @@ _STEREA_INVERSE_SOURCE = (
 _GEOS_FORWARD_SOURCE = (
     _FWD_SIGNATURE.format(func="geos_forward", real_t="{real_t}")
     + """
-    {real_t} H, {real_t} r_eq2, {real_t} r_pol2,
+    {real_t} H, {real_t} h, {real_t} r_eq2, {real_t} r_pol2,
     {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
     int src_north_first, int dst_north_first, int n
 ) {{"""
@@ -1319,10 +1318,10 @@ _GEOS_FORWARD_SOURCE = (
     {real_t} Sx = H - r_earth * cos_pgc * cos_l;
     {real_t} Sy = -r_earth * cos_pgc * sin(lam);
     {real_t} Sz = r_earth * sin_pgc;
-    // Sweep Y (GOES-R PUG): x = arcsin(-s_y/|s|), y = arctan(s_z/s_x)
+    // Sweep Y (GOES-R PUG): x = atan2(-Sy, Sx), y = asin(Sz/|S|)
     {real_t} sn = sqrt(Sx*Sx + Sy*Sy + Sz*Sz);
-    double easting  = (double)asin(fmin(fmax(-Sy / sn, ({real_t})-1.0), ({real_t})1.0)) + (double)x0;
-    double northing = (double)atan2(Sz, Sx) + (double)y0;
+    double easting  = (double)atan2(-Sy, Sx) * (double)h + (double)x0;
+    double northing = (double)asin(fmin(fmax(Sz / sn, ({real_t})-1.0), ({real_t})1.0)) * (double)h + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -1331,23 +1330,28 @@ _GEOS_FORWARD_SOURCE = (
 _GEOS_INVERSE_SOURCE = (
     _INV_SIGNATURE.format(func="geos_inverse", real_t="{real_t}")
     + """
-    {real_t} H, {real_t} r_eq2, {real_t} r_pol2,
+    {real_t} H, {real_t} h, {real_t} r_eq2, {real_t} r_pol2,
     {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
     int src_north_first, int dst_north_first, int n
 ) {{"""
     + _INV_PREAMBLE
     + """
-    {real_t} xp = cx * a, yp = cy * a;
-    {real_t} sx = sin(xp), cx2 = cos(xp), sy = sin(yp), cy2 = cos(yp);
-    {real_t} ac = sx*sx + cx2*cx2*(cy2*cy2 + sy*sy*r_eq2/r_pol2);
-    {real_t} bc = ({real_t})-2.0*H*cx2*cy2;
+    // cx = (easting - x0) / a, but physical coords are h * angle, so angle = cx * a / h
+    {real_t} x_angle = cx * a / h, y_angle = cy * a / h;
+    {real_t} sx = sin(x_angle), cx2 = cos(x_angle), sy = sin(y_angle), cy2 = cos(y_angle);
+    // Sweep Y ray-ellipsoid intersection
+    {real_t} ac = cy2*cy2 + sy*sy*r_eq2/r_pol2;
+    {real_t} bc = ({real_t})-2.0*H*cy2*cx2;
     {real_t} cc = H*H - a*a;
     {real_t} disc = bc*bc - ({real_t})4.0*ac*cc;
     disc = fmax(disc, ({real_t})0.0);
     {real_t} rs = (-bc - sqrt(disc)) / (({real_t})2.0*ac);
-    {real_t} Sx2 = rs*cx2*cy2, Sy2 = -rs*sx, Sz2 = rs*cx2*sy;
-    {real_t} lam = atan2(-Sy2, H - Sx2);
-    {real_t} phi = atan(Sz2 * r_eq2 / (sqrt((H-Sx2)*(H-Sx2)+Sy2*Sy2) * r_pol2));
+    // Reconstruct ground point (sweep Y)
+    {real_t} Px = H - rs*cy2*cx2;
+    {real_t} Py = rs*cy2*sx;
+    {real_t} Pz = rs*sy;
+    {real_t} lam = atan2(Py, Px);
+    {real_t} phi = atan(Pz * r_eq2 / (sqrt(Px*Px+Py*Py) * r_pol2));
 """
     + _INV_POSTAMBLE
     + "}}"
@@ -1376,7 +1380,7 @@ _ROBIN_FORWARD_SOURCE = (
     int ti1 = ti < 18 ? ti+1 : 18;
     {real_t} X = TX[ti] + frac * (TX[ti1] - TX[ti]);
     {real_t} Y = TY[ti] + frac * (TY[ti1] - TY[ti]);
-    double easting  = (double)(FXC * X * lam / {pi}) * (double)a + (double)x0;
+    double easting  = (double)(FXC * X * lam) * (double)a + (double)x0;
     {real_t} sgn = phi < ({real_t})0.0 ? ({real_t})-1.0 : ({real_t})1.0;
     double northing = (double)(FYC * Y * sgn) * (double)a + (double)y0;
 """
@@ -1405,7 +1409,7 @@ _ROBIN_INVERSE_SOURCE = (
     {real_t} X = TX[ti] + frac * (TX[ti1] - TX[ti]);
     {real_t} phi = phi_deg * {pi} / ({real_t})180.0;
     if (cy < ({real_t})0.0) phi = -phi;
-    {real_t} lam = cx * {pi} / (FXC * fmax(X, ({real_t})1e-30));
+    {real_t} lam = cx / (FXC * fmax(X, ({real_t})1e-30));
 """
     + _INV_POSTAMBLE
     + "}}"
@@ -1476,7 +1480,7 @@ _NATEARTH_FORWARD_SOURCE = (
     const {real_t} A0=({real_t})0.8707,A1=({real_t})-0.131979,A2=({real_t})-0.013791,A3=({real_t})0.003971,A4=({real_t})-0.001529;
     const {real_t} B0=({real_t})1.007226,B1=({real_t})0.015085,B2=({real_t})-0.044475,B3=({real_t})0.028874,B4=({real_t})-0.005916;
     {real_t} p2 = phi*phi, p4 = p2*p2;
-    double easting  = (double)(lam * (A0 + p2*(A1 + p2*(A2 + p4*(A3 + p2*A4))))) * (double)a + (double)x0;
+    double easting  = (double)(lam * (A0 + p2*(A1 + p2*(A2 + p4*p2*(A3 + p2*A4))))) * (double)a + (double)x0;
     double northing = (double)(phi * (B0 + p2*(B1 + p4*(B2 + p2*(B3 + p2*B4))))) * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
@@ -1502,7 +1506,7 @@ _NATEARTH_INVERSE_SOURCE = (
         if (fabs(fy) < {tol}) break;
     }}
     {real_t} p2 = phi*phi, p4 = p2*p2;
-    {real_t} lam = cx / (A0 + p2*(A1 + p2*(A2 + p4*(A3 + p2*A4))));
+    {real_t} lam = cx / (A0 + p2*(A1 + p2*(A2 + p4*p2*(A3 + p2*A4))));
 """
     + _INV_POSTAMBLE
     + "}}"
@@ -2211,6 +2215,7 @@ def fused_transform(
     elif projection_name == "geos":
         args = base + (
             real_t(computed["H"]),
+            real_t(computed["h"]),
             real_t(computed["r_eq2"]),
             real_t(computed["r_pol2"]),
             real_t(computed["lam0"]),

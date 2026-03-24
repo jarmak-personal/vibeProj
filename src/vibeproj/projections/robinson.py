@@ -101,7 +101,7 @@ class Robinson(Projection):
             X = _TABLE_X[i] + frac * (_TABLE_X[min(i + 1, 18)] - _TABLE_X[i])
             Y = _TABLE_Y[i] + frac * (_TABLE_Y[min(i + 1, 18)] - _TABLE_Y[i])
 
-        x = _FXC * X * lam / math.pi
+        x = _FXC * X * lam
         y = _FYC * Y * xp.sign(phi)
         return x, y
 
@@ -135,7 +135,7 @@ class Robinson(Projection):
             X = _TABLE_X[idx] + frac * (_TABLE_X[min(idx + 1, 18)] - _TABLE_X[idx])
 
         phi = phi_deg * (math.pi / 180.0) * xp.sign(y)
-        lam = x * math.pi / (_FXC * xp.maximum(X, 1e-30))
+        lam = x / (_FXC * xp.maximum(X, 1e-30))
         return lam, phi
 
 
