@@ -9,8 +9,6 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
-import numpy as np
-
 from vibeproj.projections import register
 from vibeproj.projections.base import Projection
 
@@ -41,12 +39,11 @@ class Mollweide(Projection):
             denom = xp.where(xp.abs(denom) < 1e-30, 1e-30, denom)
             dtheta = -(2.0 * theta + xp.sin(2.0 * theta) - pi_sin_phi) / denom
             theta = theta + dtheta
-            if xp is np:
-                if hasattr(dtheta, "__len__"):
-                    if xp.all(xp.abs(dtheta) < 1e-14):
-                        break
-                elif abs(float(dtheta)) < 1e-14:
+            if hasattr(dtheta, "__len__"):
+                if xp.all(xp.abs(dtheta) < 1e-14):
                     break
+            elif abs(float(dtheta)) < 1e-14:
+                break
         x = lam * 2.0 * _SQRT2 / math.pi * xp.cos(theta)
         y = _SQRT2 * xp.sin(theta)
         return x, y

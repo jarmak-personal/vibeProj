@@ -9,8 +9,6 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
-import numpy as np
-
 from vibeproj.projections import register
 from vibeproj.projections.base import Projection
 
@@ -59,12 +57,11 @@ class NaturalEarth(Projection):
             safe_fpy = fpy + (fpy == 0) * 1e-30
             dphi = -fy / safe_fpy
             phi = phi + dphi
-            if xp is np:
-                if hasattr(dphi, "__len__"):
-                    if xp.all(xp.abs(dphi) < 1e-14):
-                        break
-                elif abs(float(dphi)) < 1e-14:
+            if hasattr(dphi, "__len__"):
+                if xp.all(xp.abs(dphi) < 1e-14):
                     break
+            elif abs(float(dphi)) < 1e-14:
+                break
         phi = (
             xp.clip(phi, -math.pi / 2, math.pi / 2)
             if hasattr(phi, "clip")

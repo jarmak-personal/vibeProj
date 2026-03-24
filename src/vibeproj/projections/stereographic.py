@@ -11,8 +11,6 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
-import numpy as np
-
 from vibeproj.projections import register
 from vibeproj.projections.base import Projection
 
@@ -103,12 +101,11 @@ class PolarStereographic(Projection):
             e_sin = e * xp.sin(phi)
             dphi = _HALF_PI - 2.0 * xp.arctan(ts * ((1.0 - e_sin) / (1.0 + e_sin)) ** half_e) - phi
             phi = phi + dphi
-            if xp is np:
-                if hasattr(dphi, "__len__"):
-                    if xp.all(xp.abs(dphi) < 1e-14):
-                        break
-                elif abs(float(dphi)) < 1e-14:
+            if hasattr(dphi, "__len__"):
+                if xp.all(xp.abs(dphi) < 1e-14):
                     break
+            elif abs(float(dphi)) < 1e-14:
+                break
 
         lam = xp.arctan2(x_adj, y_adj)
         phi = sign * phi

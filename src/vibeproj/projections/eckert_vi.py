@@ -8,8 +8,6 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
-import numpy as np
-
 from vibeproj.projections import register
 from vibeproj.projections.base import Projection
 
@@ -43,12 +41,11 @@ class EckertVI(Projection):
             denom = xp.where(xp.abs(denom) < 1e-30, 1e-30, denom)
             dtheta = -V / denom
             theta = theta + dtheta
-            if xp is np:
-                if hasattr(dtheta, "__len__"):
-                    if xp.all(xp.abs(dtheta) < 1e-14):
-                        break
-                elif abs(float(dtheta)) < 1e-14:
+            if hasattr(dtheta, "__len__"):
+                if xp.all(xp.abs(dtheta) < 1e-14):
                     break
+            elif abs(float(dtheta)) < 1e-14:
+                break
         x = _C_x * lam * (1.0 + xp.cos(theta))
         y = _C_y * theta
         return x, y

@@ -9,8 +9,6 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
-import numpy as np
-
 from vibeproj.projections import register
 from vibeproj.projections.base import Projection
 
@@ -67,12 +65,11 @@ class WinkelTripel(Projection):
             dphi = -fy * 0.5
             lam = lam + dlam
             phi = phi + dphi
-            if xp is np:
-                if hasattr(dlam, "__len__"):
-                    if xp.all((xp.abs(dlam) < 1e-10) & (xp.abs(dphi) < 1e-10)):
-                        break
-                elif abs(float(dlam)) < 1e-10 and abs(float(dphi)) < 1e-10:
+            if hasattr(dlam, "__len__"):
+                if xp.all((xp.abs(dlam) < 1e-10) & (xp.abs(dphi) < 1e-10)):
                     break
+            elif abs(float(dlam)) < 1e-10 and abs(float(dphi)) < 1e-10:
+                break
         return lam, phi
 
 

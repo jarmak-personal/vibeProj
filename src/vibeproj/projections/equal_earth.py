@@ -15,8 +15,6 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
-import numpy as np
-
 from vibeproj.projections import register
 from vibeproj.projections.base import Projection
 
@@ -131,12 +129,11 @@ class EqualEarth(Projection):
                 + (0.5 / ec) * xp.log((1.0 - e_sin) / (1.0 + e_sin))
             )
             phi = phi + dphi
-            if xp is np:
-                if hasattr(dphi, "__len__"):
-                    if xp.all(xp.abs(dphi) < 1e-14):
-                        break
-                elif abs(float(dphi)) < 1e-14:
+            if hasattr(dphi, "__len__"):
+                if xp.all(xp.abs(dphi) < 1e-14):
                     break
+            elif abs(float(dphi)) < 1e-14:
+                break
 
         return lam, phi
 

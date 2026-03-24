@@ -13,8 +13,6 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
-import numpy as np
-
 from vibeproj.projections import register
 from vibeproj.projections.base import Projection
 
@@ -49,12 +47,11 @@ def _phi_from_t(t, e, xp):
         phi_new = _HALF_PI - 2.0 * xp.arctan(t * ((1.0 - e_sin) / (1.0 + e_sin)) ** (e / 2.0))
         dphi = phi_new - phi
         phi = phi_new
-        if xp is np:
-            if hasattr(dphi, "__len__"):
-                if xp.all(xp.abs(dphi) < 1e-14):
-                    break
-            elif abs(float(dphi)) < 1e-14:
+        if hasattr(dphi, "__len__"):
+            if xp.all(xp.abs(dphi) < 1e-14):
                 break
+        elif abs(float(dphi)) < 1e-14:
+            break
     return phi
 
 
