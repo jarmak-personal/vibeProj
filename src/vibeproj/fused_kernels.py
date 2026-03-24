@@ -1919,7 +1919,9 @@ def fused_transform(
     elif precision == "fp64":
         compute_dtype = "float64"
     else:
-        compute_dtype = "float64"
+        raise ValueError(
+            f"Invalid precision: {precision!r}. Must be 'fp64', 'fp32', 'ds', or 'auto'."
+        )
 
     # I/O is always fp64 (ADR-0002: storage is always fp64)
     # Kernel reads double*, computes in real_t, writes double*
