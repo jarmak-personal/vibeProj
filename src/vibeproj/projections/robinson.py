@@ -78,28 +78,25 @@ class Robinson(Projection):
 
     def forward(self, lam, phi, params, computed, xp):
         abs_phi = xp.abs(phi)
-        # Table index: phi_deg / 5 → index 0..18
         phi_deg = abs_phi * (180.0 / math.pi)
-        idx = (
-            xp.clip(phi_deg / 5.0, 0, 17).astype(int)
-            if hasattr(phi_deg, "astype")
-            else int(min(phi_deg / 5.0, 17))
-        )
+
+        is_scalar = not hasattr(phi_deg, "__len__")
+        if is_scalar:
+            phi_deg = xp.asarray([phi_deg], dtype=float)
+
+        idx = xp.clip(phi_deg / 5.0, 0, 17).astype(int)
         frac = phi_deg / 5.0 - idx
 
-        # Interpolate
-        if hasattr(idx, "__len__"):
-            # Array path
-            x_arr = xp.array(_TABLE_X, dtype=phi.dtype)
-            y_arr = xp.array(_TABLE_Y, dtype=phi.dtype)
-            idx_safe = xp.clip(idx, 0, 17)
-            idx_next = xp.clip(idx + 1, 0, 18)
-            X = x_arr[idx_safe] + frac * (x_arr[idx_next] - x_arr[idx_safe])
-            Y = y_arr[idx_safe] + frac * (y_arr[idx_next] - y_arr[idx_safe])
-        else:
-            i = int(idx)
-            X = _TABLE_X[i] + frac * (_TABLE_X[min(i + 1, 18)] - _TABLE_X[i])
-            Y = _TABLE_Y[i] + frac * (_TABLE_Y[min(i + 1, 18)] - _TABLE_Y[i])
+        x_arr = xp.array(_TABLE_X, dtype=float)
+        y_arr = xp.array(_TABLE_Y, dtype=float)
+        idx_safe = xp.clip(idx, 0, 17)
+        idx_next = xp.clip(idx + 1, 0, 18)
+        X = x_arr[idx_safe] + frac * (x_arr[idx_next] - x_arr[idx_safe])
+        Y = y_arr[idx_safe] + frac * (y_arr[idx_next] - y_arr[idx_safe])
+
+        if is_scalar:
+            X = float(X[0])
+            Y = float(Y[0])
 
         x = _FXC * X * lam
         y = _FYC * Y * xp.sign(phi)
@@ -108,31 +105,24 @@ class Robinson(Projection):
     def inverse(self, x, y, params, computed, xp):
         abs_y = xp.abs(y) / _FYC
 
-        # Find table index by searching Y table
-        if hasattr(abs_y, "__len__"):
-            y_arr = xp.array(_TABLE_Y, dtype=y.dtype)
-            # Vectorized: binary search
-            idx = xp.searchsorted(y_arr, abs_y, side="right") - 1
-            idx = xp.clip(idx, 0, 17)
-            idx_next = xp.clip(idx + 1, 0, 18)
-            y0 = y_arr[idx]
-            y1 = y_arr[idx_next]
-            frac = (abs_y - y0) / xp.maximum(y1 - y0, 1e-30)
-            phi_deg = (idx + frac) * 5.0
-            x_arr = xp.array(_TABLE_X, dtype=x.dtype)
-            X = x_arr[idx] + frac * (x_arr[idx_next] - x_arr[idx])
-        else:
-            vy = float(abs_y)
-            idx = 0
-            for i in range(18):
-                if _TABLE_Y[i + 1] >= vy:
-                    idx = i
-                    break
-            else:
-                idx = 17
-            frac = (vy - _TABLE_Y[idx]) / max(_TABLE_Y[idx + 1] - _TABLE_Y[idx], 1e-30)
-            phi_deg = (idx + frac) * 5.0
-            X = _TABLE_X[idx] + frac * (_TABLE_X[min(idx + 1, 18)] - _TABLE_X[idx])
+        is_scalar = not hasattr(abs_y, "__len__")
+        if is_scalar:
+            abs_y = xp.asarray([abs_y], dtype=float)
+
+        y_arr = xp.array(_TABLE_Y, dtype=abs_y.dtype if hasattr(abs_y, "dtype") else float)
+        idx = xp.searchsorted(y_arr, abs_y, side="right") - 1
+        idx = xp.clip(idx, 0, 17)
+        idx_next = xp.clip(idx + 1, 0, 18)
+        y0 = y_arr[idx]
+        y1 = y_arr[idx_next]
+        frac = (abs_y - y0) / xp.maximum(y1 - y0, 1e-30)
+        phi_deg = (idx + frac) * 5.0
+        x_arr = xp.array(_TABLE_X, dtype=abs_y.dtype if hasattr(abs_y, "dtype") else float)
+        X = x_arr[idx] + frac * (x_arr[idx_next] - x_arr[idx])
+
+        if is_scalar:
+            phi_deg = float(phi_deg[0])
+            X = float(X[0])
 
         phi = phi_deg * (math.pi / 180.0) * xp.sign(y)
         lam = x / (_FXC * xp.maximum(X, 1e-30))
