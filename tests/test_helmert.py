@@ -86,7 +86,7 @@ def test_ecef_roundtrip():
     lon = np.array([0.3, 2.1, -1.5])
 
     X, Y, Z = geodetic_to_ecef(lat, lon, WGS84.a, WGS84.es, np)
-    lat2, lon2 = ecef_to_geodetic(X, Y, Z, WGS84.a, WGS84.es, np)
+    lat2, lon2, _ = ecef_to_geodetic(X, Y, Z, WGS84.a, WGS84.es, np)
 
     assert_allclose(lat2, lat, atol=1e-12)
     assert_allclose(lon2, lon, atol=1e-12)

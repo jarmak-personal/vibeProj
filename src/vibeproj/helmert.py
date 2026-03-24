@@ -167,10 +167,9 @@ def ecef_to_geodetic(X, Y, Z, a, es, xp, return_height=False):
 
     Returns
     -------
-    lat_rad, lon_rad : arrays
-        Geodetic coordinates in radians.
-    h : arrays (only when return_height=True)
-        Ellipsoidal height in meters.
+    lat_rad, lon_rad, h : tuple
+        Geodetic coordinates in radians and ellipsoidal height in meters.
+        ``h`` is ``None`` when *return_height* is False.
     """
     p = xp.sqrt(X * X + Y * Y)
     lon = xp.arctan2(Y, X)
@@ -201,7 +200,7 @@ def ecef_to_geodetic(X, Y, Z, a, es, xp, return_height=False):
         h = xp.where(near_pole, h_pole, h_normal)
         return lat, lon, h
 
-    return lat, lon
+    return lat, lon, None
 
 
 def apply_helmert(lat_deg, lon_deg, params: HelmertParams, xp, h=None):
@@ -251,5 +250,5 @@ def apply_helmert(lat_deg, lon_deg, params: HelmertParams, xp, h=None):
         )
         return lat_out * RAD_TO_DEG, lon_out * RAD_TO_DEG, h_out
     else:
-        lat_out, lon_out = ecef_to_geodetic(X2, Y2, Z2, dst.a, dst.es, xp)
+        lat_out, lon_out, _ = ecef_to_geodetic(X2, Y2, Z2, dst.a, dst.es, xp)
         return lat_out * RAD_TO_DEG, lon_out * RAD_TO_DEG
