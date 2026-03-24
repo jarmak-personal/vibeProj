@@ -10,7 +10,7 @@ import math
 from typing import TYPE_CHECKING
 
 from vibeproj.projections import register
-from vibeproj.projections.base import Projection
+from vibeproj.projections.base import EPS_ANGLE, EPS_DENOM, Projection
 
 if TYPE_CHECKING:
     from vibeproj.crs import ProjectionParams
@@ -41,7 +41,7 @@ class AzimuthalEquidistant(Projection):
         cos_c = sin_phi0 * sin_phi + cos_phi0 * cos_phi * cos_lam
         cos_c = xp.clip(cos_c, -1.0, 1.0)
         c = xp.arccos(cos_c)
-        k = xp.where(xp.abs(c) < 1e-10, 1.0, c / xp.sin(c))
+        k = xp.where(xp.abs(c) < EPS_ANGLE, 1.0, c / xp.sin(c))
 
         x = k * cos_phi * sin_lam
         y = k * (cos_phi0 * sin_phi - sin_phi0 * cos_phi * cos_lam)
@@ -55,10 +55,12 @@ class AzimuthalEquidistant(Projection):
         cos_c = xp.cos(c)
 
         phi = xp.where(
-            c < 1e-10,
+            c < EPS_ANGLE,
             xp.arcsin(xp.clip(sin_phi0, -1.0, 1.0)) + 0 * x,
             xp.arcsin(
-                xp.clip(cos_c * sin_phi0 + y * sin_c * cos_phi0 / xp.maximum(c, 1e-30), -1.0, 1.0)
+                xp.clip(
+                    cos_c * sin_phi0 + y * sin_c * cos_phi0 / xp.maximum(c, EPS_DENOM), -1.0, 1.0
+                )
             ),
         )
         lam = xp.arctan2(x * sin_c, c * cos_phi0 * cos_c - y * sin_phi0 * sin_c)

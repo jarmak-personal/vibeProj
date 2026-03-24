@@ -10,7 +10,7 @@ import math
 from typing import TYPE_CHECKING
 
 from vibeproj.projections import register
-from vibeproj.projections.base import Projection
+from vibeproj.projections.base import EPS_CONV, EPS_DENOM, Projection
 
 if TYPE_CHECKING:
     from vibeproj.crs import ProjectionParams
@@ -54,13 +54,13 @@ class NaturalEarth(Projection):
             p4 = p2 * p2
             fy = phi * (_B0 + p2 * (_B1 + p4 * (_B2 + p2 * (_B3 + p2 * _B4)))) - y
             fpy = _B0 + p2 * (3 * _B1 + p4 * (7 * _B2 + p2 * (9 * _B3 + 11 * p2 * _B4)))
-            safe_fpy = fpy + (fpy == 0) * 1e-30
+            safe_fpy = fpy + (fpy == 0) * EPS_DENOM
             dphi = -fy / safe_fpy
             phi = phi + dphi
             if hasattr(dphi, "__len__"):
-                if xp.all(xp.abs(dphi) < 1e-14):
+                if xp.all(xp.abs(dphi) < EPS_CONV):
                     break
-            elif abs(float(dphi)) < 1e-14:
+            elif abs(float(dphi)) < EPS_CONV:
                 break
         phi = (
             xp.clip(phi, -math.pi / 2, math.pi / 2)
@@ -70,7 +70,7 @@ class NaturalEarth(Projection):
         p2 = phi * phi
         p4 = p2 * p2
         denom = _A0 + p2 * (_A1 + p2 * (_A2 + p4 * p2 * (_A3 + p2 * _A4)))
-        safe_denom = denom + (denom == 0) * 1e-30
+        safe_denom = denom + (denom == 0) * EPS_DENOM
         lam = x / safe_denom
         return lam, phi
 

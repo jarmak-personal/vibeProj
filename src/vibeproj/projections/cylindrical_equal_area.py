@@ -10,7 +10,7 @@ import math
 from typing import TYPE_CHECKING
 
 from vibeproj.projections import register
-from vibeproj.projections.base import Projection
+from vibeproj.projections.base import EPS_ANGLE, EPS_CONV, EPS_DENOM, Projection
 
 if TYPE_CHECKING:
     from vibeproj.crs import ProjectionParams
@@ -24,7 +24,7 @@ class CylindricalEqualArea(Projection):
         e = params.ellipsoid
         k0 = math.cos(lat_ts) / math.sqrt(1.0 - e.es * math.sin(lat_ts) ** 2)
         # qp = q at the pole
-        if e.e > 1e-10:
+        if e.e > EPS_ANGLE:
             qp = (1 - e.es) * (
                 1.0 / (1.0 - e.es) - (1.0 / (2.0 * e.e)) * math.log((1.0 - e.e) / (1.0 + e.e))
             )
@@ -45,7 +45,7 @@ class CylindricalEqualArea(Projection):
         k0 = computed["k0"]
         e = computed["e"]
         x = lam * k0
-        if e < 1e-10:
+        if e < EPS_ANGLE:
             y = xp.sin(phi) / k0
         else:
             sin_phi = xp.sin(phi)
@@ -61,7 +61,7 @@ class CylindricalEqualArea(Projection):
         e = computed["e"]
         es = computed["es"]
         lam = x / k0
-        if e < 1e-10:
+        if e < EPS_ANGLE:
             phi = xp.arcsin(xp.clip(y * k0, -1.0, 1.0))
         else:
             q = 2.0 * y * k0
@@ -71,7 +71,7 @@ class CylindricalEqualArea(Projection):
                 e_sin = e * sin_phi
                 one_minus = 1.0 - e_sin * e_sin
                 cos_phi = xp.cos(phi)
-                cos_phi = xp.where(xp.abs(cos_phi) < 1e-30, 1e-30, cos_phi)
+                cos_phi = xp.where(xp.abs(cos_phi) < EPS_DENOM, EPS_DENOM, cos_phi)
                 dphi = (one_minus * one_minus / (2.0 * cos_phi)) * (
                     q / (1.0 - es)
                     - sin_phi / one_minus
@@ -79,9 +79,9 @@ class CylindricalEqualArea(Projection):
                 )
                 phi = phi + dphi
                 if hasattr(dphi, "__len__"):
-                    if xp.all(xp.abs(dphi) < 1e-14):
+                    if xp.all(xp.abs(dphi) < EPS_CONV):
                         break
-                elif abs(float(dphi)) < 1e-14:
+                elif abs(float(dphi)) < EPS_CONV:
                     break
         return lam, phi
 

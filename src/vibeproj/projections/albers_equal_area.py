@@ -12,18 +12,16 @@ import math
 from typing import TYPE_CHECKING
 
 from vibeproj.projections import register
-from vibeproj.projections.base import Projection
+from vibeproj.projections.base import EPS_ANGLE, EPS_CONV, EPS_DENOM, Projection
 
 if TYPE_CHECKING:
     from vibeproj.crs import ProjectionParams
-
-_EPS10 = 1e-10
 _HALF_PI = math.pi / 2.0
 
 
 def _qsfn(sin_phi, e):
     """Compute q-function for Albers (scalar)."""
-    if e < _EPS10:
+    if e < EPS_ANGLE:
         return 2.0 * sin_phi
     e_sin = e * sin_phi
     return (1.0 - e * e) * (
@@ -34,7 +32,7 @@ def _qsfn(sin_phi, e):
 
 def _qsfn_array(sin_phi, e, xp):
     """Vectorized q-function."""
-    if e < _EPS10:
+    if e < EPS_ANGLE:
         return 2.0 * sin_phi
     e_sin = e * sin_phi
     return (1.0 - e * e) * (
@@ -59,7 +57,7 @@ class AlbersEqualArea(Projection):
         m1 = cos_phi1 / math.sqrt(1.0 - es * sin_phi1 * sin_phi1)
         q1 = _qsfn(sin_phi1, ec)
 
-        if abs(phi1 - phi2) < _EPS10:
+        if abs(phi1 - phi2) < EPS_ANGLE:
             n = sin_phi1
         else:
             sin_phi2 = math.sin(phi2)
@@ -124,7 +122,7 @@ class AlbersEqualArea(Projection):
             e_sin = e * sin_phi
             one_minus_es_sin2 = 1.0 - e_sin * e_sin
             cos_phi = xp.cos(phi)
-            cos_phi = xp.where(xp.abs(cos_phi) < 1e-30, 1e-30, cos_phi)
+            cos_phi = xp.where(xp.abs(cos_phi) < EPS_DENOM, EPS_DENOM, cos_phi)
             dphi = (one_minus_es_sin2 * one_minus_es_sin2 / (2.0 * cos_phi)) * (
                 q / (1.0 - es)
                 - sin_phi / one_minus_es_sin2
@@ -132,9 +130,9 @@ class AlbersEqualArea(Projection):
             )
             phi = phi + dphi
             if hasattr(dphi, "__len__"):
-                if xp.all(xp.abs(dphi) < 1e-14):
+                if xp.all(xp.abs(dphi) < EPS_CONV):
                     break
-            elif abs(float(dphi)) < 1e-14:
+            elif abs(float(dphi)) < EPS_CONV:
                 break
 
         return lam, phi

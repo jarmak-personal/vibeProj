@@ -10,7 +10,7 @@ import math
 from typing import TYPE_CHECKING
 
 from vibeproj.projections import register
-from vibeproj.projections.base import Projection
+from vibeproj.projections.base import EPS_DENOM, Projection
 
 if TYPE_CHECKING:
     from vibeproj.crs import ProjectionParams
@@ -115,7 +115,7 @@ class Robinson(Projection):
         idx_next = xp.clip(idx + 1, 0, 18)
         y0 = y_arr[idx]
         y1 = y_arr[idx_next]
-        frac = (abs_y - y0) / xp.maximum(y1 - y0, 1e-30)
+        frac = (abs_y - y0) / xp.maximum(y1 - y0, EPS_DENOM)
         phi_deg = (idx + frac) * 5.0
         x_arr = xp.array(_TABLE_X, dtype=abs_y.dtype if hasattr(abs_y, "dtype") else float)
         X = x_arr[idx] + frac * (x_arr[idx_next] - x_arr[idx])
@@ -125,7 +125,7 @@ class Robinson(Projection):
             X = float(X[0])
 
         phi = phi_deg * (math.pi / 180.0) * xp.sign(y)
-        lam = x / (_FXC * xp.maximum(X, 1e-30))
+        lam = x / (_FXC * xp.maximum(X, EPS_DENOM))
         return lam, phi
 
 

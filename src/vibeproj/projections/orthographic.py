@@ -10,7 +10,7 @@ import math
 from typing import TYPE_CHECKING
 
 from vibeproj.projections import register
-from vibeproj.projections.base import Projection
+from vibeproj.projections.base import EPS_DENOM, Projection
 
 if TYPE_CHECKING:
     from vibeproj.crs import ProjectionParams
@@ -47,7 +47,7 @@ class Orthographic(Projection):
         c = xp.arcsin(xp.clip(rho, -1.0, 1.0))
         sin_c = xp.sin(c)
         cos_c = xp.cos(c)
-        phi = xp.arcsin(cos_c * sin_phi0 + y * sin_c * cos_phi0 / xp.maximum(rho, 1e-30))
+        phi = xp.arcsin(cos_c * sin_phi0 + y * sin_c * cos_phi0 / xp.maximum(rho, EPS_DENOM))
         lam = xp.arctan2(x * sin_c, rho * cos_phi0 * cos_c - y * sin_phi0 * sin_c)
         return lam, phi
 

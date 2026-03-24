@@ -16,7 +16,7 @@ import math
 from typing import TYPE_CHECKING
 
 from vibeproj.projections import register
-from vibeproj.projections.base import Projection
+from vibeproj.projections.base import EPS_ANGLE, EPS_CONV, Projection
 
 if TYPE_CHECKING:
     from vibeproj.crs import ProjectionParams
@@ -27,15 +27,13 @@ _A2 = -0.081106
 _A3 = 0.000893
 _A4 = 0.003796
 
-_EPS10 = 1e-10
-
 # Scale factor for x: 2√3/3 from the parametric equations
 _M = 2.0 * math.sqrt(3.0) / 3.0
 
 
 def _qsfn_scalar(sin_phi, e):
     """Scalar q-function for authalic latitude."""
-    if e < _EPS10:
+    if e < EPS_ANGLE:
         return 2.0 * sin_phi
     e_sin = e * sin_phi
     return (1.0 - e * e) * (
@@ -45,7 +43,7 @@ def _qsfn_scalar(sin_phi, e):
 
 def _qsfn_array(sin_phi, e, xp):
     """Vectorised q-function."""
-    if e < _EPS10:
+    if e < EPS_ANGLE:
         return 2.0 * sin_phi
     e_sin = e * sin_phi
     return (1.0 - e * e) * (
@@ -130,9 +128,9 @@ class EqualEarth(Projection):
             )
             phi = phi + dphi
             if hasattr(dphi, "__len__"):
-                if xp.all(xp.abs(dphi) < 1e-14):
+                if xp.all(xp.abs(dphi) < EPS_CONV):
                     break
-            elif abs(float(dphi)) < 1e-14:
+            elif abs(float(dphi)) < EPS_CONV:
                 break
 
         return lam, phi

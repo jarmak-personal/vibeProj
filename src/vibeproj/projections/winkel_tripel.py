@@ -10,7 +10,7 @@ import math
 from typing import TYPE_CHECKING
 
 from vibeproj.projections import register
-from vibeproj.projections.base import Projection
+from vibeproj.projections.base import EPS_ANGLE, Projection
 
 if TYPE_CHECKING:
     from vibeproj.crs import ProjectionParams
@@ -34,7 +34,7 @@ class WinkelTripel(Projection):
         cos_phi1 = computed["cos_phi1"]
         cos_phi = xp.cos(phi)
         alpha = xp.arccos(xp.clip(cos_phi * xp.cos(lam / 2), -1.0, 1.0))
-        sinc_alpha = xp.where(xp.abs(alpha) < 1e-10, 1.0, xp.sin(alpha) / alpha)
+        sinc_alpha = xp.where(xp.abs(alpha) < EPS_ANGLE, 1.0, xp.sin(alpha) / alpha)
         # Aitoff component
         x_aitoff = 2 * cos_phi * xp.sin(lam / 2) / sinc_alpha
         y_aitoff = xp.sin(phi) / sinc_alpha
@@ -57,7 +57,7 @@ class WinkelTripel(Projection):
             cos_half_lam = xp.cos(lam / 2)
             sin_half_lam = xp.sin(lam / 2)
             alpha = xp.arccos(xp.clip(cos_phi * cos_half_lam, -1.0, 1.0))
-            sinc_alpha = xp.where(xp.abs(alpha) < 1e-10, 1.0, xp.sin(alpha) / alpha)
+            sinc_alpha = xp.where(xp.abs(alpha) < EPS_ANGLE, 1.0, xp.sin(alpha) / alpha)
             fx = (2 * cos_phi * sin_half_lam / sinc_alpha + lam * cos_phi1) / 2 - x
             fy = (sin_phi / sinc_alpha + phi) / 2 - y
             # Approximate Jacobian (use finite differences conceptually, but simplified)
@@ -66,9 +66,9 @@ class WinkelTripel(Projection):
             lam = lam + dlam
             phi = phi + dphi
             if hasattr(dlam, "__len__"):
-                if xp.all((xp.abs(dlam) < 1e-10) & (xp.abs(dphi) < 1e-10)):
+                if xp.all((xp.abs(dlam) < EPS_ANGLE) & (xp.abs(dphi) < EPS_ANGLE)):
                     break
-            elif abs(float(dlam)) < 1e-10 and abs(float(dphi)) < 1e-10:
+            elif abs(float(dlam)) < EPS_ANGLE and abs(float(dphi)) < EPS_ANGLE:
                 break
         return lam, phi
 

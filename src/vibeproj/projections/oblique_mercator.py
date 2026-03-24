@@ -14,12 +14,10 @@ import math
 from typing import TYPE_CHECKING
 
 from vibeproj.projections import register
-from vibeproj.projections.base import Projection
+from vibeproj.projections.base import EPS_ANGLE, EPS_CONV, Projection
 
 if TYPE_CHECKING:
     from vibeproj.crs import ProjectionParams
-
-_EPS = 1e-10
 _HALF_PI = math.pi / 2.0
 
 
@@ -48,9 +46,9 @@ def _phi_from_t(t, e, xp):
         dphi = phi_new - phi
         phi = phi_new
         if hasattr(dphi, "__len__"):
-            if xp.all(xp.abs(dphi) < 1e-14):
+            if xp.all(xp.abs(dphi) < EPS_CONV):
                 break
-        elif abs(float(dphi)) < 1e-14:
+        elif abs(float(dphi)) < EPS_CONV:
             break
     return phi
 
@@ -95,7 +93,7 @@ class ObliqueMercator(Projection):
         lam_0 = lam_c - math.asin(G * math.tan(gamma_0)) / B
 
         # u at the projection centre (normalized by a)
-        if abs(math.cos(alpha_c)) < _EPS:
+        if abs(math.cos(alpha_c)) < EPS_ANGLE:
             u_c = sgn * A_norm * (lam_c - lam_0)
         else:
             u_c = sgn * (A_norm / B) * math.atan2(math.sqrt(D_sq - 1.0), math.cos(alpha_c))

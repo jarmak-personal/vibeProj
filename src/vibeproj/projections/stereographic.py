@@ -12,12 +12,10 @@ import math
 from typing import TYPE_CHECKING
 
 from vibeproj.projections import register
-from vibeproj.projections.base import Projection
+from vibeproj.projections.base import EPS_ANGLE, EPS_CONV, Projection
 
 if TYPE_CHECKING:
     from vibeproj.crs import ProjectionParams
-
-_EPS10 = 1e-10
 _HALF_PI = math.pi / 2.0
 
 
@@ -38,7 +36,7 @@ class PolarStereographic(Projection):
         is_south = lat_0 < 0
         abs_lat_0 = abs(lat_0)
 
-        if abs(abs_lat_0 - _HALF_PI) < _EPS10:
+        if abs(abs_lat_0 - _HALF_PI) < EPS_ANGLE:
             # Polar case (latitude of origin is at the pole)
             sign = -1.0 if is_south else 1.0
             # Normalized (without a) — pipeline multiplies by a
@@ -102,9 +100,9 @@ class PolarStereographic(Projection):
             dphi = _HALF_PI - 2.0 * xp.arctan(ts * ((1.0 - e_sin) / (1.0 + e_sin)) ** half_e) - phi
             phi = phi + dphi
             if hasattr(dphi, "__len__"):
-                if xp.all(xp.abs(dphi) < 1e-14):
+                if xp.all(xp.abs(dphi) < EPS_CONV):
                     break
-            elif abs(float(dphi)) < 1e-14:
+            elif abs(float(dphi)) < EPS_CONV:
                 break
 
         lam = xp.arctan2(x_adj, y_adj)

@@ -12,7 +12,7 @@ import math
 from typing import TYPE_CHECKING
 
 from vibeproj.projections import register
-from vibeproj.projections.base import Projection
+from vibeproj.projections.base import EPS_CONV, EPS_DENOM, Projection
 
 if TYPE_CHECKING:
     from vibeproj.crs import ProjectionParams
@@ -129,7 +129,8 @@ class Krovak(Projection):
         # Step 2: inverse cone → T, D
         D = theta / n
         T = (
-            2.0 * xp.arctan(xp.power(r_0_norm / xp.maximum(r_norm, 1e-30), 1.0 / n) * tan_half_p)
+            2.0
+            * xp.arctan(xp.power(r_0_norm / xp.maximum(r_norm, EPS_DENOM), 1.0 / n) * tan_half_p)
             - _HALF_PI
         )
 
@@ -155,9 +156,9 @@ class Krovak(Projection):
             dphi = phi_new - phi
             phi = phi_new
             if hasattr(dphi, "__len__"):
-                if xp.all(xp.abs(dphi) < 1e-14):
+                if xp.all(xp.abs(dphi) < EPS_CONV):
                     break
-            elif abs(float(dphi)) < 1e-14:
+            elif abs(float(dphi)) < EPS_CONV:
                 break
 
         # Step 5: recover lambda

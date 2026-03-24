@@ -12,18 +12,16 @@ import math
 from typing import TYPE_CHECKING
 
 from vibeproj.projections import register
-from vibeproj.projections.base import Projection
+from vibeproj.projections.base import EPS_ANGLE, EPS_CONV, EPS_DENOM, Projection
 
 if TYPE_CHECKING:
     from vibeproj.crs import ProjectionParams
-
-_EPS10 = 1e-10
 _HALF_PI = math.pi / 2.0
 
 
 def _qsfn_scalar(sin_phi, e):
     """Scalar q-function."""
-    if e < _EPS10:
+    if e < EPS_ANGLE:
         return 2.0 * sin_phi
     e_sin = e * sin_phi
     return (1.0 - e * e) * (
@@ -34,7 +32,7 @@ def _qsfn_scalar(sin_phi, e):
 
 def _qsfn_array(sin_phi, e, xp):
     """Vectorized q-function."""
-    if e < _EPS10:
+    if e < EPS_ANGLE:
         return 2.0 * sin_phi
     e_sin = e * sin_phi
     return (1.0 - e * e) * (
@@ -64,12 +62,12 @@ class LambertAzimuthalEqualArea(Projection):
         q0 = _qsfn_scalar(sin_phi0, ec)
 
         # Authalic latitude of origin
-        beta0 = math.asin(q0 / qp) if abs(qp) > _EPS10 else phi0
+        beta0 = math.asin(q0 / qp) if abs(qp) > EPS_ANGLE else phi0
 
         # Determine mode
-        if abs(abs(phi0) - _HALF_PI) < _EPS10:
+        if abs(abs(phi0) - _HALF_PI) < EPS_ANGLE:
             mode = "north_pole" if phi0 > 0 else "south_pole"
-        elif abs(phi0) < _EPS10:
+        elif abs(phi0) < EPS_ANGLE:
             mode = "equatorial"
         else:
             mode = "oblique"
@@ -83,7 +81,7 @@ class LambertAzimuthalEqualArea(Projection):
         # D: the a's cancel: (a * cos_phi0/sqrt(...)) / (a * Rq * cos_beta0)
         D = (
             cos_phi0 / math.sqrt(1.0 - es * sin_phi0 * sin_phi0) / (Rq * cos_beta0)
-            if abs(cos_beta0) > _EPS10
+            if abs(cos_beta0) > EPS_ANGLE
             else 1.0
         )
 
@@ -120,14 +118,14 @@ class LambertAzimuthalEqualArea(Projection):
             sin_lam = xp.sin(lam)
             cos_lam = xp.cos(lam)
             b = 1.0 + sin_beta0 * sin_beta + cos_beta0 * cos_beta * cos_lam
-            b = Rq * xp.sqrt(2.0 / xp.maximum(b, 1e-30))
+            b = Rq * xp.sqrt(2.0 / xp.maximum(b, EPS_DENOM))
             x = b * D * cos_beta * sin_lam
             y = (b / D) * (cos_beta0 * sin_beta - sin_beta0 * cos_beta * cos_lam)
         elif mode == "equatorial":
             sin_lam = xp.sin(lam)
             cos_lam = xp.cos(lam)
             b = 1.0 + cos_beta * cos_lam
-            b = Rq * xp.sqrt(2.0 / xp.maximum(b, 1e-30))
+            b = Rq * xp.sqrt(2.0 / xp.maximum(b, EPS_DENOM))
             x = b * D * cos_beta * sin_lam
             y = (b / D) * sin_beta
         elif mode == "north_pole":
@@ -164,13 +162,15 @@ class LambertAzimuthalEqualArea(Projection):
             cos_ce = xp.cos(ce)
 
             if mode == "oblique":
-                sin_beta = cos_ce * sin_beta0 + y_adj * sin_ce * cos_beta0 / xp.maximum(rho, 1e-30)
+                sin_beta = cos_ce * sin_beta0 + y_adj * sin_ce * cos_beta0 / xp.maximum(
+                    rho, EPS_DENOM
+                )
                 lam = xp.arctan2(
                     x_adj * sin_ce,
                     rho * cos_beta0 * cos_ce - y_adj * sin_beta0 * sin_ce,
                 )
             else:
-                sin_beta = y_adj * sin_ce / xp.maximum(rho, 1e-30)
+                sin_beta = y_adj * sin_ce / xp.maximum(rho, EPS_DENOM)
                 lam = xp.arctan2(x_adj * sin_ce, rho * cos_ce)
         elif mode == "north_pole":
             sin_beta = 1.0 - (rho * rho) / (Rq * Rq)
@@ -187,7 +187,7 @@ class LambertAzimuthalEqualArea(Projection):
             e_sin = e * sin_phi
             one_minus = 1.0 - e_sin * e_sin
             cos_phi = xp.cos(phi)
-            cos_phi = xp.where(xp.abs(cos_phi) < 1e-30, 1e-30, cos_phi)
+            cos_phi = xp.where(xp.abs(cos_phi) < EPS_DENOM, EPS_DENOM, cos_phi)
             dphi = (one_minus * one_minus / (2.0 * cos_phi)) * (
                 q / (1.0 - es)
                 - sin_phi / one_minus
@@ -195,9 +195,9 @@ class LambertAzimuthalEqualArea(Projection):
             )
             phi = phi + dphi
             if hasattr(dphi, "__len__"):
-                if xp.all(xp.abs(dphi) < 1e-14):
+                if xp.all(xp.abs(dphi) < EPS_CONV):
                     break
-            elif abs(float(dphi)) < 1e-14:
+            elif abs(float(dphi)) < EPS_CONV:
                 break
 
         return lam, phi

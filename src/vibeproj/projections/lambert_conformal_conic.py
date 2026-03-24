@@ -12,12 +12,10 @@ import math
 from typing import TYPE_CHECKING
 
 from vibeproj.projections import register
-from vibeproj.projections.base import Projection
+from vibeproj.projections.base import EPS_ANGLE, EPS_CONV, Projection
 
 if TYPE_CHECKING:
     from vibeproj.crs import ProjectionParams
-
-_EPS10 = 1e-10
 _HALF_PI = math.pi / 2.0
 
 
@@ -50,9 +48,9 @@ def _phi2(ts, e, xp):
         )
         phi = phi + dphi
         if hasattr(dphi, "__len__"):
-            if xp.all(xp.abs(dphi) < 1e-14):
+            if xp.all(xp.abs(dphi) < EPS_CONV):
                 break
-        elif abs(float(dphi)) < 1e-14:
+        elif abs(float(dphi)) < EPS_CONV:
             break
     return phi
 
@@ -74,7 +72,7 @@ class LambertConformalConic(Projection):
         m1 = _msfn(sin_phi1, cos_phi1, es)
         t1 = _tsfn(phi1, sin_phi1, ec)
 
-        if abs(phi1 - phi2) < _EPS10:
+        if abs(phi1 - phi2) < EPS_ANGLE:
             # 1SP case
             n = sin_phi1
         else:

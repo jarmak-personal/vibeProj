@@ -9,6 +9,15 @@ if TYPE_CHECKING:
 
     from vibeproj.crs import ProjectionParams
 
+# Shared numerical guard constants for projection math.
+# EPS_ANGLE: threshold for "effectively zero" angles (~10 nanoradians, ~0.06mm).
+#   Used for sinc approximations, spherical/ellipsoidal branching.
+EPS_ANGLE = 1e-10
+# EPS_CONV: Newton iteration convergence tolerance (~10 picometers).
+EPS_CONV = 1e-14
+# EPS_DENOM: pure division-by-zero guard (no physical meaning).
+EPS_DENOM = 1e-30
+
 
 class Projection:
     """Base class for all map projections.

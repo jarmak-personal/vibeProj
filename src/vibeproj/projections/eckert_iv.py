@@ -9,7 +9,7 @@ import math
 from typing import TYPE_CHECKING
 
 from vibeproj.projections import register
-from vibeproj.projections.base import Projection
+from vibeproj.projections.base import EPS_CONV, EPS_DENOM, Projection
 
 if TYPE_CHECKING:
     from vibeproj.crs import ProjectionParams
@@ -39,13 +39,13 @@ class EckertIV(Projection):
             cos_t = xp.cos(theta)
             V = theta + sin_t * cos_t + 2.0 * sin_t - p
             denom = 1.0 + xp.cos(2.0 * theta) + 2.0 * cos_t
-            denom = xp.where(xp.abs(denom) < 1e-30, 1e-30, denom)
+            denom = xp.where(xp.abs(denom) < EPS_DENOM, EPS_DENOM, denom)
             dtheta = -V / denom
             theta = theta + dtheta
             if hasattr(dtheta, "__len__"):
-                if xp.all(xp.abs(dtheta) < 1e-14):
+                if xp.all(xp.abs(dtheta) < EPS_CONV):
                     break
-            elif abs(float(dtheta)) < 1e-14:
+            elif abs(float(dtheta)) < EPS_CONV:
                 break
         x = _C_x * lam * (1.0 + xp.cos(theta))
         y = _C_y * xp.sin(theta)
@@ -57,7 +57,7 @@ class EckertIV(Projection):
         cos_t = xp.cos(theta)
         phi = xp.arcsin(xp.clip((theta + sin_t * cos_t + 2.0 * sin_t) / _C_p, -1.0, 1.0))
         denom = _C_x * (1.0 + cos_t)
-        denom = xp.where(xp.abs(denom) < 1e-30, 1e-30, denom)
+        denom = xp.where(xp.abs(denom) < EPS_DENOM, EPS_DENOM, denom)
         lam = x / denom
         return lam, phi
 

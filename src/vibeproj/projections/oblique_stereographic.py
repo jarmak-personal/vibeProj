@@ -12,12 +12,10 @@ import math
 from typing import TYPE_CHECKING
 
 from vibeproj.projections import register
-from vibeproj.projections.base import Projection
+from vibeproj.projections.base import EPS_CONV, EPS_DENOM, Projection
 
 if TYPE_CHECKING:
     from vibeproj.crs import ProjectionParams
-
-_EPS = 1e-10
 
 
 class ObliqueStereographic(Projection):
@@ -106,14 +104,14 @@ class ObliqueStereographic(Projection):
         sin_ce = xp.sin(ce)
         cos_ce = xp.cos(ce)
 
-        sin_chi = cos_ce * sin_chi0 + y_s * sin_ce * cos_chi0 / xp.maximum(rho, 1e-30)
+        sin_chi = cos_ce * sin_chi0 + y_s * sin_ce * cos_chi0 / xp.maximum(rho, EPS_DENOM)
         sin_chi = xp.clip(sin_chi, -1.0, 1.0)
 
         lam_s = xp.arctan2(x_s * sin_ce, rho * cos_chi0 * cos_ce - y_s * sin_chi0 * sin_ce)
         lam = lam_s / n
 
         # Conformal sphere → geodetic (iterative)
-        psi = 0.5 * (xp.log((1 + sin_chi) / xp.maximum(1 - sin_chi, 1e-30)) - math.log(c)) / n
+        psi = 0.5 * (xp.log((1 + sin_chi) / xp.maximum(1 - sin_chi, EPS_DENOM)) - math.log(c)) / n
         phi = 2 * xp.arctan(xp.exp(psi)) - math.pi / 2
         for _ in range(15):
             sin_phi = xp.sin(phi)
@@ -126,9 +124,9 @@ class ObliqueStereographic(Projection):
             )
             phi = phi + dphi
             if hasattr(dphi, "__len__"):
-                if xp.all(xp.abs(dphi) < 1e-14):
+                if xp.all(xp.abs(dphi) < EPS_CONV):
                     break
-            elif abs(float(dphi)) < 1e-14:
+            elif abs(float(dphi)) < EPS_CONV:
                 break
 
         return lam, phi

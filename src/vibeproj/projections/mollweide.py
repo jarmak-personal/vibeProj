@@ -10,7 +10,7 @@ import math
 from typing import TYPE_CHECKING
 
 from vibeproj.projections import register
-from vibeproj.projections.base import Projection
+from vibeproj.projections.base import EPS_CONV, EPS_DENOM, Projection
 
 if TYPE_CHECKING:
     from vibeproj.crs import ProjectionParams
@@ -36,13 +36,13 @@ class Mollweide(Projection):
         for _ in range(20):
             denom = 2.0 + 2.0 * xp.cos(2.0 * theta)
             # Guard against zero denominator when theta = ±π/2
-            denom = xp.where(xp.abs(denom) < 1e-30, 1e-30, denom)
+            denom = xp.where(xp.abs(denom) < EPS_DENOM, EPS_DENOM, denom)
             dtheta = -(2.0 * theta + xp.sin(2.0 * theta) - pi_sin_phi) / denom
             theta = theta + dtheta
             if hasattr(dtheta, "__len__"):
-                if xp.all(xp.abs(dtheta) < 1e-14):
+                if xp.all(xp.abs(dtheta) < EPS_CONV):
                     break
-            elif abs(float(dtheta)) < 1e-14:
+            elif abs(float(dtheta)) < EPS_CONV:
                 break
         x = lam * 2.0 * _SQRT2 / math.pi * xp.cos(theta)
         y = _SQRT2 * xp.sin(theta)
@@ -53,7 +53,7 @@ class Mollweide(Projection):
         phi = xp.arcsin(xp.clip((2.0 * theta + xp.sin(2.0 * theta)) / math.pi, -1.0, 1.0))
         cos_theta = xp.cos(theta)
         # Guard against division by zero at poles (cos(±π/2) = 0)
-        cos_theta = xp.where(xp.abs(cos_theta) < 1e-30, 1e-30, cos_theta)
+        cos_theta = xp.where(xp.abs(cos_theta) < EPS_DENOM, EPS_DENOM, cos_theta)
         lam = x * math.pi / (2.0 * _SQRT2 * cos_theta)
         return lam, phi
 

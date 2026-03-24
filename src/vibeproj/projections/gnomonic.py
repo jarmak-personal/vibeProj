@@ -10,7 +10,7 @@ import math
 from typing import TYPE_CHECKING
 
 from vibeproj.projections import register
-from vibeproj.projections.base import Projection
+from vibeproj.projections.base import EPS_DENOM, Projection
 
 if TYPE_CHECKING:
     from vibeproj.crs import ProjectionParams
@@ -38,7 +38,7 @@ class Gnomonic(Projection):
         cos_lam = xp.cos(lam)
         cos_c = sin_phi0 * sin_phi + cos_phi0 * cos_phi * cos_lam
         # Guard against division by zero at hemisphere boundary (cos_c = 0)
-        cos_c = xp.where(xp.abs(cos_c) < 1e-30, 1e-30, cos_c)
+        cos_c = xp.where(xp.abs(cos_c) < EPS_DENOM, EPS_DENOM, cos_c)
         x = cos_phi * xp.sin(lam) / cos_c
         y = (cos_phi0 * sin_phi - sin_phi0 * cos_phi * cos_lam) / cos_c
         return x, y
@@ -50,7 +50,7 @@ class Gnomonic(Projection):
         c = xp.arctan(rho)
         sin_c = xp.sin(c)
         cos_c = xp.cos(c)
-        phi = xp.arcsin(cos_c * sin_phi0 + y * sin_c * cos_phi0 / xp.maximum(rho, 1e-30))
+        phi = xp.arcsin(cos_c * sin_phi0 + y * sin_c * cos_phi0 / xp.maximum(rho, EPS_DENOM))
         lam = xp.arctan2(x * sin_c, rho * cos_phi0 * cos_c - y * sin_phi0 * sin_c)
         return lam, phi
 
