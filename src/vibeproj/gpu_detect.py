@@ -26,7 +26,7 @@ def get_fp64_ratio() -> float:
         if ratio_raw > 0:
             return 1.0 / float(ratio_raw)
         return 1.0 / 32.0  # conservative fallback
-    except Exception:
+    except (ImportError, RuntimeError, OSError):
         return 1.0  # CPU mode
 
 

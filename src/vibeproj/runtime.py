@@ -35,7 +35,7 @@ def gpu_available() -> bool:
 
         cp.cuda.runtime.getDeviceCount()
         return True
-    except Exception:
+    except (ImportError, RuntimeError, OSError):
         return False
 
 
