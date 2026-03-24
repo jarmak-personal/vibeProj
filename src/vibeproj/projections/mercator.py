@@ -7,6 +7,7 @@ Web Mercator (spherical pseudo-Mercator): EPSG:3857 — used by all web map tile
 from __future__ import annotations
 
 import math
+import warnings
 from typing import TYPE_CHECKING
 
 from vibeproj.projections import register
@@ -40,6 +41,13 @@ class Mercator(Projection):
     def forward(self, lam, phi, params, computed, xp):
         e = computed["e"]
         # Clamp latitude to avoid singularity at poles (tan(π/2) = inf)
+        if xp.any(xp.abs(phi) > _MAX_LAT_RAD):
+            warnings.warn(
+                "Latitude values clamped to ±89.999° to avoid Mercator pole singularity. "
+                "Mercator is undefined at the poles.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         phi = xp.clip(phi, -_MAX_LAT_RAD, _MAX_LAT_RAD)
         if e == 0:
             # Spherical case
@@ -92,6 +100,13 @@ class WebMercator(Projection):
 
     def forward(self, lam, phi, params, computed, xp):
         # Clamp latitude to avoid singularity at poles (tan(π/2) = inf)
+        if xp.any(xp.abs(phi) > _MAX_LAT_RAD):
+            warnings.warn(
+                "Latitude values clamped to ±89.999° to avoid Mercator pole singularity. "
+                "Mercator is undefined at the poles.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         phi = xp.clip(phi, -_MAX_LAT_RAD, _MAX_LAT_RAD)
         x = lam
         y = xp.log(xp.tan(math.pi / 4.0 + phi * 0.5))
