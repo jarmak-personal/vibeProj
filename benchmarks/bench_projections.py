@@ -25,6 +25,8 @@ BENCHMARKS = [
     ("webmerc", "EPSG:4326", "EPSG:3857"),
     ("eqearth", "EPSG:4326", "EPSG:8857"),
     ("eqc", "EPSG:4326", "EPSG:4087"),
+    ("omerc", "EPSG:4326", "EPSG:3375"),
+    ("krovak", "EPSG:4326", "EPSG:5514"),
     # Same-datum overhead-sensitive cases (zero Helmert overhead expected)
     ("p2p_utm", "EPSG:32631", "EPSG:3857"),
     ("identity", "EPSG:4326", "EPSG:4326"),

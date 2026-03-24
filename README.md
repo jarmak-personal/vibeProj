@@ -1,6 +1,6 @@
 # vibeProj
 
-GPU-accelerated coordinate projection library. Extracted from [RAPIDS cuProj](https://github.com/rapidsai/cuspatial), re-engineered as a pure Python + CuPy package, and expanded from 1 to 20 projections — each with a fused NVRTC kernel that runs the full transform pipeline in a single GPU kernel launch.
+GPU-accelerated coordinate projection library. Extracted from [RAPIDS cuProj](https://github.com/rapidsai/cuspatial), re-engineered as a pure Python + CuPy package, and expanded from 1 to 24 projections — each with a fused NVRTC kernel that runs the full transform pipeline in a single GPU kernel launch.
 
 > [!WARNING]
 > vibeProj is very early in development. Operations may be unoptimized or have multiple Host/Device transfers causing reduced performance. [File an issue](https://github.com/jarmak-personal/vibeProj/issues) if you hit a problem!
@@ -12,14 +12,16 @@ On an RTX 4090 vs i9-13900k, 1M coordinates:
 
 | Projection | GPU | vs CPU |
 |---|---|---|
-| Transverse Mercator / UTM | 0.49 ms | 183x |
-| Lambert Conformal Conic | 0.54 ms | 135x |
-| Albers Equal Area | 0.27 ms | 180x |
-| Web Mercator | 0.15 ms | 364x |
-| Equal Earth | 0.43 ms | 154x |
-| Plate Carrée | 0.04 ms | 702x |
+| Transverse Mercator / UTM | 0.49 ms | 284x |
+| Lambert Conformal Conic | 0.53 ms | 96x |
+| Albers Equal Area | 0.27 ms | 137x |
+| Web Mercator | 0.15 ms | 124x |
+| Equal Earth | 0.43 ms | 148x |
+| Plate Carrée | 0.04 ms | 313x |
+| Oblique Mercator (Hotine) | 0.76 ms | 115x |
+| Krovak | 2.08 ms | 173x |
 
-All 20 projections run sub-millisecond at 1M coordinates. See full benchmark in the repo.
+All 24 projections run in under 3 ms at 1M coordinates. See full benchmark in the repo.
 
 ## Supported Projections
 
@@ -45,6 +47,10 @@ All 20 projections run sub-millisecond at 1M coordinates. See full benchmark in 
 | Natural Earth | `natearth` | — |
 | Azimuthal Equidistant | `aeqd` | — |
 | Geostationary Satellite | `geos` | — |
+| Oblique Mercator (Hotine) | `omerc` | 3375 |
+| Krovak | `krovak` | 5514 |
+| Eckert IV | `eck4` | — |
+| Eckert VI | `eck6` | — |
 
 ## Install
 
@@ -120,6 +126,6 @@ t.transform_buffers(buf.x, buf.y, buf.z, out_x=new_x, out_y=new_y, out_z=new_z)
 ## Test
 
 ```bash
-uv run pytest                    # all tests (198 total)
+uv run pytest                    # all tests (251 total)
 uv run pytest tests/test_fused_kernels.py  # GPU kernel tests (requires CuPy)
 ```

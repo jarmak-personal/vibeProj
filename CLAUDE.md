@@ -1,10 +1,10 @@
 # vibeProj
 
-GPU-accelerated coordinate projection library. 20 projections, each with a fused NVRTC kernel.
+GPU-accelerated coordinate projection library. 24 projections, each with a fused NVRTC kernel.
 
 ## Architecture
 
-- **Fused NVRTC kernels** (`src/vibeproj/fused_kernels.py`) — 40 CUDA kernels (20 projections × fwd/inv).
+- **Fused NVRTC kernels** (`src/vibeproj/fused_kernels.py`) — 48 CUDA kernels (24 projections × fwd/inv).
   Each runs the full pipeline in one kernel launch: axis swap → deg/rad → central meridian →
   projection math → scale/offset → axis swap output. Compiled at runtime via CuPy `RawKernel`.
 - **xp fallback path** (`src/vibeproj/projections/`) — NumPy/CuPy element-wise implementations.
@@ -51,7 +51,7 @@ GPU-accelerated coordinate projection library. 20 projections, each with a fused
 ## Running tests
 
 ```bash
-uv run pytest                              # all 198 tests
+uv run pytest                              # all 251 tests
 uv run pytest tests/test_fused_kernels.py  # GPU kernel tests (needs CuPy + GPU)
 uv run pytest tests/test_transformer.py    # CPU xp path tests
 uv run pytest tests/test_helmert.py        # Helmert datum shift + z-dimension tests

@@ -1,0 +1,114 @@
+{
+  "meta": {
+    "python": "3.12.12",
+    "platform": "Linux-6.8.0-101-generic-x86_64-with-glibc2.35",
+    "n_coords": 1000000,
+    "warmup_iters": 3,
+    "bench_iters": 10,
+    "gpu": "NVIDIA GeForce RTX 4090"
+  },
+  "cpu": {
+    "tmerc": {
+      "median_ms": 139.238,
+      "min_ms": 134.964,
+      "max_ms": 142.037
+    },
+    "lcc": {
+      "median_ms": 51.235,
+      "min_ms": 50.121,
+      "max_ms": 52.814
+    },
+    "aea": {
+      "median_ms": 37.399,
+      "min_ms": 37.187,
+      "max_ms": 39.222
+    },
+    "webmerc": {
+      "median_ms": 18.393,
+      "min_ms": 17.869,
+      "max_ms": 18.833
+    },
+    "eqearth": {
+      "median_ms": 63.135,
+      "min_ms": 60.315,
+      "max_ms": 63.877
+    },
+    "eqc": {
+      "median_ms": 10.968,
+      "min_ms": 10.801,
+      "max_ms": 11.301
+    },
+    "omerc": {
+      "median_ms": 87.039,
+      "min_ms": 84.85,
+      "max_ms": 97.041
+    },
+    "krovak": {
+      "median_ms": 359.941,
+      "min_ms": 353.461,
+      "max_ms": 363.805
+    },
+    "p2p_utm": {
+      "median_ms": 121.752,
+      "min_ms": 119.63,
+      "max_ms": 123.59
+    },
+    "identity": {
+      "median_ms": 0.306,
+      "min_ms": 0.303,
+      "max_ms": 0.803
+    }
+  },
+  "gpu": {
+    "tmerc": {
+      "median_ms": 0.491,
+      "min_ms": 0.491,
+      "max_ms": 0.493
+    },
+    "lcc": {
+      "median_ms": 0.534,
+      "min_ms": 0.534,
+      "max_ms": 0.535
+    },
+    "aea": {
+      "median_ms": 0.272,
+      "min_ms": 0.272,
+      "max_ms": 0.273
+    },
+    "webmerc": {
+      "median_ms": 0.148,
+      "min_ms": 0.148,
+      "max_ms": 0.149
+    },
+    "eqearth": {
+      "median_ms": 0.427,
+      "min_ms": 0.427,
+      "max_ms": 0.428
+    },
+    "eqc": {
+      "median_ms": 0.035,
+      "min_ms": 0.035,
+      "max_ms": 0.038
+    },
+    "omerc": {
+      "median_ms": 0.757,
+      "min_ms": 0.756,
+      "max_ms": 0.757
+    },
+    "krovak": {
+      "median_ms": 2.081,
+      "min_ms": 2.081,
+      "max_ms": 2.083
+    },
+    "p2p_utm": {
+      "median_ms": 0.71,
+      "min_ms": 0.709,
+      "max_ms": 0.711
+    },
+    "identity": {
+      "median_ms": 0.018,
+      "min_ms": 0.018,
+      "max_ms": 0.019
+    }
+  }
+}

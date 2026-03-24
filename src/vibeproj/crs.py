@@ -111,6 +111,8 @@ _METHOD_MAP = {
     "Hotine Oblique Mercator (variant B)": "omerc",
     "Krovak": "krovak",
     "Krovak (North Orientated)": "krovak",
+    "Eckert IV": "eck4",
+    "Eckert VI": "eck6",
 }
 
 
