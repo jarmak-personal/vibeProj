@@ -393,6 +393,9 @@ class Transformer:
         """
         xp = get_array_module(x)
 
+        if direction not in ("FORWARD", "INVERSE"):
+            raise ValueError(f"Invalid direction: {direction}")
+
         if direction == "FORWARD":
             pipeline = self._pipeline
         else:
@@ -463,6 +466,9 @@ class Transformer:
             import cupy as cp
         except ImportError:
             return self.transform(x, y, z=z, direction=direction)
+
+        if direction not in ("FORWARD", "INVERSE"):
+            raise ValueError(f"Invalid direction: {direction}")
 
         x = np.asarray(x, dtype=np.float64)
         y = np.asarray(y, dtype=np.float64)
