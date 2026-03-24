@@ -14,6 +14,7 @@ This matches the cuProj operation pipeline architecture but runs on NumPy/CuPy a
 from __future__ import annotations
 
 import math
+import warnings
 from typing import TYPE_CHECKING
 
 from vibeproj.projections import get_projection
@@ -63,6 +64,12 @@ def _try_fused(
     try:
         from vibeproj.fused_kernels import can_fuse, fused_transform
     except ImportError:
+        warnings.warn(
+            "Fused CUDA kernels unavailable — falling back to element-wise path. "
+            "GPU-resident data will be processed without kernel fusion.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return None
     if not can_fuse(projection_name, direction):
         return None
@@ -123,7 +130,11 @@ def _apply_datum_shift(
             if result is not None:
                 return result
         except ImportError:
-            pass
+            warnings.warn(
+                "Fused Helmert CUDA kernel unavailable — falling back to element-wise path.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
     from vibeproj.helmert import apply_helmert
 
     result = apply_helmert(lat, lon, helmert, xp, h=h)
