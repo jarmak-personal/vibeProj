@@ -83,6 +83,11 @@ class HelmertParams:
 
     def inverted(self) -> HelmertParams:
         """Return the inverse transformation (swap src/dst, negate params)."""
+        if self.ds == 0.0:
+            raise ValueError(
+                "Cannot invert Helmert parameters: scale factor ds is zero "
+                "(implies ds_ppm = -1000000, which is physically invalid)."
+            )
         return HelmertParams(
             tx=-self.tx,
             ty=-self.ty,
@@ -90,7 +95,7 @@ class HelmertParams:
             rx=-self.rx,
             ry=-self.ry,
             rz=-self.rz,
-            ds=1.0 / self.ds if self.ds != 0.0 else 1.0,
+            ds=1.0 / self.ds,
             src_ellipsoid=self.dst_ellipsoid,
             dst_ellipsoid=self.src_ellipsoid,
             dtx=-self.dtx,
