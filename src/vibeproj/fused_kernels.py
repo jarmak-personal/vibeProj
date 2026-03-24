@@ -2251,7 +2251,7 @@ def fused_transform(
         )
 
     else:
-        return None
+        raise ValueError(f"Unrecognized fused kernel projection: {projection_name!r}")
 
     if stream is not None:
         with stream:
