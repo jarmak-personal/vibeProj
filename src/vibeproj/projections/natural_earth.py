@@ -56,7 +56,8 @@ class NaturalEarth(Projection):
             p4 = p2 * p2
             fy = phi * (_B0 + p2 * (_B1 + p4 * (_B2 + p2 * (_B3 + p2 * _B4)))) - y
             fpy = _B0 + p2 * (3 * _B1 + p4 * (7 * _B2 + p2 * (9 * _B3 + 11 * p2 * _B4)))
-            dphi = -fy / fpy
+            safe_fpy = fpy + (fpy == 0) * 1e-30
+            dphi = -fy / safe_fpy
             phi = phi + dphi
             if xp is np:
                 if hasattr(dphi, "__len__"):
@@ -64,9 +65,16 @@ class NaturalEarth(Projection):
                         break
                 elif abs(float(dphi)) < 1e-14:
                     break
+        phi = (
+            xp.clip(phi, -math.pi / 2, math.pi / 2)
+            if hasattr(phi, "clip")
+            else max(-math.pi / 2, min(math.pi / 2, phi))
+        )
         p2 = phi * phi
         p4 = p2 * p2
-        lam = x / (_A0 + p2 * (_A1 + p2 * (_A2 + p4 * p2 * (_A3 + p2 * _A4))))
+        denom = _A0 + p2 * (_A1 + p2 * (_A2 + p4 * p2 * (_A3 + p2 * _A4)))
+        safe_denom = denom + (denom == 0) * 1e-30
+        lam = x / safe_denom
         return lam, phi
 
 
