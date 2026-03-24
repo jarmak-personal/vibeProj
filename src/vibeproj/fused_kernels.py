@@ -2413,11 +2413,19 @@ def fused_helmert_shift(
     from vibeproj.exceptions import CoordinateValidationError
 
     n = lat.size
+    if lon.size != n:
+        raise CoordinateValidationError(
+            f"lat and lon must have the same size, got {n} and {lon.size}"
+        )
     if out_lat is None:
         out_lat = cp.empty(n, dtype=cp.float64)
     elif out_lat.dtype != np.float64:
         raise CoordinateValidationError(
             f"out_lat must be float64 (kernel writes double*), got {out_lat.dtype}"
+        )
+    if out_lat is not None and out_lat.size < n:
+        raise CoordinateValidationError(
+            f"out_lat too small: need at least {n} elements, got {out_lat.size}"
         )
     if out_lon is None:
         out_lon = cp.empty(n, dtype=cp.float64)
@@ -2425,14 +2433,26 @@ def fused_helmert_shift(
         raise CoordinateValidationError(
             f"out_lon must be float64 (kernel writes double*), got {out_lon.dtype}"
         )
+    if out_lon is not None and out_lon.size < n:
+        raise CoordinateValidationError(
+            f"out_lon too small: need at least {n} elements, got {out_lon.size}"
+        )
 
     has_z = h is not None
     if has_z:
+        if h.size != n:
+            raise CoordinateValidationError(
+                f"lat and h must have the same size, got {n} and {h.size}"
+            )
         if out_h is None:
             out_h = cp.empty(n, dtype=cp.float64)
         elif out_h.dtype != np.float64:
             raise CoordinateValidationError(
                 f"out_h must be float64 (kernel writes double*), got {out_h.dtype}"
+            )
+        if out_h is not None and out_h.size < n:
+            raise CoordinateValidationError(
+                f"out_h too small: need at least {n} elements, got {out_h.size}"
             )
         in_h = h
     else:
