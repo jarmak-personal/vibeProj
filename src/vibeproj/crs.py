@@ -6,6 +6,7 @@ Uses pyproj for CRS metadata extraction, then maps to our internal projection ty
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -395,14 +396,25 @@ def extract_helmert(src_crs: CRS, dst_crs: CRS):
 
     try:
         tg = TransformerGroup(src_geo, dst_geo)
-    except Exception:
+    except Exception as exc:
+        warnings.warn(
+            f"Failed to query Helmert parameters: {exc}. "
+            "Proceeding without datum shift — coordinates may be offset.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return None
 
     # Search through available transformers for one containing a Helmert step
     for transformer in tg.transformers:
         try:
             proj4 = transformer.to_proj4()
-        except Exception:
+        except Exception as exc:
+            warnings.warn(
+                f"Failed to extract proj4 string: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
             continue
 
         parsed = _parse_helmert_from_proj4(proj4)
