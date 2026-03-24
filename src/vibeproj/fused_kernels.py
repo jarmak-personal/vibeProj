@@ -1955,148 +1955,9 @@ def fused_transform(
     # Build args per projection
     base = (arg1, arg2, out_x, out_y)
 
-    if projection_name in ("webmerc", "sinu"):
-        args = base + (
-            real_t(computed["lam0"]),
-            real_t(computed["a"]),
-            real_t(computed["x0"]),
-            real_t(computed["y0"]),
-            snf,
-            dnf,
-            nn,
-        )
-
-    elif projection_name == "eqc":
-        args = base + (
-            real_t(computed["cos_lat_ts"]),
-            real_t(computed["lam0"]),
-            real_t(computed["a"]),
-            real_t(computed["x0"]),
-            real_t(computed["y0"]),
-            snf,
-            dnf,
-            nn,
-        )
-
-    elif projection_name == "merc":
-        args = base + (
-            real_t(computed["e"]),
-            real_t(computed["lam0"]),
-            real_t(computed["a"]),
-            real_t(computed["x0"]),
-            real_t(computed["y0"]),
-            snf,
-            dnf,
-            nn,
-        )
-
-    elif projection_name == "tmerc":
-        if direction == "forward":
-            c6 = [real_t(c) for c in computed["cbg"]]
-            g6 = [real_t(c) for c in computed["gtu"]]
-        else:
-            c6 = [real_t(c) for c in computed["cgb"]]
-            g6 = [real_t(c) for c in computed["utg"]]
-        args = base + (
-            *c6,
-            *g6,
-            real_t(computed["Qn"]),
-            real_t(computed["Zb"]),
-            real_t(computed["lam0"]),
-            real_t(computed["a"]),
-            real_t(computed["x0"]),
-            real_t(computed["y0"]),
-            snf,
-            dnf,
-            nn,
-        )
-
-    elif projection_name == "lcc":
-        args = base + (
-            real_t(computed["n"]),
-            real_t(computed["F"]),
-            real_t(computed["rho0"]),
-            real_t(computed["e"]),
-            real_t(computed["k0"]),
-            real_t(computed["lam0"]),
-            real_t(computed["a"]),
-            real_t(computed["x0"]),
-            real_t(computed["y0"]),
-            snf,
-            dnf,
-            nn,
-        )
-
-    elif projection_name == "stere":
-        args = base + (
-            real_t(computed["akm1"]),
-            real_t(computed["sign"]),
-            real_t(computed["e"]),
-            real_t(computed["lam0"]),
-            real_t(computed["a"]),
-            real_t(computed["x0"]),
-            real_t(computed["y0"]),
-            snf,
-            dnf,
-            nn,
-        )
-
-    elif projection_name == "aea":
-        args = base + (
-            real_t(computed["n"]),
-            real_t(computed["C"]),
-            real_t(computed["rho0"]),
-            real_t(computed["e"]),
-            real_t(computed["es"]),
-            real_t(computed["lam0"]),
-            real_t(computed["a"]),
-            real_t(computed["x0"]),
-            real_t(computed["y0"]),
-            snf,
-            dnf,
-            nn,
-        )
-
-    elif projection_name == "laea":
-        mode_map = {"oblique": 0, "equatorial": 1, "north_pole": 2, "south_pole": 3}
-        args = base + (
-            np.int32(mode_map[computed["mode"]]),
-            real_t(computed["Rq"]),
-            real_t(computed["D"]),
-            real_t(computed["qp"]),
-            real_t(computed["sin_beta0"]),
-            real_t(computed["cos_beta0"]),
-            real_t(computed["e"]),
-            real_t(computed["es"]),
-            real_t(computed["lam0"]),
-            real_t(computed["a"]),
-            real_t(computed["x0"]),
-            real_t(computed["y0"]),
-            snf,
-            dnf,
-            nn,
-        )
-
-    elif projection_name == "eqearth":
-        if direction == "forward":
+    try:
+        if projection_name in ("webmerc", "sinu"):
             args = base + (
-                real_t(computed["e"]),
-                real_t(computed["qp"]),
-                real_t(computed["rqda"]),
-                real_t(computed["lam0"]),
-                real_t(computed["a"]),
-                real_t(computed["x0"]),
-                real_t(computed["y0"]),
-                snf,
-                dnf,
-                nn,
-            )
-        else:
-            args = base + (
-                real_t(computed["e"]),
-                real_t(computed["es"]),
-                real_t(computed["qp"]),
-                real_t(computed["rqda"]),
                 real_t(computed["lam0"]),
                 real_t(computed["a"]),
                 real_t(computed["x0"]),
@@ -2106,59 +1967,56 @@ def fused_transform(
                 nn,
             )
 
-    elif projection_name == "omerc":
-        args = base + (
-            real_t(computed["e"]),
-            real_t(computed["B"]),
-            real_t(computed["A_norm"]),
-            real_t(computed["H"]),
-            real_t(computed["sin_gamma0"]),
-            real_t(computed["cos_gamma0"]),
-            real_t(computed["sin_gamma_c"]),
-            real_t(computed["cos_gamma_c"]),
-            real_t(computed["u_c"]),
-            real_t(computed["lam0"]),
-            real_t(computed["a"]),
-            real_t(computed["x0"]),
-            real_t(computed["y0"]),
-            snf,
-            dnf,
-            nn,
-        )
-
-    elif projection_name == "krovak":
-        args = base + (
-            real_t(computed["e"]),
-            real_t(computed["B"]),
-            real_t(computed["k"]),
-            real_t(computed["n"]),
-            real_t(computed["r_0_norm"]),
-            real_t(computed["tan_half_p"]),
-            real_t(computed["sin_alpha_c"]),
-            real_t(computed["cos_alpha_c"]),
-            real_t(computed["lam0"]),
-            real_t(computed["a"]),
-            real_t(computed["x0"]),
-            real_t(computed["y0"]),
-            snf,
-            dnf,
-            nn,
-        )
-
-    elif projection_name in ("moll", "eck4", "eck6"):
-        args = base + (
-            real_t(computed["lam0"]),
-            real_t(computed["a"]),
-            real_t(computed["x0"]),
-            real_t(computed["y0"]),
-            snf,
-            dnf,
-            nn,
-        )
-
-    elif projection_name == "cea":
-        if direction == "forward":
+        elif projection_name == "eqc":
             args = base + (
+                real_t(computed["cos_lat_ts"]),
+                real_t(computed["lam0"]),
+                real_t(computed["a"]),
+                real_t(computed["x0"]),
+                real_t(computed["y0"]),
+                snf,
+                dnf,
+                nn,
+            )
+
+        elif projection_name == "merc":
+            args = base + (
+                real_t(computed["e"]),
+                real_t(computed["lam0"]),
+                real_t(computed["a"]),
+                real_t(computed["x0"]),
+                real_t(computed["y0"]),
+                snf,
+                dnf,
+                nn,
+            )
+
+        elif projection_name == "tmerc":
+            if direction == "forward":
+                c6 = [real_t(c) for c in computed["cbg"]]
+                g6 = [real_t(c) for c in computed["gtu"]]
+            else:
+                c6 = [real_t(c) for c in computed["cgb"]]
+                g6 = [real_t(c) for c in computed["utg"]]
+            args = base + (
+                *c6,
+                *g6,
+                real_t(computed["Qn"]),
+                real_t(computed["Zb"]),
+                real_t(computed["lam0"]),
+                real_t(computed["a"]),
+                real_t(computed["x0"]),
+                real_t(computed["y0"]),
+                snf,
+                dnf,
+                nn,
+            )
+
+        elif projection_name == "lcc":
+            args = base + (
+                real_t(computed["n"]),
+                real_t(computed["F"]),
+                real_t(computed["rho0"]),
                 real_t(computed["e"]),
                 real_t(computed["k0"]),
                 real_t(computed["lam0"]),
@@ -2169,10 +2027,184 @@ def fused_transform(
                 dnf,
                 nn,
             )
-        else:
+
+        elif projection_name == "stere":
             args = base + (
+                real_t(computed["akm1"]),
+                real_t(computed["sign"]),
+                real_t(computed["e"]),
+                real_t(computed["lam0"]),
+                real_t(computed["a"]),
+                real_t(computed["x0"]),
+                real_t(computed["y0"]),
+                snf,
+                dnf,
+                nn,
+            )
+
+        elif projection_name == "aea":
+            args = base + (
+                real_t(computed["n"]),
+                real_t(computed["C"]),
+                real_t(computed["rho0"]),
                 real_t(computed["e"]),
                 real_t(computed["es"]),
+                real_t(computed["lam0"]),
+                real_t(computed["a"]),
+                real_t(computed["x0"]),
+                real_t(computed["y0"]),
+                snf,
+                dnf,
+                nn,
+            )
+
+        elif projection_name == "laea":
+            mode_map = {"oblique": 0, "equatorial": 1, "north_pole": 2, "south_pole": 3}
+            args = base + (
+                np.int32(mode_map[computed["mode"]]),
+                real_t(computed["Rq"]),
+                real_t(computed["D"]),
+                real_t(computed["qp"]),
+                real_t(computed["sin_beta0"]),
+                real_t(computed["cos_beta0"]),
+                real_t(computed["e"]),
+                real_t(computed["es"]),
+                real_t(computed["lam0"]),
+                real_t(computed["a"]),
+                real_t(computed["x0"]),
+                real_t(computed["y0"]),
+                snf,
+                dnf,
+                nn,
+            )
+
+        elif projection_name == "eqearth":
+            if direction == "forward":
+                args = base + (
+                    real_t(computed["e"]),
+                    real_t(computed["qp"]),
+                    real_t(computed["rqda"]),
+                    real_t(computed["lam0"]),
+                    real_t(computed["a"]),
+                    real_t(computed["x0"]),
+                    real_t(computed["y0"]),
+                    snf,
+                    dnf,
+                    nn,
+                )
+            else:
+                args = base + (
+                    real_t(computed["e"]),
+                    real_t(computed["es"]),
+                    real_t(computed["qp"]),
+                    real_t(computed["rqda"]),
+                    real_t(computed["lam0"]),
+                    real_t(computed["a"]),
+                    real_t(computed["x0"]),
+                    real_t(computed["y0"]),
+                    snf,
+                    dnf,
+                    nn,
+                )
+
+        elif projection_name == "omerc":
+            args = base + (
+                real_t(computed["e"]),
+                real_t(computed["B"]),
+                real_t(computed["A_norm"]),
+                real_t(computed["H"]),
+                real_t(computed["sin_gamma0"]),
+                real_t(computed["cos_gamma0"]),
+                real_t(computed["sin_gamma_c"]),
+                real_t(computed["cos_gamma_c"]),
+                real_t(computed["u_c"]),
+                real_t(computed["lam0"]),
+                real_t(computed["a"]),
+                real_t(computed["x0"]),
+                real_t(computed["y0"]),
+                snf,
+                dnf,
+                nn,
+            )
+
+        elif projection_name == "krovak":
+            args = base + (
+                real_t(computed["e"]),
+                real_t(computed["B"]),
+                real_t(computed["k"]),
+                real_t(computed["n"]),
+                real_t(computed["r_0_norm"]),
+                real_t(computed["tan_half_p"]),
+                real_t(computed["sin_alpha_c"]),
+                real_t(computed["cos_alpha_c"]),
+                real_t(computed["lam0"]),
+                real_t(computed["a"]),
+                real_t(computed["x0"]),
+                real_t(computed["y0"]),
+                snf,
+                dnf,
+                nn,
+            )
+
+        elif projection_name in ("moll", "eck4", "eck6"):
+            args = base + (
+                real_t(computed["lam0"]),
+                real_t(computed["a"]),
+                real_t(computed["x0"]),
+                real_t(computed["y0"]),
+                snf,
+                dnf,
+                nn,
+            )
+
+        elif projection_name == "cea":
+            if direction == "forward":
+                args = base + (
+                    real_t(computed["e"]),
+                    real_t(computed["k0"]),
+                    real_t(computed["lam0"]),
+                    real_t(computed["a"]),
+                    real_t(computed["x0"]),
+                    real_t(computed["y0"]),
+                    snf,
+                    dnf,
+                    nn,
+                )
+            else:
+                args = base + (
+                    real_t(computed["e"]),
+                    real_t(computed["es"]),
+                    real_t(computed["k0"]),
+                    real_t(computed["lam0"]),
+                    real_t(computed["a"]),
+                    real_t(computed["x0"]),
+                    real_t(computed["y0"]),
+                    snf,
+                    dnf,
+                    nn,
+                )
+
+        elif projection_name in ("ortho", "gnom", "aeqd"):
+            args = base + (
+                real_t(computed["sin_phi0"]),
+                real_t(computed["cos_phi0"]),
+                real_t(computed["lam0"]),
+                real_t(computed["a"]),
+                real_t(computed["x0"]),
+                real_t(computed["y0"]),
+                snf,
+                dnf,
+                nn,
+            )
+
+        elif projection_name == "sterea":
+            args = base + (
+                real_t(computed["e"]),
+                real_t(computed["n"]),
+                real_t(computed["c"]),
+                real_t(computed["R"]),
+                real_t(computed["sin_chi0"]),
+                real_t(computed["cos_chi0"]),
                 real_t(computed["k0"]),
                 real_t(computed["lam0"]),
                 real_t(computed["a"]),
@@ -2183,77 +2215,51 @@ def fused_transform(
                 nn,
             )
 
-    elif projection_name in ("ortho", "gnom", "aeqd"):
-        args = base + (
-            real_t(computed["sin_phi0"]),
-            real_t(computed["cos_phi0"]),
-            real_t(computed["lam0"]),
-            real_t(computed["a"]),
-            real_t(computed["x0"]),
-            real_t(computed["y0"]),
-            snf,
-            dnf,
-            nn,
-        )
+        elif projection_name == "geos":
+            args = base + (
+                real_t(computed["H"]),
+                real_t(computed["h"]),
+                real_t(computed["r_eq2"]),
+                real_t(computed["r_pol2"]),
+                real_t(computed["lam0"]),
+                real_t(computed["a"]),
+                real_t(computed["x0"]),
+                real_t(computed["y0"]),
+                snf,
+                dnf,
+                nn,
+            )
 
-    elif projection_name == "sterea":
-        args = base + (
-            real_t(computed["e"]),
-            real_t(computed["n"]),
-            real_t(computed["c"]),
-            real_t(computed["R"]),
-            real_t(computed["sin_chi0"]),
-            real_t(computed["cos_chi0"]),
-            real_t(computed["k0"]),
-            real_t(computed["lam0"]),
-            real_t(computed["a"]),
-            real_t(computed["x0"]),
-            real_t(computed["y0"]),
-            snf,
-            dnf,
-            nn,
-        )
+        elif projection_name in ("robin", "natearth"):
+            args = base + (
+                real_t(computed["lam0"]),
+                real_t(computed["a"]),
+                real_t(computed["x0"]),
+                real_t(computed["y0"]),
+                snf,
+                dnf,
+                nn,
+            )
 
-    elif projection_name == "geos":
-        args = base + (
-            real_t(computed["H"]),
-            real_t(computed["h"]),
-            real_t(computed["r_eq2"]),
-            real_t(computed["r_pol2"]),
-            real_t(computed["lam0"]),
-            real_t(computed["a"]),
-            real_t(computed["x0"]),
-            real_t(computed["y0"]),
-            snf,
-            dnf,
-            nn,
-        )
+        elif projection_name == "wintri":
+            args = base + (
+                real_t(computed["cos_phi1"]),
+                real_t(computed["lam0"]),
+                real_t(computed["a"]),
+                real_t(computed["x0"]),
+                real_t(computed["y0"]),
+                snf,
+                dnf,
+                nn,
+            )
 
-    elif projection_name in ("robin", "natearth"):
-        args = base + (
-            real_t(computed["lam0"]),
-            real_t(computed["a"]),
-            real_t(computed["x0"]),
-            real_t(computed["y0"]),
-            snf,
-            dnf,
-            nn,
-        )
-
-    elif projection_name == "wintri":
-        args = base + (
-            real_t(computed["cos_phi1"]),
-            real_t(computed["lam0"]),
-            real_t(computed["a"]),
-            real_t(computed["x0"]),
-            real_t(computed["y0"]),
-            snf,
-            dnf,
-            nn,
-        )
-
-    else:
-        raise ValueError(f"Unrecognized fused kernel projection: {projection_name!r}")
+        else:
+            raise ValueError(f"Unrecognized fused kernel projection: {projection_name!r}")
+    except KeyError as exc:
+        raise KeyError(
+            f"Missing computed parameter {exc} for projection {projection_name!r}. "
+            f"Check that the projection's setup() populates all required keys."
+        ) from exc
 
     if stream is not None:
         with stream:
