@@ -282,8 +282,6 @@ class TransformPipeline:
                     out_h=out_z,
                     stream=stream,
                 )
-                if z is not None:
-                    return result  # already a 3-tuple
                 return result
             # Identity: write into pre-allocated buffers when provided
             if out_x is not None:
