@@ -1,6 +1,6 @@
 {
-  "timestamp": "2026-03-25T04:40:25Z",
-  "staged_hash": "ca9eab4aa1ea1638d666f5ed24658031cbf38c70657960700692b7e54f7deec4",
-  "files": [".claude/.review-completed","CLAUDE.md","benchmarks/bench_chunked.py","benchmarks/chunked_results.json","benchmarks/results.json","docs/plans/cpu-integration-plan.md","pyproject.toml","src/vibeproj/compat.py","src/vibeproj/transformer.py","tests/test_compat.py","uv.lock"],
+  "timestamp": "2026-03-25T11:34:56Z",
+  "staged_hash": "fefd7ffd40041c9b3fb35d882ca66f8be56c1ea3f147032d2282c9c804144db1",
+  "files": ["README.md","benchmarks/results.json","docs/recipes/dask.md","docs/recipes/geopandas.md","docs/recipes/qgis.md","docs/recipes/rasterio.md","docs/recipes/shapely.md"],
   "verdict": "LAND"
 }

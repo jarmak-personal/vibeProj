@@ -9,61 +9,61 @@
   },
   "cpu": {
     "tmerc": {
-      "median_ms": 139.238,
-      "min_ms": 134.964,
-      "max_ms": 142.037
+      "median_ms": 136.973,
+      "min_ms": 134.588,
+      "max_ms": 139.351
     },
     "lcc": {
-      "median_ms": 51.235,
-      "min_ms": 50.121,
-      "max_ms": 52.814
+      "median_ms": 51.444,
+      "min_ms": 49.222,
+      "max_ms": 52.136
     },
     "aea": {
-      "median_ms": 37.399,
-      "min_ms": 37.187,
-      "max_ms": 39.222
+      "median_ms": 38.46,
+      "min_ms": 37.105,
+      "max_ms": 38.802
     },
     "webmerc": {
-      "median_ms": 18.393,
-      "min_ms": 17.869,
-      "max_ms": 18.833
+      "median_ms": 18.44,
+      "min_ms": 18.253,
+      "max_ms": 18.633
     },
     "eqearth": {
-      "median_ms": 63.135,
-      "min_ms": 60.315,
-      "max_ms": 63.877
+      "median_ms": 61.678,
+      "min_ms": 59.621,
+      "max_ms": 62.135
     },
     "eqc": {
-      "median_ms": 10.968,
-      "min_ms": 10.801,
-      "max_ms": 11.301
+      "median_ms": 10.919,
+      "min_ms": 10.339,
+      "max_ms": 11.354
     },
     "omerc": {
-      "median_ms": 87.039,
-      "min_ms": 84.85,
-      "max_ms": 97.041
+      "median_ms": 87.201,
+      "min_ms": 85.001,
+      "max_ms": 87.857
     },
     "krovak": {
-      "median_ms": 359.941,
-      "min_ms": 353.461,
-      "max_ms": 363.805
+      "median_ms": 360.719,
+      "min_ms": 355.795,
+      "max_ms": 362.044
     },
     "p2p_utm": {
-      "median_ms": 121.752,
-      "min_ms": 119.63,
-      "max_ms": 123.59
+      "median_ms": 121.039,
+      "min_ms": 119.446,
+      "max_ms": 123.411
     },
     "identity": {
-      "median_ms": 0.306,
-      "min_ms": 0.303,
-      "max_ms": 0.803
+      "median_ms": 0.351,
+      "min_ms": 0.341,
+      "max_ms": 0.822
     }
   },
   "gpu": {
     "tmerc": {
       "median_ms": 0.491,
       "min_ms": 0.491,
-      "max_ms": 0.493
+      "max_ms": 0.494
     },
     "lcc": {
       "median_ms": 0.534,
@@ -76,39 +76,39 @@
       "max_ms": 0.273
     },
     "webmerc": {
-      "median_ms": 0.148,
+      "median_ms": 0.149,
       "min_ms": 0.148,
       "max_ms": 0.149
     },
     "eqearth": {
       "median_ms": 0.427,
-      "min_ms": 0.427,
+      "min_ms": 0.426,
       "max_ms": 0.428
     },
     "eqc": {
       "median_ms": 0.035,
       "min_ms": 0.035,
-      "max_ms": 0.038
+      "max_ms": 0.036
     },
     "omerc": {
-      "median_ms": 0.757,
+      "median_ms": 0.756,
       "min_ms": 0.756,
       "max_ms": 0.757
     },
     "krovak": {
-      "median_ms": 2.081,
+      "median_ms": 2.082,
       "min_ms": 2.081,
-      "max_ms": 2.083
+      "max_ms": 2.105
     },
     "p2p_utm": {
       "median_ms": 0.71,
       "min_ms": 0.709,
-      "max_ms": 0.711
+      "max_ms": 0.712
     },
     "identity": {
       "median_ms": 0.018,
       "min_ms": 0.018,
-      "max_ms": 0.019
+      "max_ms": 0.024
     }
   },
   "chunked_pipeline": {
@@ -117,7 +117,7 @@
       "host_to_pinned_ms": 0.363,
       "h2d_pinned_to_device_ms": 0.675,
       "kernel_compute_ms": 0.493,
-      "d2h_device_to_pinned_ms": 0.620,
+      "d2h_device_to_pinned_ms": 0.62,
       "pinned_to_host_ms": 0.375,
       "serial_total_ms": 2.526,
       "gpu_work_ms": 1.788,

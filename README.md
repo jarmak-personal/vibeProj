@@ -12,12 +12,12 @@ On an RTX 4090 vs i9-13900k, 1M coordinates:
 
 | Projection | GPU | vs CPU |
 |---|---|---|
-| Transverse Mercator / UTM | 0.49 ms | 284x |
+| Transverse Mercator / UTM | 0.49 ms | 278x |
 | Lambert Conformal Conic | 0.53 ms | 96x |
-| Albers Equal Area | 0.27 ms | 137x |
-| Web Mercator | 0.15 ms | 124x |
-| Equal Earth | 0.43 ms | 148x |
-| Plate Carrée | 0.04 ms | 313x |
+| Albers Equal Area | 0.27 ms | 141x |
+| Web Mercator | 0.15 ms | 123x |
+| Equal Earth | 0.43 ms | 144x |
+| Plate Carrée | 0.04 ms | 311x |
 | Oblique Mercator (Hotine) | 0.76 ms | 115x |
 | Krovak | 2.08 ms | 173x |
 
@@ -96,6 +96,14 @@ x, y, z = t.transform(-0.1278, 51.5074, z=45.0)
 t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
 x, y, z = t.transform(2.0, 49.0, z=45.0)  # z == 45.0
 ```
+
+### Integration with CPU libraries
+
+vibeProj works with popular geospatial Python libraries. GPU acceleration is automatic when CuPy is installed; otherwise it falls back to NumPy transparently.
+
+- [GeoPandas](https://jarmak-personal.github.io/vibeProj/recipes/geopandas/) — bulk GeoDataFrame reprojection
+- [Rasterio](https://jarmak-personal.github.io/vibeProj/recipes/rasterio/) — GPU-accelerated raster coordinate grids
+- [Shapely](https://jarmak-personal.github.io/vibeProj/recipes/shapely/) — geometry transforms via `shapely.transform()`
 
 ### vibeSpatial Integration (zero-copy GPU)
 
