@@ -1,6 +1,6 @@
 {
-  "timestamp": "2026-03-25T11:34:56Z",
-  "staged_hash": "fefd7ffd40041c9b3fb35d882ca66f8be56c1ea3f147032d2282c9c804144db1",
-  "files": ["README.md","benchmarks/results.json","docs/recipes/dask.md","docs/recipes/geopandas.md","docs/recipes/qgis.md","docs/recipes/rasterio.md","docs/recipes/shapely.md"],
+  "timestamp": "2026-03-25T19:43:10Z",
+  "staged_hash": "781b95e76ae05c6c5ea7a85ca09fb56af6292640cb435758803e2b7690c53f56",
+  "files": ["docs/index.md","docs/recipes/index.md"],
   "verdict": "LAND"
 }

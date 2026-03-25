@@ -10,6 +10,7 @@
     </p>
     <div class="cp-hero-actions">
       <a class="cp-btn cp-btn--primary" href="user/index.html">User Guide &rarr;</a>
+      <a class="cp-btn cp-btn--secondary" href="recipes/index.html">Recipes &rarr;</a>
       <a class="cp-btn cp-btn--secondary" href="dev/index.html">Developer Guide &rarr;</a>
     </div>
   </div>
@@ -68,6 +69,7 @@ x, y = t.transform(lat_array, lon_array) # NumPy or CuPy arrays
 :maxdepth: 2
 
 user/index
+recipes/index
 dev/index
 api/index
 ```
