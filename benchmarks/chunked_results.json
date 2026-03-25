@@ -1,0 +1,138 @@
+{
+  "meta": {
+    "python": "3.12.12",
+    "platform": "Linux-6.8.0-101-generic-x86_64-with-glibc2.35",
+    "gpu": "NVIDIA GeForce RTX 4090",
+    "pcie_theoretical_gbps": 31.5,
+    "projection": "tmerc",
+    "src_crs": "EPSG:4326",
+    "dst_crs": "EPSG:32631",
+    "chunk_size": 1000000,
+    "warmup_iters": 2,
+    "bench_iters": 5
+  },
+  "chunked": {
+    "1M_2d": {
+      "n_points": 1000000,
+      "has_z": false,
+      "chunk_size": 1000000,
+      "n_chunks": 1,
+      "warmup_iters": 2,
+      "bench_iters": 5,
+      "median_ms": 2.969,
+      "min_ms": 2.873,
+      "max_ms": 3.027,
+      "per_chunk_ms": 2.969,
+      "throughput_pts_per_sec": 336764064,
+      "total_bytes_transferred": 32000000
+    },
+    "1M_3d": {
+      "n_points": 1000000,
+      "has_z": true,
+      "chunk_size": 1000000,
+      "n_chunks": 1,
+      "warmup_iters": 2,
+      "bench_iters": 5,
+      "median_ms": 2.903,
+      "min_ms": 2.864,
+      "max_ms": 3.009,
+      "per_chunk_ms": 2.903,
+      "throughput_pts_per_sec": 344477620,
+      "total_bytes_transferred": 48000000
+    },
+    "10M_2d": {
+      "n_points": 10000000,
+      "has_z": false,
+      "chunk_size": 1000000,
+      "n_chunks": 10,
+      "warmup_iters": 2,
+      "bench_iters": 5,
+      "median_ms": 66.752,
+      "min_ms": 65.953,
+      "max_ms": 66.959,
+      "per_chunk_ms": 6.675,
+      "throughput_pts_per_sec": 149808414,
+      "total_bytes_transferred": 320000000
+    },
+    "10M_3d": {
+      "n_points": 10000000,
+      "has_z": true,
+      "chunk_size": 1000000,
+      "n_chunks": 10,
+      "warmup_iters": 2,
+      "bench_iters": 5,
+      "median_ms": 67.029,
+      "min_ms": 66.723,
+      "max_ms": 67.345,
+      "per_chunk_ms": 6.703,
+      "throughput_pts_per_sec": 149188765,
+      "total_bytes_transferred": 480000000
+    },
+    "100M_2d": {
+      "n_points": 100000000,
+      "has_z": false,
+      "chunk_size": 1000000,
+      "n_chunks": 100,
+      "warmup_iters": 2,
+      "bench_iters": 5,
+      "median_ms": 682.796,
+      "min_ms": 681.909,
+      "max_ms": 683.474,
+      "per_chunk_ms": 6.828,
+      "throughput_pts_per_sec": 146456732,
+      "total_bytes_transferred": 3200000000
+    },
+    "100M_3d": {
+      "n_points": 100000000,
+      "has_z": true,
+      "chunk_size": 1000000,
+      "n_chunks": 100,
+      "warmup_iters": 2,
+      "bench_iters": 5,
+      "median_ms": 682.174,
+      "min_ms": 681.766,
+      "max_ms": 682.545,
+      "per_chunk_ms": 6.822,
+      "throughput_pts_per_sec": 146590148,
+      "total_bytes_transferred": 4800000000
+    }
+  },
+  "gpu_resident_reference": {
+    "1M": {
+      "n_points": 1000000,
+      "median_ms": 0.493,
+      "min_ms": 0.492,
+      "max_ms": 0.494,
+      "throughput_pts_per_sec": 2029179443
+    },
+    "10M": {
+      "n_points": 10000000,
+      "median_ms": 4.758,
+      "min_ms": 4.757,
+      "max_ms": 4.759,
+      "throughput_pts_per_sec": 2101904994
+    },
+    "100M": {
+      "n_points": 100000000,
+      "median_ms": 45.096,
+      "min_ms": 45.001,
+      "max_ms": 47.439,
+      "throughput_pts_per_sec": 2217512825
+    }
+  },
+  "transfer_diagnostics": {
+    "host_to_pinned_ms": 0.363,
+    "h2d_ms": 0.675,
+    "kernel_ms": 0.493,
+    "d2h_ms": 0.62,
+    "pinned_to_host_ms": 0.375,
+    "serial_total_ms": 2.526,
+    "gpu_work_ms": 1.788,
+    "host_work_ms": 0.738,
+    "pipeline_theoretical_ms": 1.788,
+    "h2d_bandwidth_gbps": 23.7,
+    "d2h_bandwidth_gbps": 25.8,
+    "d2h_get_is_async": false,
+    "d2h_memcpyAsync_is_async": true
+  }
+}

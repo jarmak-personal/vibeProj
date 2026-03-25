@@ -1,6 +1,6 @@
 {
-  "timestamp": "2026-03-24T06:07:02Z",
-  "staged_hash": "d67893874a819181c04413a97cf8d414a67733b7e3b1a5069bb24d341fb0cf85",
-  "files": ["src/vibeproj/helmert.py","tests/test_helmert.py"],
+  "timestamp": "2026-03-25T04:40:25Z",
+  "staged_hash": "ca9eab4aa1ea1638d666f5ed24658031cbf38c70657960700692b7e54f7deec4",
+  "files": [".claude/.review-completed","CLAUDE.md","benchmarks/bench_chunked.py","benchmarks/chunked_results.json","benchmarks/results.json","docs/plans/cpu-integration-plan.md","pyproject.toml","src/vibeproj/compat.py","src/vibeproj/transformer.py","tests/test_compat.py","uv.lock"],
   "verdict": "LAND"
 }

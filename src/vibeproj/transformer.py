@@ -427,6 +427,94 @@ class Transformer:
             return rx, ry, z
         return result
 
+    def _get_pinned_buffers(self, buf_size, *, chunk_z=False):
+        """Return pooled pinned-memory staging buffers for 2 stream slots.
+
+        Returns a list of 2 dicts (one per stream slot).  Each dict has:
+            "in_x", "in_y", "out_x", "out_y"  (and "in_z", "out_z" when chunk_z)
+        All values are NumPy arrays backed by pinned (page-locked) host memory.
+        Pinned buffers enable ``cudaMemcpyAsync`` for true overlap of H<->D
+        transfers with GPU compute.
+
+        Each stream slot gets its own pinned buffers to avoid data races:
+        while stream A is still copying D->H into slot 0's output buffers,
+        the CPU can safely write the next chunk into slot 1's input buffers.
+
+        Buffers are cached on the Transformer instance and only grow (never
+        shrink). Once z slots are allocated they are kept, avoiding thrash
+        when alternating between 2D and 3D workloads.
+        """
+        import cupy as cp
+
+        need_alloc = (
+            not hasattr(self, "_pinned_bufs")
+            or self._pinned_buf_size < buf_size
+            or (chunk_z and not self._pinned_has_z)
+        )
+        if need_alloc:
+            # Grow-only: never shrink size, never drop z capability
+            buf_size = max(buf_size, getattr(self, "_pinned_buf_size", 0))
+            chunk_z = chunk_z or getattr(self, "_pinned_has_z", False)
+            nbytes = buf_size * np.dtype(np.float64).itemsize
+            # 2 slots x (in_x, in_y, out_x, out_y) = 8 buffers
+            # 2 slots x (in_x, in_y, in_z, out_x, out_y, out_z) = 12 buffers
+            bufs_per_slot = 6 if chunk_z else 4
+            n_bufs = 2 * bufs_per_slot
+            pinned_mems = [cp.cuda.alloc_pinned_memory(nbytes) for _ in range(n_bufs)]
+            arrs = [np.frombuffer(mem, dtype=np.float64, count=buf_size) for mem in pinned_mems]
+            slots = []
+            for s in range(2):
+                base = s * bufs_per_slot
+                slot = {
+                    "in_x": arrs[base],
+                    "in_y": arrs[base + 1],
+                    "out_x": arrs[base + 2],
+                    "out_y": arrs[base + 3],
+                }
+                if chunk_z:
+                    slot["in_z"] = arrs[base + 4]
+                    slot["out_z"] = arrs[base + 5]
+                slots.append(slot)
+            # Keep references to prevent GC of the underlying pinned memory
+            self._pinned_mems = pinned_mems
+            self._pinned_bufs = slots
+            self._pinned_buf_size = buf_size
+            self._pinned_has_z = chunk_z
+        return self._pinned_bufs
+
+    def _get_dev_buffers(self, buf_size, *, chunk_z=False):
+        """Return pooled device buffer pairs for 2 stream slots.
+
+        Each slot has: "x", "y", "ox", "oy" (and "z", "oz" when chunk_z).
+        Cached on the Transformer instance with grow-only semantics.
+        """
+        import cupy as cp
+
+        need_alloc = (
+            not hasattr(self, "_dev_bufs")
+            or self._dev_buf_size < buf_size
+            or (chunk_z and not self._dev_has_z)
+        )
+        if need_alloc:
+            buf_size = max(buf_size, getattr(self, "_dev_buf_size", 0))
+            chunk_z = chunk_z or getattr(self, "_dev_has_z", False)
+            slots = []
+            for _ in range(2):
+                slot = {
+                    "x": cp.empty(buf_size, dtype=cp.float64),
+                    "y": cp.empty(buf_size, dtype=cp.float64),
+                    "ox": cp.empty(buf_size, dtype=cp.float64),
+                    "oy": cp.empty(buf_size, dtype=cp.float64),
+                }
+                if chunk_z:
+                    slot["z"] = cp.empty(buf_size, dtype=cp.float64)
+                    slot["oz"] = cp.empty(buf_size, dtype=cp.float64)
+                slots.append(slot)
+            self._dev_bufs = slots
+            self._dev_buf_size = buf_size
+            self._dev_has_z = chunk_z
+        return self._dev_bufs
+
     def transform_chunked(
         self,
         x,
@@ -438,9 +526,10 @@ class Transformer:
     ):
         """Transform large host-resident arrays in GPU-sized chunks.
 
-        Transfers chunks to GPU, transforms via fused kernel, and copies
-        results back to the host. Reuses pre-allocated device buffers across
-        chunks to minimize allocation overhead.
+        Uses a double-buffered pipeline with pinned host memory and 2 CUDA
+        streams to overlap H<->D transfers with GPU compute.  Each stream
+        owns a dedicated set of device buffers so chunk N can execute on
+        stream A while chunk N+1 transfers on stream B.
 
         Falls back to CPU ``transform()`` when CuPy is not available.
 
@@ -495,54 +584,145 @@ class Transformer:
         chunk_z = z is not None and self._helmert is not None
         z_arr = np.asarray(z, dtype=np.float64) if z is not None else None
 
+        # Final host output arrays
         out_x = np.empty(n, dtype=np.float64)
         out_y = np.empty(n, dtype=np.float64)
         out_z = np.empty(n, dtype=np.float64) if chunk_z else None
 
-        # Pre-allocate device buffers (reused across chunks)
+        # --- Double-buffered stream pipeline setup ---
         buf_size = min(chunk_size, n)
-        dev_x = cp.empty(buf_size, dtype=cp.float64)
-        dev_y = cp.empty(buf_size, dtype=cp.float64)
-        dev_ox = cp.empty(buf_size, dtype=cp.float64)
-        dev_oy = cp.empty(buf_size, dtype=cp.float64)
-        if chunk_z:
-            dev_z = cp.empty(buf_size, dtype=cp.float64)
-            dev_oz = cp.empty(buf_size, dtype=cp.float64)
 
+        # Pinned host staging buffers — 2 slots (pooled on the Transformer)
+        pin_slots = self._get_pinned_buffers(buf_size, chunk_z=chunk_z)
+
+        # 2 non-blocking CUDA streams
+        streams = [cp.cuda.Stream(non_blocking=True), cp.cuda.Stream(non_blocking=True)]
+
+        # 2 stream slots of device buffers (pooled on the Transformer)
+        dev_bufs = self._get_dev_buffers(buf_size, chunk_z=chunk_z)
+
+        # Build list of (start, end) for all chunks
+        chunks = []
         for start in range(0, n, chunk_size):
             end = min(start + chunk_size, n)
-            size = end - start
+            chunks.append((start, end))
 
-            # H2D: host numpy slice → device buffer
-            dev_x[:size].set(x[start:end])
-            dev_y[:size].set(y[start:end])
+        # Track which stream slot holds pending D2H output that has not yet
+        # been copied into the final host output arrays.  We defer the sync
+        # and host-side copy so the GPU can run ahead.
+        pending = [None, None]  # pending[slot] = (start, end, size) or None
+        # Keep references to Helmert z output arrays alive until D2H completes.
+        # The pipeline may return a freshly-allocated z array (from Helmert) that
+        # would be freed when `result` is reassigned, while the D2H memcpyAsync
+        # is still in-flight on the stream.
+        pending_z_ref = [None, None]
 
+        def _flush_slot(slot_idx):
+            """Sync stream and copy pinned output into final host arrays."""
+            if pending[slot_idx] is None:
+                return
+            p_start, p_end, p_size = pending[slot_idx]
+            ps = pin_slots[slot_idx]
+            streams[slot_idx].synchronize()
+            out_x[p_start:p_end] = ps["out_x"][:p_size]
+            out_y[p_start:p_end] = ps["out_y"][:p_size]
             if chunk_z:
-                dev_z[:size].set(z_arr[start:end])
-                result = pipeline.transform(
-                    dev_x[:size],
-                    dev_y[:size],
-                    cp,
-                    z=dev_z[:size],
-                    out_x=dev_ox[:size],
-                    out_y=dev_oy[:size],
-                    out_z=dev_oz[:size],
+                out_z[p_start:p_end] = ps["out_z"][:p_size]
+            pending[slot_idx] = None
+            pending_z_ref[slot_idx] = None
+
+        for chunk_idx, (start, end) in enumerate(chunks):
+            size = end - start
+            slot = chunk_idx % 2
+            stream = streams[slot]
+            db = dev_bufs[slot]
+            ps = pin_slots[slot]
+
+            # Before reusing this slot's pinned buffers, flush any
+            # pending D2H data from the previous iteration on this slot.
+            _flush_slot(slot)
+
+            # Stage input: CPU memcpy into pinned buffers (fast, no GPU involved)
+            ps["in_x"][:size] = x[start:end]
+            ps["in_y"][:size] = y[start:end]
+            if chunk_z:
+                ps["in_z"][:size] = z_arr[start:end]
+
+            # --- All GPU work for this chunk on its dedicated stream ---
+            nbytes = size * 8  # fp64 = 8 bytes per element
+            with stream:
+                # H2D async: pinned host -> device (stream-ordered).
+                # Use memcpyAsync (kind=1 = cudaMemcpyHostToDevice) for
+                # truly non-blocking transfers. CuPy's .set() can
+                # synchronize the host thread even with pinned memory.
+                cp.cuda.runtime.memcpyAsync(
+                    db["x"].data.ptr, ps["in_x"].ctypes.data, nbytes, 1, stream.ptr
                 )
-                out_x[start:end] = cp.asnumpy(result[0])
-                out_y[start:end] = cp.asnumpy(result[1])
-                out_z[start:end] = cp.asnumpy(result[2])
-            else:
-                # Transform on GPU (zero-alloc via pre-allocated output buffers)
-                pipeline.transform(
-                    dev_x[:size],
-                    dev_y[:size],
-                    cp,
-                    out_x=dev_ox[:size],
-                    out_y=dev_oy[:size],
+                cp.cuda.runtime.memcpyAsync(
+                    db["y"].data.ptr, ps["in_y"].ctypes.data, nbytes, 1, stream.ptr
                 )
-                # D2H: device → host numpy slice
-                out_x[start:end] = cp.asnumpy(dev_ox[:size])
-                out_y[start:end] = cp.asnumpy(dev_oy[:size])
+                if chunk_z:
+                    cp.cuda.runtime.memcpyAsync(
+                        db["z"].data.ptr, ps["in_z"].ctypes.data, nbytes, 1, stream.ptr
+                    )
+
+                # GPU compute (kernel launch is stream-ordered via the
+                # stream= parameter propagated through pipeline.transform
+                # into fused_transform / fused_helmert_shift).
+                if chunk_z:
+                    result = pipeline.transform(
+                        db["x"][:size],
+                        db["y"][:size],
+                        cp,
+                        z=db["z"][:size],
+                        out_x=db["ox"][:size],
+                        out_y=db["oy"][:size],
+                        out_z=db["oz"][:size],
+                        stream=stream,
+                    )
+                else:
+                    result = pipeline.transform(
+                        db["x"][:size],
+                        db["y"][:size],
+                        cp,
+                        out_x=db["ox"][:size],
+                        out_y=db["oy"][:size],
+                        stream=stream,
+                    )
+
+                # D2H async: device -> pinned host (stream-ordered).
+                # Use memcpyAsync (kind=2 = cudaMemcpyDeviceToHost) for
+                # truly non-blocking transfers. CuPy's .get(out=) blocks
+                # the host thread (~0.31ms), serializing the pipeline and
+                # defeating double-buffering overlap.
+                # The caller must synchronize the stream before reading
+                # from the pinned buffer (_flush_slot handles this).
+                #
+                # For x/y, db["ox"]/db["oy"] are the pre-allocated output
+                # buffers that the fused kernel writes into (via out_x/out_y).
+                # For z, the pipeline may return a DIFFERENT device array
+                # (Helmert output) rather than writing to db["oz"], so we
+                # must use result[2] to get the actual z output pointer.
+                cp.cuda.runtime.memcpyAsync(
+                    ps["out_x"].ctypes.data, db["ox"].data.ptr, nbytes, 2, stream.ptr
+                )
+                cp.cuda.runtime.memcpyAsync(
+                    ps["out_y"].ctypes.data, db["oy"].data.ptr, nbytes, 2, stream.ptr
+                )
+                if chunk_z:
+                    cp.cuda.runtime.memcpyAsync(
+                        ps["out_z"].ctypes.data, result[2].data.ptr, nbytes, 2, stream.ptr
+                    )
+
+            # Record that this slot has pending output.
+            # Keep a reference to the z result to prevent GC while D2H is in-flight.
+            pending[slot] = (start, end, size)
+            if chunk_z:
+                pending_z_ref[slot] = result[2]
+
+        # Flush any remaining pending slots
+        _flush_slot(0)
+        _flush_slot(1)
 
         if z is not None:
             if chunk_z:

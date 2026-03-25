@@ -110,5 +110,95 @@
       "min_ms": 0.018,
       "max_ms": 0.019
     }
+  },
+  "chunked_pipeline": {
+    "_comment": "transform_chunked() double-buffered pipeline, tmerc EPSG:4326->EPSG:32631, chunk_size=1M",
+    "transfer_diagnostics_1M_chunk": {
+      "host_to_pinned_ms": 0.363,
+      "h2d_pinned_to_device_ms": 0.675,
+      "kernel_compute_ms": 0.493,
+      "d2h_device_to_pinned_ms": 0.620,
+      "pinned_to_host_ms": 0.375,
+      "serial_total_ms": 2.526,
+      "gpu_work_ms": 1.788,
+      "host_work_ms": 0.738,
+      "pipeline_theoretical_ms_per_chunk": 1.788,
+      "h2d_bandwidth_gbps": 23.7,
+      "d2h_bandwidth_gbps": 25.8,
+      "d2h_get_out_is_async": false,
+      "d2h_memcpyAsync_is_async": true,
+      "note": "CuPy .get(out=) synchronizes D2H, defeating pipeline overlap. Fix: use cp.cuda.runtime.memcpyAsync for truly async D2H."
+    },
+    "1M_2d": {
+      "n_points": 1000000,
+      "n_chunks": 1,
+      "median_ms": 2.969,
+      "min_ms": 2.873,
+      "max_ms": 3.027,
+      "per_chunk_ms": 2.969,
+      "throughput_pts_per_sec": 336764064,
+      "note": "Single chunk, no pipeline overlap opportunity"
+    },
+    "1M_3d": {
+      "n_points": 1000000,
+      "n_chunks": 1,
+      "median_ms": 2.903,
+      "min_ms": 2.864,
+      "max_ms": 3.009,
+      "per_chunk_ms": 2.903,
+      "throughput_pts_per_sec": 344477620,
+      "note": "3D with z, single chunk"
+    },
+    "10M_2d": {
+      "n_points": 10000000,
+      "n_chunks": 10,
+      "median_ms": 66.752,
+      "min_ms": 65.953,
+      "max_ms": 66.959,
+      "per_chunk_ms": 6.675,
+      "throughput_pts_per_sec": 149808414
+    },
+    "10M_3d": {
+      "n_points": 10000000,
+      "n_chunks": 10,
+      "median_ms": 67.029,
+      "min_ms": 66.723,
+      "max_ms": 67.345,
+      "per_chunk_ms": 6.703,
+      "throughput_pts_per_sec": 149188765
+    },
+    "100M_2d": {
+      "n_points": 100000000,
+      "n_chunks": 100,
+      "median_ms": 682.796,
+      "min_ms": 681.909,
+      "max_ms": 683.474,
+      "per_chunk_ms": 6.828,
+      "throughput_pts_per_sec": 146456732
+    },
+    "100M_3d": {
+      "n_points": 100000000,
+      "n_chunks": 100,
+      "median_ms": 682.174,
+      "min_ms": 681.766,
+      "max_ms": 682.545,
+      "per_chunk_ms": 6.822,
+      "throughput_pts_per_sec": 146590148
+    },
+    "gpu_resident_reference": {
+      "_comment": "Pure GPU kernel time (no H<->D transfer), lower bound",
+      "1M": {
+        "median_ms": 0.493,
+        "throughput_pts_per_sec": 2029179443
+      },
+      "10M": {
+        "median_ms": 4.758,
+        "throughput_pts_per_sec": 2101904994
+      },
+      "100M": {
+        "median_ms": 45.096,
+        "throughput_pts_per_sec": 2217512825
+      }
+    }
   }
 }

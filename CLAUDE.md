@@ -26,6 +26,14 @@ GPU-accelerated coordinate projection library. 24 projections, each with a fused
   consumer (1:64) vs datacenter (1:2) GPU. Auto precision always uses fp64 (projection math is SFU-bound).
 - **Double-single arithmetic** (`src/vibeproj/_ds_device_fns.py`) — experimental ds fp32 pair arithmetic
   for fp64-equivalent accuracy at fp32 throughput. Available via `precision="ds"`.
+- **Chunked pipeline** (`Transformer.transform_chunked()`) — double-buffered H<->D transfer pipeline
+  with pinned host memory and 2 non-blocking CUDA streams. Alternates chunks between stream slots
+  for overlap of transfers with GPU compute. Pinned and device buffers are pooled on the Transformer
+  instance (grow-only). Falls back to CPU `transform()` when CuPy is unavailable.
+- **Compat layer** (`src/vibeproj/compat.py`) — thin Shapely 2.x / GeoPandas integration.
+  Not re-exported from `__init__`; use `from vibeproj.compat import ...`. Functions:
+  `reproject_geodataframe()`, `make_shapely_transform()`, `reproject_geometries()`.
+  All lazy-import their third-party deps. One-way dependency arrow: compat → transformer.
 
 ## Key conventions
 
@@ -51,10 +59,11 @@ GPU-accelerated coordinate projection library. 24 projections, each with a fused
 ## Running tests
 
 ```bash
-uv run pytest                              # all 251 tests
+uv run pytest                              # all tests
 uv run pytest tests/test_fused_kernels.py  # GPU kernel tests (needs CuPy + GPU)
 uv run pytest tests/test_transformer.py    # CPU xp path tests
 uv run pytest tests/test_helmert.py        # Helmert datum shift + z-dimension tests
+uv run pytest tests/test_compat.py         # Shapely/GeoPandas compat (needs geopandas, shapely)
 ```
 
 ## Datum shift modes
