@@ -48,6 +48,7 @@ Issues = "https://github.com/jarmak-personal/vibeProj/issues"
 dev = [
     "furo>=2025.12.19",
     "myst-parser>=5.0.0",
+    "mypy>=1.14",
     "pytest>=8.3",
     "pytest-cov>=6.0",
     "ruff>=0.11",
@@ -77,6 +78,19 @@ packages = ["src/vibeproj"]
 addopts = ["-ra"]
 testpaths = ["tests"]
 xfail_strict = true
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = ["cupy.*", "geopandas.*", "shapely.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "vibeproj.fused_kernels"
+ignore_errors = true
 
 [tool.ruff]
 line-length = 100

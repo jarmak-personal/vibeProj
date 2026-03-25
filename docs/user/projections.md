@@ -1,6 +1,6 @@
 # Supported Projections
 
-vibeProj supports 20 coordinate projections. Each has both a NumPy/CuPy
+vibeProj supports 24 coordinate projections. Each has both a NumPy/CuPy
 element-wise implementation and a fused NVRTC GPU kernel.
 
 ## Projection table
@@ -27,6 +27,10 @@ element-wise implementation and a fused NVRTC GPU kernel.
 | Natural Earth | `natearth` | -- | Polynomial pseudocylindrical |
 | Azimuthal Equidistant | `aeqd` | -- | Distance-from-center |
 | Geostationary Satellite | `geos` | -- | Weather satellite view |
+| Oblique Mercator (Hotine) | `omerc` | 3375 | Variants A/B |
+| Krovak | `krovak` | 5514 | North-orientated variant |
+| Eckert IV | `eck4` | -- | Pseudocylindrical equal-area |
+| Eckert VI | `eck6` | -- | Pseudocylindrical equal-area |
 
 ## Using projections via EPSG codes
 
@@ -88,10 +92,24 @@ time; the actual datum shift math runs on vibeProj's own GPU kernels (or
 NumPy on CPU). Same-datum transforms have **zero overhead** -- the datum
 shift code path is bypassed entirely when no Helmert is needed.
 
+15-parameter time-dependent Helmert is also supported for sub-decimeter
+accuracy on modern datum pairs (e.g. ITRF to ETRS89). Pass an explicit
+``epoch`` or let vibeProj resolve it from the source CRS coordinate epoch:
+
+```python
+t = Transformer.from_crs("EPSG:4326", "EPSG:27700", epoch=2024.0)
+print(t.accuracy)  # "sub-decimeter" when 15-param rates are present
+```
+
 **Not yet supported:**
 
-- NTv2 / NADCON grid-based shifts (sub-centimetre accuracy for national datums)
-- Time-dependent Helmert (ITRF plate motion models)
+- **NTv2 / NADCON grid-based shifts** — these provide sub-centimetre accuracy
+  for national datums (e.g. OSTN15 for Great Britain, NAD27-to-NAD83 in North
+  America). When the best available transformation for a cross-datum pair is
+  grid-only, vibeProj emits a ``RuntimeWarning`` and falls back to projection
+  math without a datum shift. Results may differ from pyproj by meters to
+  hundreds of meters in these cases. Use pyproj or rasterio directly if you
+  need grid-based accuracy.
 
 If no Helmert transformation is available for a cross-datum pair (grid-only
 datums), vibeProj warns and applies projection math without a datum shift.

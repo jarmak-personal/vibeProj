@@ -97,6 +97,8 @@ t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
 x, y, z = t.transform(2.0, 49.0, z=45.0)  # z == 45.0
 ```
 
+Grid-based datum shifts (NTv2, NADCON) are not yet supported. When the best available transformation is grid-only, vibeProj warns and proceeds without a datum shift — use pyproj directly for grid-based accuracy.
+
 ### Integration with CPU libraries
 
 vibeProj works with popular geospatial Python libraries. GPU acceleration is automatic when CuPy is installed; otherwise it falls back to NumPy transparently.

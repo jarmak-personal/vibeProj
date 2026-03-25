@@ -2,6 +2,7 @@
 
 __version__ = "0.1.7"
 
+from vibeproj.crs import CRSInput
 from vibeproj.exceptions import (
     CoordinateValidationError,
     CRSResolutionError,
@@ -38,7 +39,7 @@ def list_projections() -> dict[str, dict]:
     return result
 
 
-def warm_up(projections=None, *, precision="auto"):
+def warm_up(projections: list[str] | None = None, *, precision: str = "auto") -> None:
     """Pre-compile fused NVRTC kernels to eliminate first-call latency.
 
     Parameters
@@ -61,6 +62,7 @@ def warm_up(projections=None, *, precision="auto"):
 
 
 __all__ = [
+    "CRSInput",
     "Transformer",
     "list_projections",
     "warm_up",

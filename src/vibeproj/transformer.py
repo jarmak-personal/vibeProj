@@ -13,12 +13,18 @@ from __future__ import annotations
 import dataclasses
 import threading
 import warnings
+from typing import TYPE_CHECKING, Any, Literal, overload
 
 import numpy as np
 
 from vibeproj.crs import resolve_transform
 from vibeproj.pipeline import TransformPipeline
 from vibeproj.runtime import get_array_module, to_device
+
+if TYPE_CHECKING:
+    from numpy.typing import ArrayLike
+
+    from vibeproj.crs import CRSInput
 
 
 def _resolve_epoch(user_epoch, src_crs):
@@ -55,7 +61,15 @@ class Transformer:
     front-load compilation if you want deterministic latency.
     """
 
-    def __init__(self, crs_from, crs_to, *, always_xy=True, datum_shift="accurate", epoch=None):
+    def __init__(
+        self,
+        crs_from: CRSInput,
+        crs_to: CRSInput,
+        *,
+        always_xy: bool = True,
+        datum_shift: Literal["accurate", "fast"] = "accurate",
+        epoch: float | None = None,
+    ) -> None:
         if datum_shift not in ("accurate", "fast"):
             raise ValueError(f"datum_shift must be 'accurate' or 'fast', got {datum_shift!r}")
 
@@ -122,12 +136,17 @@ class Transformer:
         self._src_params = src_params
         self._dst_params = dst_params
         # Build the inverse pipeline lazily (protected by lock for thread safety)
-        self._inv_pipeline = None
+        self._inv_pipeline: TransformPipeline | None = None
         self._inv_pipeline_lock = threading.Lock()
 
     @staticmethod
     def from_crs(
-        crs_from, crs_to, *, always_xy=True, datum_shift="accurate", epoch=None
+        crs_from: CRSInput,
+        crs_to: CRSInput,
+        *,
+        always_xy: bool = True,
+        datum_shift: Literal["accurate", "fast"] = "accurate",
+        epoch: float | None = None,
     ) -> Transformer:
         """Create a Transformer from source and target CRS.
 
@@ -197,7 +216,7 @@ class Transformer:
             return "sub-meter"
         return "sub-millimeter"
 
-    def compile(self, *, precision="auto"):
+    def compile(self, *, precision: str = "auto") -> None:
         """Pre-compile fused NVRTC kernels for this transformer.
 
         Call this to front-load kernel compilation latency before the
@@ -219,7 +238,7 @@ class Transformer:
 
             compile_helmert_kernel()
 
-    def __getstate__(self):
+    def __getstate__(self) -> dict[str, Any]:
         return {
             "crs_from": self._crs_from_input,
             "crs_to": self._crs_to_input,
@@ -228,8 +247,8 @@ class Transformer:
             "epoch": self._epoch,
         }
 
-    def __setstate__(self, state):
-        self.__init__(
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__init__(  # type: ignore[misc]
             state["crs_from"],
             state["crs_to"],
             always_xy=state["always_xy"],
@@ -237,7 +256,31 @@ class Transformer:
             epoch=state.get("epoch"),
         )
 
-    def transform(self, x, y, z=None, direction="FORWARD"):
+    @overload
+    def transform(
+        self,
+        x: ArrayLike,
+        y: ArrayLike,
+        z: None = None,
+        direction: Literal["FORWARD", "INVERSE"] = "FORWARD",
+    ) -> tuple[Any, Any]: ...
+
+    @overload
+    def transform(
+        self,
+        x: ArrayLike,
+        y: ArrayLike,
+        z: ArrayLike,
+        direction: Literal["FORWARD", "INVERSE"] = "FORWARD",
+    ) -> tuple[Any, Any, Any]: ...
+
+    def transform(
+        self,
+        x: ArrayLike,
+        y: ArrayLike,
+        z: ArrayLike | None = None,
+        direction: Literal["FORWARD", "INVERSE"] = "FORWARD",
+    ) -> tuple[Any, Any] | tuple[Any, Any, Any]:
         """Transform coordinates.
 
         Parameters
@@ -275,10 +318,10 @@ class Transformer:
             x = to_device(x, xp)
             y = to_device(y, xp)
             # Ensure float dtype
-            if not xp.issubdtype(x.dtype, xp.floating):
-                x = x.astype(xp.float64)
-            if not xp.issubdtype(y.dtype, xp.floating):
-                y = y.astype(xp.float64)
+            if not xp.issubdtype(x.dtype, xp.floating):  # type: ignore[union-attr]
+                x = x.astype(xp.float64)  # type: ignore[union-attr]
+            if not xp.issubdtype(y.dtype, xp.floating):  # type: ignore[union-attr]
+                y = y.astype(xp.float64)  # type: ignore[union-attr]
 
         # Prepare z for pipeline: only route through Helmert when active
         z_pipeline = None  # z to pass into pipeline (None = no z transform)
@@ -288,7 +331,7 @@ class Transformer:
                 z_pipeline = (
                     xp.asarray([z], dtype="f8")
                     if isinstance(z, (int, float))
-                    else xp.asarray([float(z)], dtype="f8")
+                    else xp.asarray([float(z)], dtype="f8")  # type: ignore[arg-type]
                 )
             else:
                 z_pipeline = to_device(z, xp)
@@ -346,19 +389,49 @@ class Transformer:
             return rx, ry, z_out
         return rx, ry
 
+    @overload
     def transform_buffers(
         self,
-        x,
-        y,
-        z=None,
+        x: ArrayLike,
+        y: ArrayLike,
+        z: None = None,
         *,
-        direction="FORWARD",
-        out_x=None,
-        out_y=None,
-        out_z=None,
-        precision="auto",
-        stream=None,
-    ):
+        direction: Literal["FORWARD", "INVERSE"] = "FORWARD",
+        out_x: ArrayLike | None = None,
+        out_y: ArrayLike | None = None,
+        out_z: ArrayLike | None = None,
+        precision: str = "auto",
+        stream: Any = None,
+    ) -> tuple[Any, Any]: ...
+
+    @overload
+    def transform_buffers(
+        self,
+        x: ArrayLike,
+        y: ArrayLike,
+        z: ArrayLike,
+        *,
+        direction: Literal["FORWARD", "INVERSE"] = "FORWARD",
+        out_x: ArrayLike | None = None,
+        out_y: ArrayLike | None = None,
+        out_z: ArrayLike | None = None,
+        precision: str = "auto",
+        stream: Any = None,
+    ) -> tuple[Any, Any, Any]: ...
+
+    def transform_buffers(
+        self,
+        x: ArrayLike,
+        y: ArrayLike,
+        z: ArrayLike | None = None,
+        *,
+        direction: Literal["FORWARD", "INVERSE"] = "FORWARD",
+        out_x: ArrayLike | None = None,
+        out_y: ArrayLike | None = None,
+        out_z: ArrayLike | None = None,
+        precision: str = "auto",
+        stream: Any = None,
+    ) -> tuple[Any, Any] | tuple[Any, Any, Any]:
         """Zero-overhead transform for device-resident arrays.
 
         Designed for integration with vibeSpatial's OwnedGeometryArray.
@@ -421,11 +494,11 @@ class Transformer:
             stream=stream,
         )
         if z_pipeline is not None:
-            return result  # already (rx, ry, z_out)
+            return result  # type: ignore[no-any-return]  # already (rx, ry, z_out)
         if z is not None:
             rx, ry = result
-            return rx, ry, z
-        return result
+            return rx, ry, z  # type: ignore[return-value]
+        return result  # type: ignore[no-any-return]
 
     def _get_pinned_buffers(self, buf_size, *, chunk_z=False):
         """Return pooled pinned-memory staging buffers for 2 stream slots.
@@ -515,15 +588,37 @@ class Transformer:
             self._dev_has_z = chunk_z
         return self._dev_bufs
 
+    @overload
     def transform_chunked(
         self,
-        x,
-        y,
-        z=None,
+        x: ArrayLike,
+        y: ArrayLike,
+        z: None = None,
         *,
-        direction="FORWARD",
-        chunk_size=1_000_000,
-    ):
+        direction: Literal["FORWARD", "INVERSE"] = "FORWARD",
+        chunk_size: int = 1_000_000,
+    ) -> tuple[np.ndarray, np.ndarray]: ...
+
+    @overload
+    def transform_chunked(
+        self,
+        x: ArrayLike,
+        y: ArrayLike,
+        z: ArrayLike,
+        *,
+        direction: Literal["FORWARD", "INVERSE"] = "FORWARD",
+        chunk_size: int = 1_000_000,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]: ...
+
+    def transform_chunked(
+        self,
+        x: ArrayLike,
+        y: ArrayLike,
+        z: ArrayLike | None = None,
+        *,
+        direction: Literal["FORWARD", "INVERSE"] = "FORWARD",
+        chunk_size: int = 1_000_000,
+    ) -> tuple[np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Transform large host-resident arrays in GPU-sized chunks.
 
         Uses a double-buffered pipeline with pinned host memory and 2 CUDA
@@ -554,7 +649,7 @@ class Transformer:
         try:
             import cupy as cp
         except ImportError:
-            return self.transform(x, y, z=z, direction=direction)
+            return self.transform(x, y, z=z, direction=direction)  # type: ignore[arg-type,misc]
 
         if direction not in ("FORWARD", "INVERSE"):
             raise ValueError(f"Invalid direction: {direction}")
@@ -646,7 +741,7 @@ class Transformer:
             ps["in_x"][:size] = x[start:end]
             ps["in_y"][:size] = y[start:end]
             if chunk_z:
-                ps["in_z"][:size] = z_arr[start:end]
+                ps["in_z"][:size] = z_arr[start:end]  # type: ignore[index]
 
             # --- All GPU work for this chunk on its dedicated stream ---
             nbytes = size * 8  # fp64 = 8 bytes per element
@@ -716,7 +811,7 @@ class Transformer:
 
             # Record that this slot has pending output.
             # Keep a reference to the z result to prevent GC while D2H is in-flight.
-            pending[slot] = (start, end, size)
+            pending[slot] = (start, end, size)  # type: ignore[call-overload]
             if chunk_z:
                 pending_z_ref[slot] = result[2]
 
@@ -726,6 +821,6 @@ class Transformer:
 
         if z is not None:
             if chunk_z:
-                return out_x, out_y, out_z
-            return out_x, out_y, z_arr
+                return out_x, out_y, out_z  # type: ignore[return-value]
+            return out_x, out_y, z_arr  # type: ignore[return-value]
         return out_x, out_y

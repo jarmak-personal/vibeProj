@@ -6,9 +6,16 @@ Not re-exported from vibeproj.__init__. Use explicitly:
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any, Callable
+
 import numpy as np
 
 from vibeproj.transformer import Transformer
+
+if TYPE_CHECKING:
+    import geopandas as gpd
+
+    from vibeproj.crs import CRSInput
 
 
 def _transform_coords(
@@ -27,7 +34,14 @@ def _transform_coords(
     return np.column_stack([rx, ry])
 
 
-def reproject_geodataframe(gdf, dst_crs, *, transformer=None, chunk_size: int = 1_000_000, **kw):
+def reproject_geodataframe(
+    gdf: gpd.GeoDataFrame,
+    dst_crs: CRSInput,
+    *,
+    transformer: Transformer | None = None,
+    chunk_size: int = 1_000_000,
+    **kw: Any,
+) -> gpd.GeoDataFrame:
     """Reproject a GeoDataFrame using vibeProj's bulk transform.
 
     Returns a new GeoDataFrame with the target CRS set.  Pass a pre-built
@@ -53,7 +67,13 @@ def reproject_geodataframe(gdf, dst_crs, *, transformer=None, chunk_size: int = 
     return result
 
 
-def make_shapely_transform(src_crs, dst_crs, *, chunk_size: int = 1_000_000, **kw):
+def make_shapely_transform(
+    src_crs: CRSInput,
+    dst_crs: CRSInput,
+    *,
+    chunk_size: int = 1_000_000,
+    **kw: Any,
+) -> Callable[[np.ndarray], np.ndarray]:
     """Return a callable for use with ``shapely.transform(geom, func)``.
 
     The returned function accepts an (N, 2) or (N, 3) coordinate array.
@@ -67,8 +87,14 @@ def make_shapely_transform(src_crs, dst_crs, *, chunk_size: int = 1_000_000, **k
 
 
 def reproject_geometries(
-    geometries, src_crs, dst_crs, *, transformer=None, chunk_size: int = 1_000_000, **kw
-):
+    geometries: Any,
+    src_crs: CRSInput,
+    dst_crs: CRSInput,
+    *,
+    transformer: Transformer | None = None,
+    chunk_size: int = 1_000_000,
+    **kw: Any,
+) -> Any:
     """Bulk-reproject Shapely geometries via coordinate extraction.
 
     Accepts a single geometry, list, or numpy array. Returns same type.

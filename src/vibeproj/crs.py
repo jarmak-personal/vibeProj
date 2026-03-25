@@ -16,6 +16,8 @@ from pyproj.exceptions import CRSError
 from vibeproj.ellipsoid import WGS84, GRS80, SPHERE, Ellipsoid
 from vibeproj.exceptions import CRSResolutionError, UnsupportedProjectionError
 
+type CRSInput = int | str | tuple[str, int] | CRS
+
 
 @dataclass
 class ProjectionParams:
@@ -40,7 +42,7 @@ class ProjectionParams:
     extra: dict[str, Any] = field(default_factory=dict)
 
 
-def parse_crs_input(crs_input) -> CRS:
+def parse_crs_input(crs_input: CRSInput) -> CRS:
     """Parse a CRS input to a pyproj CRS object.
 
     Accepts:
@@ -287,7 +289,9 @@ def resolve_projection_params(crs: CRS) -> ProjectionParams:
     return params
 
 
-def resolve_transform(crs_from, crs_to) -> tuple[ProjectionParams, ProjectionParams, CRS, CRS]:
+def resolve_transform(
+    crs_from: CRSInput, crs_to: CRSInput
+) -> tuple[ProjectionParams, ProjectionParams, CRS, CRS]:
     """Resolve source and target CRS for a coordinate transform.
 
     Returns (src_params, dst_params, src_crs, dst_crs).
