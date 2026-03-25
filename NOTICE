@@ -1,0 +1,7 @@
+vibeProj
+Copyright 2025 vibeProj Contributors
+Copyright 2023 NVIDIA CORPORATION
+
+This product includes code derived from NVIDIA RAPIDS cuProj,
+originally licensed under the Apache License, Version 2.0.
+https://github.com/rapidsai/cuspatial
