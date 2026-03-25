@@ -101,9 +101,9 @@ x, y, z = t.transform(2.0, 49.0, z=45.0)  # z == 45.0
 
 vibeProj works with popular geospatial Python libraries. GPU acceleration is automatic when CuPy is installed; otherwise it falls back to NumPy transparently.
 
-- [GeoPandas](https://jarmak-personal.github.io/vibeProj/recipes/geopandas/) — bulk GeoDataFrame reprojection
-- [Rasterio](https://jarmak-personal.github.io/vibeProj/recipes/rasterio/) — GPU-accelerated raster coordinate grids
-- [Shapely](https://jarmak-personal.github.io/vibeProj/recipes/shapely/) — geometry transforms via `shapely.transform()`
+- [GeoPandas](https://jarmak-personal.github.io/vibeProj/recipes/geopandas.html) — bulk GeoDataFrame reprojection
+- [Rasterio](https://jarmak-personal.github.io/vibeProj/recipes/rasterio.html) — GPU-accelerated raster coordinate grids
+- [Shapely](https://jarmak-personal.github.io/vibeProj/recipes/shapely.html) — geometry transforms via `shapely.transform()`
 
 ### vibeSpatial Integration (zero-copy GPU)
 

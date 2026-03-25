@@ -1,6 +1,6 @@
 {
-  "timestamp": "2026-03-25T19:43:10Z",
-  "staged_hash": "781b95e76ae05c6c5ea7a85ca09fb56af6292640cb435758803e2b7690c53f56",
-  "files": ["docs/index.md","docs/recipes/index.md"],
+  "timestamp": "2026-03-25T19:50:35Z",
+  "staged_hash": "7b24c1aa8be740ed2e2b8206804f143602f50b61b782ce1dff2112b02d9d891b",
+  "files": ["README.md"],
   "verdict": "LAND"
 }
