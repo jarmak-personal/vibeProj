@@ -833,7 +833,7 @@ class Transformer:
         top: float,
         *,
         densify_pts: int = 21,
-        direction: str = "FORWARD",
+        direction: Literal["FORWARD", "INVERSE"] = "FORWARD",
     ) -> tuple[float, float, float, float]:
         """Transform a bounding box, densifying edges to handle projection curvature.
 
@@ -852,8 +852,8 @@ class Transformer:
             corner endpoints).  Matches pyproj/GDAL convention: 0 means
             corners only, 21 (the default) adds 21 points between each pair
             of adjacent corners.  Clamped to a minimum of 0.
-        direction : str
-            ``"FORWARD"`` or ``"INVERSE"``.
+        direction : {"FORWARD", "INVERSE"}
+            Transform direction.
 
         Returns
         -------
