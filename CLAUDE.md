@@ -30,6 +30,10 @@ GPU-accelerated coordinate projection library. 24 projections, each with a fused
   with pinned host memory and 2 non-blocking CUDA streams. Alternates chunks between stream slots
   for overlap of transfers with GPU compute. Pinned and device buffers are pooled on the Transformer
   instance (grow-only). Falls back to CPU `transform()` when CuPy is unavailable.
+- **Bounds transform** (`Transformer.transform_bounds()`) — densifies bounding box edges (default 21
+  intermediate points per edge, matching pyproj/GDAL convention) to handle non-linear projection
+  curvature, then returns the min/max envelope. Uses CuPy arrays when available for GPU dispatch.
+  Antimeridian-crossing boxes not supported (split at ±180° first).
 - **Compat layer** (`src/vibeproj/compat.py`) — thin Shapely 2.x / GeoPandas integration.
   Not re-exported from `__init__`; use `from vibeproj.compat import ...`. Functions:
   `reproject_geodataframe()`, `make_shapely_transform()`, `reproject_geometries()`.

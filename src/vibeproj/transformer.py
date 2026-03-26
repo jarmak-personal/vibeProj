@@ -824,3 +824,103 @@ class Transformer:
                 return out_x, out_y, out_z  # type: ignore[return-value]
             return out_x, out_y, z_arr  # type: ignore[return-value]
         return out_x, out_y
+
+    def transform_bounds(
+        self,
+        left: float,
+        bottom: float,
+        right: float,
+        top: float,
+        *,
+        densify_pts: int = 21,
+        direction: str = "FORWARD",
+    ) -> tuple[float, float, float, float]:
+        """Transform a bounding box, densifying edges to handle projection curvature.
+
+        Densifies the four edges of the input bounding box, transforms all
+        points, and returns the min/max envelope of the transformed result.
+        This correctly handles non-linear projection distortion that would
+        be missed by transforming only the four corners.
+
+        Parameters
+        ----------
+        left, bottom, right, top : float
+            Bounding box coordinates.  With ``always_xy=True`` (default):
+            left/right are x (longitude), bottom/top are y (latitude).
+        densify_pts : int, default 21
+            Number of additional intermediate points per edge (not counting
+            corner endpoints).  Matches pyproj/GDAL convention: 0 means
+            corners only, 21 (the default) adds 21 points between each pair
+            of adjacent corners.  Clamped to a minimum of 0.
+        direction : str
+            ``"FORWARD"`` or ``"INVERSE"``.
+
+        Returns
+        -------
+        tuple of four floats
+            ``(left, bottom, right, top)`` of the transformed bounding box.
+
+        Notes
+        -----
+        Antimeridian-crossing bounding boxes (where ``left > right`` in
+        longitude) are not supported.  Split into two boxes at ±180° first.
+        """
+        if direction not in ("FORWARD", "INVERSE"):
+            raise ValueError(f"Invalid direction: {direction}")
+
+        densify_pts = max(densify_pts, 0)
+
+        # Use CuPy when available so the transform hits the fused GPU path.
+        xp = get_array_module()
+
+        # Total sample points per edge including both corner endpoints.
+        # pyproj convention: densify_pts is the number of *additional*
+        # intermediate points, so total = densify_pts + 2.
+        pts_per_edge = densify_pts + 2
+
+        # Densify the four edges.  Corner points are shared between adjacent
+        # edges, so we exclude the last point on each edge to avoid
+        # duplicates.
+        #
+        # Edge layout (n = pts_per_edge - 1 points per edge, last excluded):
+        #   bottom: x varies left->right, y = bottom
+        #   right:  x = right, y varies bottom->top
+        #   top:    x varies right->left, y = top
+        #   left:   x = left, y varies top->bottom
+
+        n = pts_per_edge - 1  # points per edge excluding the closing corner
+        total = 4 * n
+
+        # Pre-allocate two contiguous arrays and fill slices directly to
+        # avoid intermediate temporaries and concatenation.
+        x_all = xp.empty(total, dtype=np.float64)
+        y_all = xp.empty(total, dtype=np.float64)
+
+        x_all[0:n] = xp.linspace(left, right, pts_per_edge)[:-1]
+        y_all[0:n] = bottom
+
+        x_all[n : 2 * n] = right
+        y_all[n : 2 * n] = xp.linspace(bottom, top, pts_per_edge)[:-1]
+
+        x_all[2 * n : 3 * n] = xp.linspace(right, left, pts_per_edge)[:-1]
+        y_all[2 * n : 3 * n] = top
+
+        x_all[3 * n : 4 * n] = left
+        y_all[3 * n : 4 * n] = xp.linspace(top, bottom, pts_per_edge)[:-1]
+
+        # Transform all edge points at once
+        tx, ty = self.transform(x_all, y_all, direction=direction)
+
+        # Filter non-finite values (projections can produce NaN/inf for
+        # out-of-domain coordinates)
+        finite_mask = xp.isfinite(tx) & xp.isfinite(ty)
+        tx = tx[finite_mask]
+        ty = ty[finite_mask]
+
+        if tx.size == 0:
+            raise ValueError(
+                "All transformed coordinates are non-finite. "
+                "The input bounding box may be outside the projection's valid domain."
+            )
+
+        return float(tx.min()), float(ty.min()), float(tx.max()), float(ty.max())
