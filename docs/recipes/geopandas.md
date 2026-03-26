@@ -73,7 +73,7 @@ else:
 new_geoms = shapely.set_coordinates(geom_arr.copy(), new_coords)
 result = gdf.copy()
 result[gdf.geometry.name] = new_geoms
-result = result.set_geometry(gdf.geometry.name).set_crs("EPSG:32631")
+result = result.set_geometry(gdf.geometry.name).set_crs("EPSG:32631", allow_override=True)
 ```
 
 The key insight is that `shapely.get_coordinates()` flattens every vertex

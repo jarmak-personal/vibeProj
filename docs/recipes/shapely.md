@@ -31,14 +31,18 @@ new_poly = shapely.transform(poly, func)
 ```
 
 The returned function accepts (N, 2) or (N, 3) coordinate arrays, so 3D
-geometries with Z values are handled automatically.
+geometries with Z values are handled automatically. Pass ``include_z=True``
+to ``shapely.transform()`` to preserve the Z dimension:
 
 ```python
 # 3D geometry — Z is transformed through Helmert when crossing datums,
 # passed through unchanged for same-datum transforms
 pt3d = Point(2.3522, 48.8566, 100.0)
-new_pt3d = shapely.transform(pt3d, func)
+new_pt3d = shapely.transform(pt3d, func, include_z=True)
 ```
+
+Without ``include_z=True``, Shapely strips Z coordinates before calling
+the transform function.
 
 ### Reusing across multiple geometries
 
