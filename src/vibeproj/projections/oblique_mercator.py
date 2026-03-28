@@ -54,6 +54,8 @@ def _phi_from_t(t, e, xp):
 
 
 class ObliqueMercator(Projection):
+    """Conformal oblique cylindrical projection (Hotine variants A and B)."""
+
     name = "omerc"
 
     def setup(self, params: ProjectionParams) -> dict:

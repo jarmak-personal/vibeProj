@@ -19,6 +19,8 @@ _SQRT2 = math.sqrt(2.0)
 
 
 class Mollweide(Projection):
+    """Equal-area pseudocylindrical projection for world thematic maps."""
+
     name = "moll"
 
     def setup(self, params: ProjectionParams) -> dict:

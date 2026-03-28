@@ -66,6 +66,8 @@ _RC1 = 0.08726646259971647  # 5° in radians
 
 
 class Robinson(Projection):
+    """Compromise pseudocylindrical projection with table-based interpolation."""
+
     name = "robin"
 
     def setup(self, params: ProjectionParams) -> dict:

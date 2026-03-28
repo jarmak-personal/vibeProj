@@ -17,6 +17,8 @@ if TYPE_CHECKING:
 
 
 class Orthographic(Projection):
+    """Perspective projection as seen from infinite distance (globe view)."""
+
     name = "ortho"
 
     def setup(self, params: ProjectionParams) -> dict:

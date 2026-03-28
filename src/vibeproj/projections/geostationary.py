@@ -17,6 +17,8 @@ if TYPE_CHECKING:
 
 
 class Geostationary(Projection):
+    """Perspective projection from geostationary orbit (sweep Y variant)."""
+
     name = "geos"
 
     def setup(self, params: ProjectionParams) -> dict:

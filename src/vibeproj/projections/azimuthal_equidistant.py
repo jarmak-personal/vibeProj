@@ -17,6 +17,8 @@ if TYPE_CHECKING:
 
 
 class AzimuthalEquidistant(Projection):
+    """Azimuthal projection preserving distances from the center point."""
+
     name = "aeqd"
 
     def setup(self, params: ProjectionParams) -> dict:

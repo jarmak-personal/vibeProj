@@ -735,6 +735,43 @@ def test_aeqd_fused_roundtrip():
     )
 
 
+def test_sinu_fused_roundtrip():
+    _custom_roundtrip(
+        "sinu",
+        cp.array([40.0, -30.0, 60.0, 0.0], dtype=cp.float64),
+        cp.array([-100.0, 20.0, 140.0, 0.0], dtype=cp.float64),
+        atol=1e-7,
+    )
+
+
+def test_geos_fused_roundtrip():
+    """Geostationary roundtrip — use points near sub-satellite point (visible disk)."""
+    from vibeproj.crs import ProjectionParams
+    from vibeproj.ellipsoid import WGS84
+    from vibeproj.pipeline import TransformPipeline
+
+    params = ProjectionParams(
+        projection_name="geos",
+        ellipsoid=WGS84,
+        lon_0=0.0,
+        north_first=False,
+        extra={"h": 35785831.0},
+    )
+    src = ProjectionParams(projection_name="longlat", ellipsoid=WGS84, north_first=True)
+    pipe = TransformPipeline(src, params)
+
+    # Points within the visible disk (±~60° from sub-satellite point)
+    lat = cp.array([0.0, 20.0, -30.0, 50.0], dtype=cp.float64)
+    lon = cp.array([0.0, 10.0, -20.0, 5.0], dtype=cp.float64)
+    x, y = pipe.transform(lat, lon, cp)
+
+    inv_pipe = TransformPipeline(params, src)
+    lat2, lon2 = inv_pipe.transform(x, y, cp)
+
+    assert_allclose(cp.asnumpy(lat2), cp.asnumpy(lat), atol=1e-6)
+    assert_allclose(cp.asnumpy(lon2), cp.asnumpy(lon), atol=1e-6)
+
+
 # ---------------------------------------------------------------------------
 # SVD datum correction kernel
 # ---------------------------------------------------------------------------

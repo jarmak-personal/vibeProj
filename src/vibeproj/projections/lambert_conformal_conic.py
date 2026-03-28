@@ -56,6 +56,8 @@ def _phi2(ts, e, xp):
 
 
 class LambertConformalConic(Projection):
+    """Conformal conic projection (1SP and 2SP variants)."""
+
     name = "lcc"
 
     def setup(self, params: ProjectionParams) -> dict:

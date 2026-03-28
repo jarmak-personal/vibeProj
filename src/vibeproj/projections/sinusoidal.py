@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 
 
 class Sinusoidal(Projection):
+    """Equal-area pseudocylindrical projection with sinusoidal meridians."""
+
     name = "sinu"
 
     def setup(self, params: ProjectionParams) -> dict:

@@ -17,6 +17,8 @@ if TYPE_CHECKING:
 
 
 class CylindricalEqualArea(Projection):
+    """Equal-area cylindrical projection (Lambert, Behrmann, Gall-Peters variants)."""
+
     name = "cea"
 
     def setup(self, params: ProjectionParams) -> dict:

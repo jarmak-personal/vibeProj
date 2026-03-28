@@ -52,6 +52,8 @@ def _qsfn_array(sin_phi, e, xp):
 
 
 class EqualEarth(Projection):
+    """Equal-area pseudocylindrical projection (Savric, Patterson & Jenny, 2018)."""
+
     name = "eqearth"
 
     def setup(self, params: ProjectionParams) -> dict:

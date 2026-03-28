@@ -47,6 +47,8 @@ def _authlat(q, qp, apa, xp):
 
 
 class LambertAzimuthalEqualArea(Projection):
+    """Equal-area azimuthal projection for continental and polar mapping."""
+
     name = "laea"
 
     def setup(self, params: ProjectionParams) -> dict:

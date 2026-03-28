@@ -83,6 +83,8 @@ def _clenshaw_real(a, arg_r, xp):
 
 
 class TransverseMercator(Projection):
+    """Transverse Mercator using Poder/Engsager 6th-order series expansion."""
+
     name = "tmerc"
 
     def setup(self, params: ProjectionParams) -> dict:

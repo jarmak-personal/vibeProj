@@ -70,6 +70,23 @@ class Transformer:
         datum_shift: Literal["accurate", "fast"] = "accurate",
         epoch: float | None = None,
     ) -> None:
+        """Create a Transformer from source and target CRS.
+
+        Prefer the :meth:`from_crs` static method, which has the same
+        signature and is consistent with the pyproj API.
+
+        Parameters
+        ----------
+        crs_from, crs_to :
+            EPSG integer (4326), string ("EPSG:4326"), or pyproj CRS.
+        always_xy : bool, default True
+            If True, input/output order is (x, y) = (lon, lat).
+        datum_shift : {"accurate", "fast"}, default "accurate"
+            "accurate" uses 15-param time-dependent Helmert + SVD corrections
+            when available. "fast" uses base 7-param Helmert only.
+        epoch : float, optional
+            Evaluation epoch for time-dependent Helmert (e.g. 2024.0).
+        """
         if datum_shift not in ("accurate", "fast"):
             raise ValueError(f"datum_shift must be 'accurate' or 'fast', got {datum_shift!r}")
 

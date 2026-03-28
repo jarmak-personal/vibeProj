@@ -21,6 +21,8 @@ _HALF_PI = math.pi / 2.0
 
 
 class Krovak(Projection):
+    """Oblique conformal conic projection for Czech/Slovak national grids."""
+
     name = "krovak"
 
     def setup(self, params: ProjectionParams) -> dict:

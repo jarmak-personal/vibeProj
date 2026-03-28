@@ -17,6 +17,8 @@ if TYPE_CHECKING:
 
 
 class WinkelTripel(Projection):
+    """Compromise projection averaging Plate Carree and Aitoff."""
+
     name = "wintri"
 
     def setup(self, params: ProjectionParams) -> dict:

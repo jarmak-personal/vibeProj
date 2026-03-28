@@ -2,8 +2,8 @@
 
 GPU-accelerated coordinate projection library. Extracted from [RAPIDS cuProj](https://github.com/rapidsai/cuspatial), re-engineered as a pure Python + CuPy package, and expanded from 1 to 24 projections — each with a fused NVRTC kernel that runs the full transform pipeline in a single GPU kernel launch.
 
-> [!WARNING]
-> vibeProj is very early in development. Operations may be unoptimized or have multiple Host/Device transfers causing reduced performance. [File an issue](https://github.com/jarmak-personal/vibeProj/issues) if you hit a problem!
+> [!NOTE]
+> vibeProj follows [semver](https://semver.org/). The public API (`Transformer`, `transform`, `transform_buffers`, `transform_chunked`, `transform_bounds`) is stable. Deprecated features receive a `FutureWarning` for at least one minor release before removal.
 
 ## Performance
 
@@ -137,6 +137,6 @@ t.transform_buffers(buf.x, buf.y, buf.z, out_x=new_x, out_y=new_y, out_z=new_z)
 ## Test
 
 ```bash
-uv run pytest                    # all tests (256 total)
+uv run pytest                    # all tests
 uv run pytest tests/test_fused_kernels.py  # GPU kernel tests (requires CuPy)
 ```

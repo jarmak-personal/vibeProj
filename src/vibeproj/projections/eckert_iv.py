@@ -20,6 +20,8 @@ _C_p = 2.0 + math.pi / 2.0
 
 
 class EckertIV(Projection):
+    """Equal-area pseudocylindrical projection for world thematic maps."""
+
     name = "eck4"
 
     def setup(self, params: ProjectionParams) -> dict:

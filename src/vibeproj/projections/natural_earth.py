@@ -29,6 +29,8 @@ _B4 = -0.005916
 
 
 class NaturalEarth(Projection):
+    """Compromise pseudocylindrical projection for physical world maps."""
+
     name = "natearth"
 
     def setup(self, params: ProjectionParams) -> dict:

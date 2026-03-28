@@ -17,6 +17,8 @@ if TYPE_CHECKING:
 
 
 class PlateCarree(Projection):
+    """Equidistant cylindrical projection (x = lon, y = lat)."""
+
     name = "eqc"
 
     def setup(self, params: ProjectionParams) -> dict:

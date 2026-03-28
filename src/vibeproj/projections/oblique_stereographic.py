@@ -19,6 +19,8 @@ if TYPE_CHECKING:
 
 
 class ObliqueStereographic(Projection):
+    """Conformal projection via double projection through a conformal sphere."""
+
     name = "sterea"
 
     def setup(self, params: ProjectionParams) -> dict:

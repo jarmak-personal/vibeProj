@@ -17,6 +17,8 @@ if TYPE_CHECKING:
 
 
 class Gnomonic(Projection):
+    """Gnomonic projection — all great circles map to straight lines."""
+
     name = "gnom"
 
     def setup(self, params: ProjectionParams) -> dict:

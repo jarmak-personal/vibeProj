@@ -14,7 +14,7 @@ time.  The evaluation function works with both NumPy and CuPy arrays.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import types
@@ -104,15 +104,15 @@ def is_reverse_direction(src_crs: str, dst_crs: str) -> bool:
 
 
 def apply_svd_correction(
-    lat: object,
-    lon: object,
+    lat: Any,
+    lon: Any,
     correction: DatumCorrectionData,
     xp: types.ModuleType,
     *,
     negate: bool = False,
-    out_lat: object | None = None,
-    out_lon: object | None = None,
-) -> tuple[object, object]:
+    out_lat: Any | None = None,
+    out_lon: Any | None = None,
+) -> tuple[Any, Any]:
     """Apply SVD-compressed datum correction to lat/lon arrays.
 
     Reconstructs the correction at the 4 nearest grid nodes using the

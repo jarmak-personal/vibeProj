@@ -41,6 +41,8 @@ def _qsfn_array(sin_phi, e, xp):
 
 
 class AlbersEqualArea(Projection):
+    """Equal-area conic projection (EPSG method 9822)."""
+
     name = "aea"
 
     def setup(self, params: ProjectionParams) -> dict:

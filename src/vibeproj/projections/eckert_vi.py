@@ -21,6 +21,8 @@ _C_y = 2.0 / _SQRT_2_PLUS_PI
 
 
 class EckertVI(Projection):
+    """Equal-area pseudocylindrical projection with sinusoidal meridians."""
+
     name = "eck6"
 
     def setup(self, params: ProjectionParams) -> dict:
