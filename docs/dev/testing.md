@@ -24,10 +24,13 @@ uv run pytest tests/test_transformer.py::test_wgs84_to_utm_one_point
 | File | Tests | Requires GPU |
 |---|---|---|
 | `tests/test_crs.py` | CRS parsing and resolution | No |
-| `tests/test_transformer.py` | CPU-path transforms for all 20 projections | No |
-| `tests/test_fused_kernels.py` | GPU fused kernel correctness | Yes |
+| `tests/test_transformer.py` | CPU-path transforms for all 24 projections | No |
+| `tests/test_fused_kernels.py` | GPU fused kernel correctness (all 24 projections) | Yes |
 | `tests/test_helmert.py` | Helmert datum shift math, extraction, cross-datum integration | No |
-| `tests/test_datum_corrections.py` | SVD datum corrections: coefficient evaluation, accuracy vs pyproj, fallback chain | No |
+| `tests/test_datum_corrections.py` | SVD datum corrections: coefficient evaluation, accuracy vs pyproj | No |
+| `tests/test_accuracy_audit.py` | Systematic accuracy validation across all projections | No |
+| `tests/test_transform_bounds.py` | Bounding box transform with edge densification | No |
+| `tests/test_compat.py` | GeoPandas/Shapely integration layer | No (needs geopandas, shapely) |
 
 GPU tests are automatically skipped when CuPy is not available
 (`pytest.importorskip("cupy")`).

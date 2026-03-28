@@ -1615,7 +1615,7 @@ wheels = [
 
 [[package]]
 name = "vibeproj"
-version = "0.1.7"
+version = "0.1.9"
 source = { editable = "." }
 dependencies = [
     { name = "numpy" },
@@ -1657,7 +1657,7 @@ test-compat = [
 requires-dist = [
     { name = "cuda-cccl", extras = ["cu12"], marker = "extra == 'cu12'" },
     { name = "cuda-cccl", extras = ["cu13"], marker = "extra == 'cu13'" },
-    { name = "cuda-python", marker = "extra == 'cu12'", specifier = ">=12,<13" },
+    { name = "cuda-python", marker = "extra == 'cu12'", specifier = ">=12,<14" },
     { name = "cuda-python", marker = "extra == 'cu13'", specifier = ">=13" },
     { name = "cupy-cuda12x", marker = "extra == 'cu12'", specifier = ">=13" },
     { name = "cupy-cuda13x", marker = "extra == 'cu13'", specifier = ">=14" },

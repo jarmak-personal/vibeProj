@@ -78,6 +78,10 @@ packages = ["src/vibeproj"]
 addopts = ["-ra"]
 testpaths = ["tests"]
 xfail_strict = true
+filterwarnings = [
+    "ignore:Best transformation is not available:UserWarning",
+    "ignore:invalid value encountered in divide:RuntimeWarning",
+]
 
 [tool.mypy]
 python_version = "3.12"

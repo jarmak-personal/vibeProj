@@ -5,7 +5,7 @@
   <div class="cp-hero-content">
     <h1 class="cp-hero-title" data-glitch="vibeProj">vibe<span class="accent">Proj</span></h1>
     <p class="cp-hero-subtitle">
-      GPU-accelerated coordinate projection. 20 projections, each with a fused
+      GPU-accelerated coordinate projection. 24 projections, each with a fused
       NVRTC kernel that runs the full transform pipeline in a single launch.
     </p>
     <div class="cp-hero-actions">
@@ -24,8 +24,8 @@
     <p>One kernel launch per transform. Axis swap, deg/rad, projection math, scale/offset — all fused into a single NVRTC kernel. No intermediate buffers.</p>
   </div>
   <div class="cp-card cp-reveal">
-    <h3>20 Projections</h3>
-    <p>Transverse Mercator, Lambert, Albers, Stereographic, and 16 more. Forward and inverse. Each projection has a handwritten CUDA kernel.</p>
+    <h3>24 Projections</h3>
+    <p>Transverse Mercator, Lambert, Albers, Stereographic, and 20 more. Forward and inverse. Each projection has a handwritten CUDA kernel.</p>
   </div>
   <div class="cp-card cp-reveal">
     <h3>Zero-Copy Integration</h3>
