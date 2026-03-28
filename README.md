@@ -97,7 +97,7 @@ t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
 x, y, z = t.transform(2.0, 49.0, z=45.0)  # z == 45.0
 ```
 
-Grid-based datum shifts (NTv2, NADCON) are not yet supported. When the best available transformation is grid-only, vibeProj warns and proceeds without a datum shift — use pyproj directly for grid-based accuracy.
+For datum pairs with baked SVD corrections (e.g. NAD27 to NAD83), vibeProj achieves sub-5cm accuracy without external grid files. For other grid-only datum pairs, vibeProj warns and proceeds without a datum shift — use pyproj directly for full NTv2/NADCON grid coverage.
 
 ### Integration with CPU libraries
 
@@ -129,6 +129,7 @@ t.transform_buffers(buf.x, buf.y, buf.z, out_x=new_x, out_y=new_y, out_z=new_z)
 - **Fused NVRTC kernels** — each projection's full pipeline (axis swap, deg/rad, central meridian, projection math, scale/offset) runs in a single CUDA kernel launch via CuPy `RawKernel`
 - **NumPy fallback** — all projections work on CPU when CuPy is unavailable
 - **Helmert datum shifts** — 7/15-parameter (time-dependent) datum transformation with 3D ellipsoidal height support, runs on its own GPU kernel
+- **SVD datum corrections** — baked SVD-compressed grid corrections for sub-5cm accuracy on supported datum pairs (e.g. NAD27 to NAD83), no external grid files needed
 - **pyproj for CRS metadata** — EPSG codes resolved via pyproj, transform math is ours
 - **fp64 I/O** — input/output arrays always double precision (ADR-0002 compliant)
 - **Auto GPU detection** — queries `SingleToDoublePrecisionPerfRatio` to classify consumer vs datacenter GPU
@@ -136,6 +137,6 @@ t.transform_buffers(buf.x, buf.y, buf.z, out_x=new_x, out_y=new_y, out_z=new_z)
 ## Test
 
 ```bash
-uv run pytest                    # all tests (251 total)
+uv run pytest                    # all tests (256 total)
 uv run pytest tests/test_fused_kernels.py  # GPU kernel tests (requires CuPy)
 ```

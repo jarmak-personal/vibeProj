@@ -101,18 +101,35 @@ t = Transformer.from_crs("EPSG:4326", "EPSG:27700", epoch=2024.0)
 print(t.accuracy)  # "sub-decimeter" when 15-param rates are present
 ```
 
+### SVD-compressed datum corrections
+
+For datum pairs where Helmert alone is insufficient (e.g. NAD27 to NAD83),
+vibeProj includes baked SVD-compressed corrections fitted from public domain
+grid data (NADCON5). These are applied automatically as an additive correction
+after the Helmert shift, achieving sub-5cm accuracy without external grid files.
+
+```python
+# NAD27 → NAD83 (SVD correction applied automatically)
+t = Transformer.from_crs("EPSG:4267", "EPSG:4269")
+x, y = t.transform(-90.0, 40.0)
+print(t.accuracy)  # "sub-5cm"
+```
+
+Currently baked pairs:
+
+- **NAD27 to NAD83** (CONUS) — rank-10 SVD, P95 accuracy 0.15 cm vs pyproj
+
+For datum pairs without a baked SVD correction or Helmert parameters, vibeProj
+emits a ``RuntimeWarning`` and falls back to projection math without a datum
+shift. Results may differ from pyproj by meters to hundreds of meters in these
+cases.
+
 **Not yet supported:**
 
-- **NTv2 / NADCON grid-based shifts** — these provide sub-centimetre accuracy
-  for national datums (e.g. OSTN15 for Great Britain, NAD27-to-NAD83 in North
-  America). When the best available transformation for a cross-datum pair is
-  grid-only, vibeProj emits a ``RuntimeWarning`` and falls back to projection
-  math without a datum shift. Results may differ from pyproj by meters to
-  hundreds of meters in these cases. Use pyproj or rasterio directly if you
-  need grid-based accuracy.
-
-If no Helmert transformation is available for a cross-datum pair (grid-only
-datums), vibeProj warns and applies projection math without a datum shift.
+- **Raw NTv2 / NADCON grid loading** — vibeProj does not load external grid
+  files at runtime. Datum pairs not covered by baked SVD corrections or Helmert
+  fall back to no datum shift. Use pyproj or rasterio directly if you need
+  coverage beyond the baked pairs.
 
 ## Known limitations
 

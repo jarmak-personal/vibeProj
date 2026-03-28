@@ -1,6 +1,6 @@
 {
-  "timestamp": "2026-03-25T19:50:35Z",
-  "staged_hash": "7b24c1aa8be740ed2e2b8206804f143602f50b61b782ce1dff2112b02d9d891b",
-  "files": ["README.md"],
+  "timestamp": "2026-03-28T14:30:29Z",
+  "staged_hash": "9e42b35185e28392340a6d9c3135b9957a2e5d2fe671307d8af0bab0a0e1cea1",
+  "files": ["CLAUDE.md","README.md","docs/dev/architecture.md","docs/dev/fused-kernels.md","docs/dev/testing.md","docs/plans/cpu-integration-plan.md","docs/recipes/rasterio.md","docs/recipes/shapely.md","docs/user/api.md","docs/user/projections.md","experiments/conformal_deep_dive/FINDINGS.md","experiments/conformal_deep_dive/experiment.py","experiments/conformal_deep_dive/results.json","src/vibeproj/_datum_corrections.py","src/vibeproj/fused_kernels.py","src/vibeproj/pipeline.py","src/vibeproj/transformer.py","tests/test_datum_corrections.py","tests/test_fused_kernels.py","tools/fit_datum_corrections.py"],
   "verdict": "LAND"
 }

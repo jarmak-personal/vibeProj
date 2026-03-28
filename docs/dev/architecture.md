@@ -30,10 +30,11 @@ Transformer.from_crs("EPSG:4326", "EPSG:32631")
 | `transformer.py` | Public API. `Transformer` class with `transform()` and `transform_buffers()`. |
 | `crs.py` | CRS resolution via pyproj. Extracts projection type + parameters from EPSG codes. Maps pyproj method names to internal names via `_METHOD_MAP`. |
 | `pipeline.py` | Transform pipeline. Chains axis swap, deg/rad, central meridian, projection core, scale, offset. Contains `_try_fused()` fast-path for GPU arrays. |
-| `fused_kernels.py` | 40 CUDA kernel source strings (20 projections x fwd/inv). Compiled and cached via CuPy `RawKernel`. |
+| `fused_kernels.py` | 48+ CUDA kernel source strings (24 projections x fwd/inv, plus Helmert and SVD correction kernels). Compiled and cached via CuPy `RawKernel`. |
 | `projections/` | NumPy/CuPy element-wise implementations. Each is a `Projection` subclass with `setup()`, `forward()`, `inverse()`. |
 | `ellipsoid.py` | Reference ellipsoid definitions (WGS84, GRS80, sphere). |
 | `helmert.py` | Helmert 7/15-parameter datum transformation. `HelmertParams` dataclass, geodetic/ECEF conversion (with optional ellipsoidal height), `apply_helmert()`. Supports 3D: when z is provided, height is transformed through the ECEF intermediate. |
+| `_datum_corrections.py` | SVD-compressed datum corrections. `DatumCorrectionData` dataclass, baked coefficients (NAD27->NAD83), SVD evaluation function, lookup by datum pair. Applied after Helmert as an additive correction. |
 | `runtime.py` | GPU/CPU detection and array module selection. |
 | `gpu_detect.py` | Consumer vs datacenter GPU classification. |
 | `_ds_device_fns.py` | Double-single fp32 arithmetic CUDA device functions. |
@@ -44,6 +45,7 @@ A forward transform (geographic -> projected) executes these stages:
 
 1. **Axis swap** -- CRS-dependent. EPSG:4326 is (lat, lon); some projected CRS are (E, N).
 2. **Datum shift** -- Helmert 7/15-parameter (if cross-datum). Converts geodetic coords from source ellipsoid to destination ellipsoid via ECEF intermediate. When z (ellipsoidal height) is provided, it is included in the ECEF conversion and recovered on the destination ellipsoid. Skipped entirely when `helmert is None` (same-datum). Projection stages (3-8) are inherently 2D — z passes through unchanged.
+2b. **SVD datum correction** -- additive correction after Helmert for baked datum pairs (e.g. NAD27->NAD83). Evaluates `sum_k S[k] * lerp(U_k, lat_idx) * lerp(V_k, lon_idx)` to correct residual grid distortion. Skipped when no baked correction exists.
 3. **Degree to radian** -- `lat * pi/180`, `lon * pi/180`.
 4. **Central meridian** -- `lon -= lon_0`, wrapped to [-pi, pi].
 5. **Projection core** -- the actual math (Transverse Mercator, Lambert, etc.).

@@ -138,8 +138,9 @@ end-to-end raster reprojection time depends on pixel resampling and I/O.
 
 ## When to use this vs `rasterio.warp.reproject`
 
-- **Use rasterio** when you need full GDAL reprojection (NTv2 grid shifts,
-  geoid models, output-format writing, GDAL VRT integration).
+- **Use rasterio** when you need full GDAL reprojection (NTv2 grid shifts for
+  datum pairs without baked SVD corrections, geoid models, output-format writing,
+  GDAL VRT integration).
 - **Use vibeProj + manual resampling** when coordinate reprojection is the
   bottleneck and you want GPU acceleration. This is most impactful for large
   rasters (>10M pixels) or batch reprojection of many tiles where the

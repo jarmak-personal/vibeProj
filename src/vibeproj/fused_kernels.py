@@ -2508,3 +2508,300 @@ def fused_helmert_shift(
     if has_z:
         return out_lat, out_lon, out_h
     return out_lat, out_lon
+
+
+# ===================================================================
+# SVD datum correction kernel
+# ===================================================================
+
+_SVD_CORRECTION_SOURCE = """\
+extern "C" __global__ void __launch_bounds__(256) svd_correction(
+    const double* __restrict__ in_lat,
+    const double* __restrict__ in_lon,
+    double* __restrict__ out_lat,
+    double* __restrict__ out_lon,
+    const double* __restrict__ u_lat,
+    const double* __restrict__ s_lat,
+    const double* __restrict__ vt_lat,
+    const double* __restrict__ u_lon,
+    const double* __restrict__ s_lon,
+    const double* __restrict__ vt_lon,
+    double lat_min, double lat_scale,
+    double lon_min, double lon_scale,
+    int n_lat_grid, int n_lon_grid,
+    int rank,
+    int n,
+    int negate
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+
+    double lat = in_lat[idx];
+    double lon = in_lon[idx];
+
+    /* Fractional grid indices */
+    double lat_idx = (lat - lat_min) * lat_scale;
+    double lon_idx = (lon - lon_min) * lon_scale;
+
+    /* Clamp to valid grid range */
+    if (lat_idx < 0.0) lat_idx = 0.0;
+    if (lat_idx > (double)(n_lat_grid - 1)) lat_idx = (double)(n_lat_grid - 1);
+    if (lon_idx < 0.0) lon_idx = 0.0;
+    if (lon_idx > (double)(n_lon_grid - 1)) lon_idx = (double)(n_lon_grid - 1);
+
+    /* Integer neighbors and interpolation fractions */
+    int i0 = (int)lat_idx;
+    int j0 = (int)lon_idx;
+    int i1 = i0 + 1;
+    int j1 = j0 + 1;
+    if (i1 >= n_lat_grid) i1 = n_lat_grid - 1;
+    if (j1 >= n_lon_grid) j1 = n_lon_grid - 1;
+    double t = lat_idx - (double)i0;   /* lat interpolation fraction */
+    double s = lon_idx - (double)j0;   /* lon interpolation fraction */
+
+    /* Accumulate SVD correction: sum_k S[k] * lerp(U_k, lat) * lerp(V_k, lon) */
+    double dlat = 0.0;
+    double dlon = 0.0;
+
+    for (int k = 0; k < rank; k++) {
+        int row_lat = k * n_lat_grid;
+        int row_lon = k * n_lon_grid;
+
+        /* Lat component: lerp U_lat_k at lat_idx, lerp Vt_lat_k at lon_idx */
+        double u_lat_interp = (1.0 - t) * u_lat[row_lat + i0] + t * u_lat[row_lat + i1];
+        double v_lat_interp = (1.0 - s) * vt_lat[row_lon + j0] + s * vt_lat[row_lon + j1];
+        dlat += s_lat[k] * u_lat_interp * v_lat_interp;
+
+        /* Lon component: lerp U_lon_k at lat_idx, lerp Vt_lon_k at lon_idx */
+        double u_lon_interp = (1.0 - t) * u_lon[row_lat + i0] + t * u_lon[row_lat + i1];
+        double v_lon_interp = (1.0 - s) * vt_lon[row_lon + j0] + s * vt_lon[row_lon + j1];
+        dlon += s_lon[k] * u_lon_interp * v_lon_interp;
+    }
+
+    /* Convert arcseconds to degrees */
+    dlat *= (1.0 / 3600.0);
+    dlon *= (1.0 / 3600.0);
+
+    /* Apply correction (add or subtract) */
+    if (negate) {
+        out_lat[idx] = lat - dlat;
+        out_lon[idx] = lon - dlon;
+    } else {
+        out_lat[idx] = lat + dlat;
+        out_lon[idx] = lon + dlon;
+    }
+}
+"""
+
+_svd_kernel_cache = None
+_svd_kernel_lock = threading.Lock()
+
+
+def _get_svd_kernel():
+    """Get or compile the SVD datum correction kernel (thread-safe)."""
+    global _svd_kernel_cache
+    if _svd_kernel_cache is not None:
+        return _svd_kernel_cache
+
+    import cupy as cp
+
+    with _svd_kernel_lock:
+        if _svd_kernel_cache is not None:
+            return _svd_kernel_cache
+        kernel = cp.RawKernel(_SVD_CORRECTION_SOURCE, "svd_correction")
+        _svd_kernel_cache = kernel
+        return kernel
+
+
+def compile_svd_kernel():
+    """Pre-compile the SVD datum correction kernel.
+
+    Call during warm-up to avoid first-use compilation latency.
+    """
+    try:
+        import cupy  # noqa: F401
+    except (ImportError, ModuleNotFoundError):
+        return
+    _get_svd_kernel()
+
+
+# Device array cache for SVD coefficients.
+# Keyed by id(DatumCorrectionData).  We store a strong reference to the
+# correction object alongside the cached arrays so the id() cannot be
+# recycled by the GC while the cache entry exists.
+_svd_device_cache: dict[int, tuple] = {}
+_svd_device_cache_lock = threading.Lock()
+
+
+def _get_svd_device_arrays(correction):
+    """Lazily transfer SVD coefficients to device (thread-safe, cached).
+
+    Returns a tuple of 6 CuPy arrays:
+        (u_lat_d, s_lat_d, vt_lat_d, u_lon_d, s_lon_d, vt_lon_d)
+    All are contiguous fp64 arrays.
+    """
+    key = id(correction)
+    cached = _svd_device_cache.get(key)
+    if cached is not None:
+        return cached[1]  # (strong_ref, arrays) -> arrays
+
+    import cupy as cp
+
+    with _svd_device_cache_lock:
+        cached = _svd_device_cache.get(key)
+        if cached is not None:
+            return cached[1]
+
+        # Flatten rank x n into contiguous 1D arrays (row-major)
+        u_lat_flat = np.array([v for row in correction.u_lat for v in row], dtype=np.float64)
+        vt_lat_flat = np.array([v for row in correction.vt_lat for v in row], dtype=np.float64)
+        s_lat_flat = np.array(correction.s_lat, dtype=np.float64)
+
+        u_lon_flat = np.array([v for row in correction.u_lon for v in row], dtype=np.float64)
+        vt_lon_flat = np.array([v for row in correction.vt_lon for v in row], dtype=np.float64)
+        s_lon_flat = np.array(correction.s_lon, dtype=np.float64)
+
+        arrays = (
+            cp.asarray(u_lat_flat),
+            cp.asarray(s_lat_flat),
+            cp.asarray(vt_lat_flat),
+            cp.asarray(u_lon_flat),
+            cp.asarray(s_lon_flat),
+            cp.asarray(vt_lon_flat),
+        )
+        # Store (strong_ref, arrays) to pin the correction object in memory
+        _svd_device_cache[key] = (correction, arrays)
+        return arrays
+
+
+def fused_svd_correction(
+    lat,
+    lon,
+    correction_data,
+    xp,
+    *,
+    negate=False,
+    out_lat=None,
+    out_lon=None,
+    stream=None,
+):
+    """Execute SVD datum correction on GPU.
+
+    Parameters
+    ----------
+    lat, lon : cupy.ndarray
+        Geographic coordinates in degrees.
+    correction_data : DatumCorrectionData
+        SVD-compressed datum correction coefficients.
+    xp : module
+        Array module (must be cupy).
+    negate : bool
+        If True, subtract the correction (inverse direction).
+    out_lat, out_lon : cupy.ndarray, optional
+        Pre-allocated output arrays (zero-copy support).
+    stream : cupy.cuda.Stream, optional
+        CUDA stream for async execution.
+
+    Returns
+    -------
+    (out_lat, out_lon) or None if not on GPU / compilation fails.
+    """
+    try:
+        import cupy as cp
+    except ImportError:
+        return None
+
+    if xp is not cp:
+        return None
+
+    try:
+        kernel = _get_svd_kernel()
+    except Exception:
+        return None
+
+    from vibeproj.exceptions import CoordinateValidationError
+
+    n = lat.size
+    if lon.size != n:
+        raise CoordinateValidationError(
+            f"lat and lon must have the same size, got {n} and {lon.size}"
+        )
+
+    if not lat.flags.c_contiguous:
+        lat = cp.ascontiguousarray(lat)
+    if not lon.flags.c_contiguous:
+        lon = cp.ascontiguousarray(lon)
+
+    if lat.dtype != np.float64:
+        raise CoordinateValidationError(
+            f"lat must be float64 (kernel reads double*), got {lat.dtype}"
+        )
+    if lon.dtype != np.float64:
+        raise CoordinateValidationError(
+            f"lon must be float64 (kernel reads double*), got {lon.dtype}"
+        )
+
+    if out_lat is None:
+        out_lat = cp.empty(n, dtype=cp.float64)
+    elif out_lat.dtype != np.float64:
+        raise CoordinateValidationError(
+            f"out_lat must be float64 (kernel writes double*), got {out_lat.dtype}"
+        )
+    if out_lat.size < n:
+        raise CoordinateValidationError(
+            f"out_lat too small: need at least {n} elements, got {out_lat.size}"
+        )
+
+    if out_lon is None:
+        out_lon = cp.empty(n, dtype=cp.float64)
+    elif out_lon.dtype != np.float64:
+        raise CoordinateValidationError(
+            f"out_lon must be float64 (kernel writes double*), got {out_lon.dtype}"
+        )
+    if out_lon.size < n:
+        raise CoordinateValidationError(
+            f"out_lon too small: need at least {n} elements, got {out_lon.size}"
+        )
+
+    # Get device arrays (lazy transfer, cached by correction_data identity)
+    u_lat_d, s_lat_d, vt_lat_d, u_lon_d, s_lon_d, vt_lon_d = _get_svd_device_arrays(correction_data)
+
+    # Pre-compute grid scaling factors
+    lat_min, lat_max, lon_min, lon_max = correction_data.bbox
+    n_lat = correction_data.n_lat
+    n_lon = correction_data.n_lon
+    lat_scale = (n_lat - 1) / (lat_max - lat_min)
+    lon_scale = (n_lon - 1) / (lon_max - lon_min)
+
+    block = 256
+    grid = max(1, (n + block - 1) // block)
+
+    args = (
+        lat,
+        lon,
+        out_lat,
+        out_lon,
+        u_lat_d,
+        s_lat_d,
+        vt_lat_d,
+        u_lon_d,
+        s_lon_d,
+        vt_lon_d,
+        np.float64(lat_min),
+        np.float64(lat_scale),
+        np.float64(lon_min),
+        np.float64(lon_scale),
+        np.int32(n_lat),
+        np.int32(n_lon),
+        np.int32(correction_data.rank),
+        np.int32(n),
+        np.int32(1 if negate else 0),
+    )
+
+    if stream is not None:
+        with stream:
+            kernel((grid,), (block,), args)
+    else:
+        kernel((grid,), (block,), args)
+
+    return out_lat, out_lon

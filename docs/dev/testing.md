@@ -27,6 +27,7 @@ uv run pytest tests/test_transformer.py::test_wgs84_to_utm_one_point
 | `tests/test_transformer.py` | CPU-path transforms for all 20 projections | No |
 | `tests/test_fused_kernels.py` | GPU fused kernel correctness | Yes |
 | `tests/test_helmert.py` | Helmert datum shift math, extraction, cross-datum integration | No |
+| `tests/test_datum_corrections.py` | SVD datum corrections: coefficient evaluation, accuracy vs pyproj, fallback chain | No |
 
 GPU tests are automatically skipped when CuPy is not available
 (`pytest.importorskip("cupy")`).
@@ -114,6 +115,7 @@ def test_my_roundtrip():
 | Cross-datum vs pyproj | 10 m | Helmert variant differences; pyproj may use grid shifts |
 | Helmert roundtrip (fwd+inv) | 1e-4 degrees | Linearized rotation matrix is approximate |
 | Helmert z roundtrip (fwd+inv) | 0.02 m | ~14mm due to linearized rotation matrix |
+| SVD correction vs pyproj | 0.05 m | Sub-5cm P95 over baked coverage area |
 
 ## Linting
 

@@ -22,6 +22,15 @@ GPU-accelerated coordinate projection library. 24 projections, each with a fused
   ECEF intermediate — height changes when shifting between ellipsoids. When `z=None`, exact 2D behavior
   is preserved with zero overhead. The CUDA kernel uses a `has_z` flag (one int comparison per thread).
   Zero overhead for same-datum transforms (`helmert=None`).
+- **SVD datum corrections** (`src/vibeproj/_datum_corrections.py`) — SVD-compressed residual
+  corrections that bridge the gap between Helmert and full grid-based shifts (NTv2/NADCON).
+  Baked coefficients are fitted offline from NADCON5 (public domain) via pyproj sampling.
+  Applied as an additive correction after Helmert: `correction(lat, lon) = sum_k S[k] *
+  lerp(U_k, lat_idx) * lerp(V_k, lon_idx)`. First baked pair: NAD27->NAD83 (rank-10,
+  100x150 grid, ~5,000 floats per component, P95 accuracy 0.15 cm over CONUS). Runs on a
+  fused CUDA kernel (`svd_correction` in fused_kernels.py) or NumPy. Dispatch:
+  Helmert (if available) + SVD (if baked pair exists); if neither, warning.
+  Fitting tool: `tools/fit_datum_corrections.py`.
 - **GPU detection** (`src/vibeproj/gpu_detect.py`) — queries `SingleToDoublePrecisionPerfRatio` to classify
   consumer (1:64) vs datacenter (1:2) GPU. Auto precision always uses fp64 (projection math is SFU-bound).
 - **Double-single arithmetic** (`src/vibeproj/_ds_device_fns.py`) — experimental ds fp32 pair arithmetic
@@ -46,7 +55,9 @@ GPU-accelerated coordinate projection library. 24 projections, each with a fused
 - Tests validate against pyproj. GPU tests compare fused kernel output against NumPy xp path.
 - Cross-datum transforms default to `datum_shift="accurate"` (15-param time-dependent Helmert, sub-decimeter)
   when rate parameters are available from pyproj and an epoch can be resolved. Falls back to 7-param (~1--5m).
-  Use `datum_shift="fast"` to skip rate evaluation. Grid-based shifts (NTv2) not yet supported.
+  Use `datum_shift="fast"` to skip rate evaluation. SVD-compressed corrections replace
+  grid-based shifts (NTv2/NADCON) for baked datum pairs (sub-5cm). Raw NTv2 grid loading
+  not yet supported.
 - `transform_buffers()` is the zero-copy API for vibeSpatial integration (pre-allocated output arrays).
 
 ## Adding a new projection
@@ -60,6 +71,19 @@ GPU-accelerated coordinate projection library. 24 projections, each with a fused
    - Add to `_SOURCE_MAP`, `_SUPPORTED`, and `fused_transform()` arg packing
 6. Add tests in `tests/test_fused_kernels.py`
 
+## Adding a new datum correction
+
+Use the offline fitting tool to generate SVD coefficients for a new datum pair:
+
+```bash
+uv run python tools/fit_datum_corrections.py \
+    --src-crs EPSG:4267 --dst-crs EPSG:4269 \
+    --n-lat 100 --n-lon 150 --rank 10 --target-accuracy 0.05
+```
+
+This samples pyproj at a dense grid, subtracts our Helmert prediction, and fits a truncated SVD
+to the residual. Paste the output `DatumCorrectionData` into `_datum_corrections.py`.
+
 ## Running tests
 
 ```bash
@@ -67,6 +91,7 @@ uv run pytest                              # all tests
 uv run pytest tests/test_fused_kernels.py  # GPU kernel tests (needs CuPy + GPU)
 uv run pytest tests/test_transformer.py    # CPU xp path tests
 uv run pytest tests/test_helmert.py        # Helmert datum shift + z-dimension tests
+uv run pytest tests/test_datum_corrections.py  # SVD datum correction tests
 uv run pytest tests/test_compat.py         # Shapely/GeoPandas compat (needs geopandas, shapely)
 ```
 
@@ -75,7 +100,11 @@ uv run pytest tests/test_compat.py         # Shapely/GeoPandas compat (needs geo
 ```python
 from vibeproj import Transformer
 
-# Default: "accurate" — uses 15-param time-dependent Helmert when available
+# Default: "accurate" — uses SVD correction + Helmert when available
+t = Transformer.from_crs("EPSG:4267", "EPSG:4269")  # NAD27 → NAD83
+t.accuracy  # "sub-5cm" (SVD correction baked for this pair)
+
+# Cross-datum without SVD: falls back to Helmert
 t = Transformer.from_crs("EPSG:4326", "EPSG:27700")
 t.accuracy  # "sub-meter" or "sub-decimeter" depending on available params
 
@@ -87,6 +116,9 @@ t.accuracy  # "sub-decimeter" when 15-param rates are present
 t = Transformer.from_crs(src_crs, dst_crs, datum_shift="fast")
 t.accuracy  # "sub-meter"
 ```
+
+Accuracy tiers (highest to lowest): sub-5cm (SVD correction) > sub-decimeter (15-param Helmert + epoch) >
+sub-meter (7-param Helmert) > degraded (no datum shift).
 
 Epoch resolution priority: user-provided `epoch=` > source CRS coordinate epoch > no epoch (7-param fallback).
 

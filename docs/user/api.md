@@ -126,9 +126,10 @@ x, y = pipe.transform(lat_array, lon_array, np)
 Read-only property indicating the accuracy classification of this transform.
 
 - `"sub-millimeter"` -- same datum, projection math only.
+- `"sub-5cm"` -- cross-datum with SVD-compressed grid correction (e.g. NAD27 to NAD83).
 - `"sub-decimeter"` -- cross-datum with 15-param time-dependent Helmert at a known epoch.
 - `"sub-meter"` -- cross-datum with Helmert 7-parameter shift applied (~1--5m).
-- `"degraded — no datum shift applied"` -- cross-datum, no Helmert available (grid-only).
+- `"degraded — no datum shift applied"` -- cross-datum, no Helmert or SVD correction available.
 
 ```python
 t = Transformer.from_crs("EPSG:4326", "EPSG:32631")

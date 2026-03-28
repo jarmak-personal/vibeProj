@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 from vibeproj.projections import get_projection
 
 if TYPE_CHECKING:
+    from vibeproj._datum_corrections import DatumCorrectionData
     from vibeproj.crs import ProjectionParams
     from vibeproj.helmert import HelmertParams
 
@@ -162,6 +163,51 @@ def _apply_datum_shift(
         return rlat, rlon
 
 
+def _apply_svd_correction(
+    lat,
+    lon,
+    correction: DatumCorrectionData,
+    xp,
+    *,
+    negate: bool = False,
+    out_lat=None,
+    out_lon=None,
+    stream=None,
+):
+    """Apply SVD datum correction. Tries fused GPU kernel first, falls back to xp."""
+    cp = _get_cupy()
+    if cp is not None and xp is cp:
+        try:
+            from vibeproj.fused_kernels import fused_svd_correction
+
+            result = fused_svd_correction(
+                lat,
+                lon,
+                correction,
+                xp,
+                negate=negate,
+                out_lat=out_lat,
+                out_lon=out_lon,
+                stream=stream,
+            )
+            if result is not None:
+                return result
+        except ImportError:
+            pass
+
+    from vibeproj._datum_corrections import apply_svd_correction
+
+    return apply_svd_correction(
+        lat,
+        lon,
+        correction,
+        xp,
+        negate=negate,
+        out_lat=out_lat,
+        out_lon=out_lon,
+    )
+
+
 class TransformPipeline:
     """Executes a coordinate transformation between two CRS.
 
@@ -176,10 +222,14 @@ class TransformPipeline:
         dst_params: ProjectionParams,
         *,
         helmert: HelmertParams | None = None,
+        svd_correction: DatumCorrectionData | None = None,
+        svd_negate: bool = False,
     ):
         self.src = src_params
         self.dst = dst_params
         self._helmert = helmert
+        self._svd_correction = svd_correction
+        self._svd_negate = svd_negate
 
         # Axis order flags for input/output swap
         self.src_north_first = src_params.north_first
@@ -269,20 +319,58 @@ class TransformPipeline:
                 stream=stream,
             )
         else:
-            # longlat -> longlat: apply datum shift if needed, otherwise identity
-            if self._helmert is not None:
-                result = _apply_datum_shift(
-                    x,
-                    y,
-                    self._helmert,
-                    xp,
-                    h=z,
-                    out_lat=out_x,
-                    out_lon=out_y,
-                    out_h=out_z,
-                    stream=stream,
-                )
-                return result
+            # longlat -> longlat: apply datum shift + SVD if needed, otherwise identity
+            if self._helmert is not None or self._svd_correction is not None:
+                # Resolve axis order: Helmert and SVD expect (lat, lon)
+                if self.src_north_first:
+                    lat, lon = x, y
+                else:
+                    lon, lat = x, y
+
+                z_out = z
+                if self._helmert is not None:
+                    result = _apply_datum_shift(
+                        lat,
+                        lon,
+                        self._helmert,
+                        xp,
+                        h=z,
+                        stream=stream,
+                    )
+                    if z is not None:
+                        lat, lon, z_out = result
+                    else:
+                        lat, lon = result
+
+                if self._svd_correction is not None:
+                    lat, lon = _apply_svd_correction(
+                        lat,
+                        lon,
+                        self._svd_correction,
+                        xp,
+                        negate=self._svd_negate,
+                        stream=stream,
+                    )
+
+                # Restore output axis order
+                if self.dst_north_first:
+                    rx, ry = lat, lon
+                else:
+                    rx, ry = lon, lat
+
+                if out_x is not None:
+                    out_x[:] = rx
+                    rx = out_x
+                if out_y is not None:
+                    out_y[:] = ry
+                    ry = out_y
+                if z is not None:
+                    if out_z is not None:
+                        out_z[:] = z_out
+                        z_out = out_z
+                    return rx, ry, z_out
+                return rx, ry
+
             # Identity: write into pre-allocated buffers when provided
             if out_x is not None:
                 out_x[:] = x
@@ -317,8 +405,8 @@ class TransformPipeline:
         z is transformed through Helmert when present, then passed through projection.
         """
         # Fast path: fused CUDA kernel (single launch, no intermediate arrays)
-        # Skipped when datum shift is needed (fused kernels don't include Helmert).
-        if self._helmert is None:
+        # Skipped when datum shift or SVD correction is needed.
+        if self._helmert is None and self._svd_correction is None:
             fused = _try_fused(
                 arg1,
                 arg2,
@@ -353,9 +441,20 @@ class TransformPipeline:
             else:
                 lat, lon = result
 
-            # After Helmert, try fused projection kernel on the shifted coords.
-            # Helmert output is always (lat, lon) = north_first=True.
-            # This benefits from L2 cache residency of the Helmert output.
+        # SVD correction: additive correction on geographic coords (degrees)
+        if self._svd_correction is not None:
+            lat, lon = _apply_svd_correction(
+                lat,
+                lon,
+                self._svd_correction,
+                xp,
+                negate=self._svd_negate,
+                stream=stream,
+            )
+
+        # After Helmert/SVD, try fused projection kernel on the shifted coords.
+        # Helmert/SVD output is always (lat, lon) = north_first=True.
+        if self._helmert is not None or self._svd_correction is not None:
             fused = _try_fused(
                 lat,
                 lon,
@@ -363,7 +462,7 @@ class TransformPipeline:
                 projection_name=self.projection.name,
                 direction="forward",
                 computed=self.computed,
-                src_north_first=True,  # Helmert always outputs (lat, lon)
+                src_north_first=True,  # Helmert/SVD always outputs (lat, lon)
                 dst_north_first=self.dst_north_first,
                 out_x=out_x,
                 out_y=out_y,
@@ -436,8 +535,8 @@ class TransformPipeline:
         z passes through projection inverse (2D), then is transformed by Helmert.
         """
         # Fast path: fused CUDA kernel
-        if self._helmert is None:
-            # No datum shift: run fused inverse with final output axis order.
+        if self._helmert is None and self._svd_correction is None:
+            # No datum shift or SVD: run fused inverse with final output axis order.
             fused = _try_fused(
                 arg1,
                 arg2,
@@ -456,9 +555,9 @@ class TransformPipeline:
                 if z is not None:
                     return (*fused, z)
                 return fused
-        else:
-            # With datum shift: fused inverse -> Helmert -> axis reorder.
-            # Fused inverse outputs (lat, lon) for Helmert input.
+        elif self._helmert is not None or self._svd_correction is not None:
+            # With datum shift/SVD: fused inverse -> SVD -> Helmert -> axis reorder.
+            # Fused inverse outputs (lat, lon) for SVD/Helmert input.
             fused = _try_fused(
                 arg1,
                 arg2,
@@ -467,25 +566,36 @@ class TransformPipeline:
                 direction="inverse",
                 computed=self.computed,
                 src_north_first=self.src_north_first,
-                dst_north_first=True,  # Helmert expects (lat, lon)
+                dst_north_first=True,  # SVD/Helmert expects (lat, lon)
                 precision=precision,
                 stream=stream,
             )
             if fused is not None:
                 lat, lon = fused
                 z_out = z
-                result = _apply_datum_shift(
-                    lat,
-                    lon,
-                    self._helmert,
-                    xp,
-                    h=z,
-                    stream=stream,
-                )
-                if z is not None:
-                    lat, lon, z_out = result
-                else:
-                    lat, lon = result
+                # SVD correction (before Helmert in inverse direction)
+                if self._svd_correction is not None:
+                    lat, lon = _apply_svd_correction(
+                        lat,
+                        lon,
+                        self._svd_correction,
+                        xp,
+                        negate=self._svd_negate,
+                        stream=stream,
+                    )
+                if self._helmert is not None:
+                    result = _apply_datum_shift(
+                        lat,
+                        lon,
+                        self._helmert,
+                        xp,
+                        h=z,
+                        stream=stream,
+                    )
+                    if z is not None:
+                        lat, lon, z_out = result
+                    else:
+                        lat, lon = result
                 if self.dst_north_first:
                     rx, ry = lat, lon
                 else:
@@ -529,6 +639,17 @@ class TransformPipeline:
         # Convert to degrees
         lat = phi * RAD_TO_DEG
         lon = lam * RAD_TO_DEG
+
+        # SVD correction (before Helmert in inverse direction)
+        if self._svd_correction is not None:
+            lat, lon = _apply_svd_correction(
+                lat,
+                lon,
+                self._svd_correction,
+                xp,
+                negate=self._svd_negate,
+                stream=stream,
+            )
 
         # Datum shift: transform geographic coords (and z) to destination ellipsoid
         z_out = z
@@ -608,6 +729,17 @@ class TransformPipeline:
                 lat, lon, z_out = result
             else:
                 lat, lon = result
+
+        # Step 2b: SVD correction (after Helmert, before forward projection)
+        if self._svd_correction is not None:
+            lat, lon = _apply_svd_correction(
+                lat,
+                lon,
+                self._svd_correction,
+                xp,
+                negate=self._svd_negate,
+                stream=stream,
+            )
 
         # Step 3: geographic -> destination projected (may use fused forward kernel)
         # z passes through unchanged (projection is 2D)

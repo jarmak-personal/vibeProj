@@ -112,8 +112,9 @@ batch_2 = reproject_geometries(geoms_b, "EPSG:4326", "EPSG:27700", transformer=t
 ## Cross-datum transforms
 
 When the source and destination CRS use different datums, vibeProj applies a
-Helmert datum shift automatically. Control accuracy with `datum_shift` and
-`epoch`:
+Helmert datum shift automatically, plus an SVD correction when a baked pair is
+available (e.g. NAD27 to NAD83 for sub-5cm accuracy). Control accuracy with
+`datum_shift` and `epoch`:
 
 ```python
 # Default: accurate (15-param time-dependent Helmert when available)

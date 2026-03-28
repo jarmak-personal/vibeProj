@@ -114,17 +114,53 @@ class Transformer:
                         self._helmert = helmert_raw
                 else:
                     self._helmert = helmert_raw
-            if self._helmert is None and helmert_raw is None:
-                # No Helmert available (grid-only datum shift)
-                src_datum = src_crs.datum.name if src_crs.datum else "unknown"
-                dst_datum = dst_crs.datum.name if dst_crs.datum else "unknown"
-                warnings.warn(
-                    f"Source and destination CRS use different datums "
-                    f"({src_datum} \u2192 {dst_datum}). No Helmert transformation "
-                    f"available \u2014 grid-based shifts (NTv2) are not yet supported. "
-                    f"Results may differ from pyproj by meters to hundreds of meters.",
-                    stacklevel=2,
-                )
+
+        # SVD-compressed datum correction lookup
+        self._svd_correction = None
+        self._svd_negate = False
+        if self._cross_datum:
+            from vibeproj._datum_corrections import (
+                get_datum_correction,
+                is_reverse_direction,
+            )
+
+            # Build authority code strings for lookup
+            src_epsg_code = src_crs.to_epsg()
+            dst_epsg_code = dst_crs.to_epsg()
+            if src_epsg_code is not None and dst_epsg_code is not None:
+                src_auth = f"EPSG:{src_epsg_code}"
+                dst_auth = f"EPSG:{dst_epsg_code}"
+                # Check geographic CRS codes too (strip projection)
+                src_geo = src_crs.geodetic_crs
+                dst_geo = dst_crs.geodetic_crs
+                src_geo_epsg = src_geo.to_epsg() if src_geo else None
+                dst_geo_epsg = dst_geo.to_epsg() if dst_geo else None
+
+                # Try projected codes first, then geographic codes
+                correction = get_datum_correction(src_auth, dst_auth)
+                if correction is None and src_geo_epsg and dst_geo_epsg:
+                    src_geo_auth = f"EPSG:{src_geo_epsg}"
+                    dst_geo_auth = f"EPSG:{dst_geo_epsg}"
+                    correction = get_datum_correction(src_geo_auth, dst_geo_auth)
+                    if correction is not None:
+                        self._svd_negate = is_reverse_direction(src_geo_auth, dst_geo_auth)
+                else:
+                    if correction is not None:
+                        self._svd_negate = is_reverse_direction(src_auth, dst_auth)
+
+                self._svd_correction = correction
+
+        if self._cross_datum and self._helmert is None and self._svd_correction is None:
+            # No Helmert or SVD correction available (grid-only datum shift)
+            src_datum = src_crs.datum.name if src_crs.datum else "unknown"
+            dst_datum = dst_crs.datum.name if dst_crs.datum else "unknown"
+            warnings.warn(
+                f"Source and destination CRS use different datums "
+                f"({src_datum} \u2192 {dst_datum}). No Helmert transformation "
+                f"available \u2014 grid-based shifts (NTv2) are not yet supported. "
+                f"Results may differ from pyproj by meters to hundreds of meters.",
+                stacklevel=2,
+            )
 
         # always_xy=True forces (x, y) = (lon, lat) / (easting, northing) order,
         # matching shapely/geopandas conventions regardless of CRS native axis order.
@@ -132,7 +168,13 @@ class Transformer:
             src_params = dataclasses.replace(src_params, north_first=False)
             dst_params = dataclasses.replace(dst_params, north_first=False)
 
-        self._pipeline = TransformPipeline(src_params, dst_params, helmert=self._helmert)
+        self._pipeline = TransformPipeline(
+            src_params,
+            dst_params,
+            helmert=self._helmert,
+            svd_correction=self._svd_correction,
+            svd_negate=self._svd_negate,
+        )
         self._src_params = src_params
         self._dst_params = dst_params
         # Build the inverse pipeline lazily (protected by lock for thread safety)
@@ -202,12 +244,15 @@ class Transformer:
         -------
         str
             "sub-millimeter" — same datum, projection math only.
+            "sub-5cm" — cross-datum with SVD-compressed grid correction.
             "sub-decimeter" — cross-datum with 15-param time-dependent Helmert
             evaluated at a known epoch.
             "sub-meter" — cross-datum with 7-param Helmert.
             "degraded — no datum shift applied" — different datums; results
             may differ from pyproj by meters to hundreds of meters.
         """
+        if self._svd_correction is not None:
+            return "sub-5cm"
         if self._cross_datum and self._helmert is None:
             return "degraded \u2014 no datum shift applied"
         if self._cross_datum and self._helmert is not None:
@@ -237,6 +282,10 @@ class Transformer:
             from vibeproj.fused_kernels import compile_helmert_kernel
 
             compile_helmert_kernel()
+        if self._svd_correction is not None:
+            from vibeproj.fused_kernels import compile_svd_kernel
+
+            compile_svd_kernel()
 
     def __getstate__(self) -> dict[str, Any]:
         return {
@@ -351,7 +400,11 @@ class Transformer:
                     if self._inv_pipeline is None:
                         inv_helmert = self._helmert.inverted() if self._helmert else None
                         self._inv_pipeline = TransformPipeline(
-                            self._dst_params, self._src_params, helmert=inv_helmert
+                            self._dst_params,
+                            self._src_params,
+                            helmert=inv_helmert,
+                            svd_correction=self._svd_correction,
+                            svd_negate=not self._svd_negate,
                         )
             result = self._inv_pipeline.transform(x, y, xp, z=z_pipeline)
 
@@ -475,7 +528,11 @@ class Transformer:
             if self._inv_pipeline is None:
                 inv_helmert = self._helmert.inverted() if self._helmert else None
                 self._inv_pipeline = TransformPipeline(
-                    self._dst_params, self._src_params, helmert=inv_helmert
+                    self._dst_params,
+                    self._src_params,
+                    helmert=inv_helmert,
+                    svd_correction=self._svd_correction,
+                    svd_negate=not self._svd_negate,
                 )
             pipeline = self._inv_pipeline
 
@@ -671,7 +728,11 @@ class Transformer:
                     if self._inv_pipeline is None:
                         inv_helmert = self._helmert.inverted() if self._helmert else None
                         self._inv_pipeline = TransformPipeline(
-                            self._dst_params, self._src_params, helmert=inv_helmert
+                            self._dst_params,
+                            self._src_params,
+                            helmert=inv_helmert,
+                            svd_correction=self._svd_correction,
+                            svd_negate=not self._svd_negate,
                         )
             pipeline = self._inv_pipeline
 

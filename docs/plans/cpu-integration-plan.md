@@ -208,10 +208,11 @@ Expected improvement: **~2.4x throughput** (1.3ms/chunk amortized vs 3.05ms/chun
 
 ### Near-Term
 
-- [ ] **NTv2 grid shift support**
-  - Required for Canadian (NAD27->NAD83), Australian (GDA94->GDA2020), European datums
-  - Load NTv2 grids to GPU, implement bilinear interpolation kernel
-  - Eliminates the main accuracy gap vs pyproj
+- [ ] **Expand SVD baked datum corrections**
+  - NAD27->NAD83 (CONUS) is already baked (sub-5cm via SVD rank-10)
+  - Next pairs: GDA94->GDA2020 (Australia), OSTN15 (Great Britain), European datums
+  - Use `tools/fit_datum_corrections.py` to fit new pairs from pyproj sampling
+  - Raw NTv2 grid loading remains out of scope (SVD approach preferred)
 
 - [ ] **cuDF/GeoArrow integration (separate package: `vibeproj-cudf`)**
   - Read geometry columns from cuDF GeoDataFrame
@@ -283,7 +284,7 @@ Expected improvement: **~2.4x throughput** (1.3ms/chunk amortized vs 3.05ms/chun
 
 | Library | Projections | GPU | Datum Shifts | Status |
 |---------|-------------|-----|-------------|--------|
-| **vibeProj** | 24 | Yes (NVRTC) | 7+15 param Helmert | Active |
+| **vibeProj** | 24 | Yes (NVRTC) | 7+15 param Helmert + SVD corrections | Active |
 | cuProj (RAPIDS) | 1 (UTM only) | Yes (C++/CUDA) | None | Maintenance mode |
 | pyproj | All PROJ | No | Full (incl. NTv2, geoid) | Active, CPU-only |
 | rasterio.warp | All PROJ | No | Full (via GDAL) | Active, CPU-only |

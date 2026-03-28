@@ -733,3 +733,103 @@ def test_aeqd_fused_roundtrip():
         lat_0=45.0,
         atol=1e-7,
     )
+
+
+# ---------------------------------------------------------------------------
+# SVD datum correction kernel
+# ---------------------------------------------------------------------------
+
+
+def test_svd_kernel_compiles():
+    from vibeproj.fused_kernels import compile_svd_kernel
+
+    compile_svd_kernel()  # should not raise
+
+
+def test_svd_kernel_matches_xp():
+    """Fused SVD correction kernel matches NumPy xp path."""
+    from vibeproj._datum_corrections import apply_svd_correction, get_datum_correction
+    from vibeproj.fused_kernels import fused_svd_correction
+
+    correction = get_datum_correction("EPSG:4267", "EPSG:4269")
+    assert correction is not None
+
+    # Test points well within CONUS
+    lat_np = np.array([35.0, 40.0, 45.0, 30.0, 42.0], dtype=np.float64)
+    lon_np = np.array([-100.0, -90.0, -80.0, -110.0, -75.0], dtype=np.float64)
+
+    # NumPy xp path (reference)
+    ref_lat, ref_lon = apply_svd_correction(lat_np, lon_np, correction, np)
+
+    # GPU fused kernel
+    lat_gpu = cp.asarray(lat_np)
+    lon_gpu = cp.asarray(lon_np)
+    out_lat, out_lon = fused_svd_correction(lat_gpu, lon_gpu, correction, cp)
+
+    assert_allclose(cp.asnumpy(out_lat), ref_lat, atol=1e-12)
+    assert_allclose(cp.asnumpy(out_lon), ref_lon, atol=1e-12)
+
+
+def test_svd_kernel_negate():
+    """Negate flag produces opposite correction."""
+    from vibeproj._datum_corrections import get_datum_correction
+    from vibeproj.fused_kernels import fused_svd_correction
+
+    correction = get_datum_correction("EPSG:4267", "EPSG:4269")
+    lat = cp.array([40.0], dtype=cp.float64)
+    lon = cp.array([-90.0], dtype=cp.float64)
+
+    fwd_lat, fwd_lon = fused_svd_correction(lat, lon, correction, cp, negate=False)
+    inv_lat, inv_lon = fused_svd_correction(lat, lon, correction, cp, negate=True)
+
+    dlat_fwd = cp.asnumpy(fwd_lat)[0] - 40.0
+    dlat_inv = cp.asnumpy(inv_lat)[0] - 40.0
+    assert_allclose(dlat_fwd, -dlat_inv, atol=1e-15)
+
+    dlon_fwd = cp.asnumpy(fwd_lon)[0] - (-90.0)
+    dlon_inv = cp.asnumpy(inv_lon)[0] - (-90.0)
+    assert_allclose(dlon_fwd, -dlon_inv, atol=1e-15)
+
+
+def test_svd_kernel_preallocated():
+    """Pre-allocated output buffers work correctly."""
+    from vibeproj._datum_corrections import get_datum_correction
+    from vibeproj.fused_kernels import fused_svd_correction
+
+    correction = get_datum_correction("EPSG:4267", "EPSG:4269")
+    lat = cp.array([35.0, 40.0, 45.0], dtype=cp.float64)
+    lon = cp.array([-100.0, -90.0, -80.0], dtype=cp.float64)
+    out_lat = cp.empty(3, dtype=cp.float64)
+    out_lon = cp.empty(3, dtype=cp.float64)
+
+    result = fused_svd_correction(lat, lon, correction, cp, out_lat=out_lat, out_lon=out_lon)
+    assert result[0] is out_lat
+    assert result[1] is out_lon
+
+
+def test_svd_kernel_end_to_end():
+    """NAD27→NAD83 on GPU with SVD correction matches pyproj."""
+    import warnings
+
+    from pyproj import Transformer as PT
+
+    warnings.filterwarnings("ignore", message="Best transformation")
+
+    t = Transformer.from_crs("EPSG:4267", "EPSG:4269")
+    pt = PT.from_crs("EPSG:4267", "EPSG:4269", always_xy=True)
+
+    # Interior CONUS points (avoid Canada border)
+    lons_np = np.array([-100.0, -90.0, -80.0, -110.0, -95.0], dtype=np.float64)
+    lats_np = np.array([35.0, 40.0, 38.0, 32.0, 42.0], dtype=np.float64)
+
+    lons_gpu = cp.asarray(lons_np)
+    lats_gpu = cp.asarray(lats_np)
+
+    out_x, out_y = t.transform(lons_gpu, lats_gpu)
+    ref_x, ref_y = pt.transform(lons_np, lats_np)
+
+    err_m = np.sqrt(
+        ((cp.asnumpy(out_y) - ref_y) * 111320) ** 2
+        + ((cp.asnumpy(out_x) - ref_x) * 111320 * np.cos(np.radians(lats_np))) ** 2
+    )
+    assert err_m.max() < 0.05, f"Max error {err_m.max():.4f} m exceeds 5cm threshold"

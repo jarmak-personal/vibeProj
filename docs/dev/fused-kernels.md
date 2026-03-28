@@ -127,10 +127,23 @@ geodetic→ECEF→Helmert→ECEF→geodetic pipeline on the GPU. It supports
   conversion, recovers height on the destination ellipsoid via
   `h = p / cos(lat) - N` (with a near-pole guard using the Z-based formula).
 
-The Helmert kernel is separate from the 40 fused projection kernels —
+The Helmert kernel is separate from the fused projection kernels —
 projections are inherently 2D. For cross-datum transforms, the pipeline
 runs the Helmert kernel first (or after inverse projection), then the
 projection kernel. z passes through the projection kernel unchanged.
+
+## SVD datum correction kernel
+
+The `svd_correction` kernel evaluates the SVD-compressed residual correction
+after the Helmert shift. For each point it computes:
+
+```
+correction(lat, lon) = sum_k S[k] * lerp(U_k, lat_idx) * lerp(V_k, lon_idx)
+```
+
+The kernel receives the flattened U, S, V matrices, grid bounds, and grid
+dimensions as arguments. Bilinear interpolation is used for sub-grid positions.
+Applied only when a baked `DatumCorrectionData` exists for the datum pair.
 
 ## Double-single kernels
 
