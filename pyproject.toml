@@ -28,7 +28,7 @@ dependencies = [
 
 [project.optional-dependencies]
 cu12 = [
-    "cuda-python>=12,<13",
+    "cuda-python>=12,<14",
     "cuda-cccl[cu12]",
     "cupy-cuda12x>=13",
 ]
