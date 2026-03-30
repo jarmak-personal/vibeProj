@@ -106,15 +106,14 @@ class AlbersEqualArea(Projection):
         e = computed["e"]
         es = computed["es"]
 
-        rho = xp.sqrt(x * x + (rho0 - y) ** 2)
+        dy = rho0 - y
+        rho = xp.sqrt(x * x + dy * dy)
         if n < 0:
             rho = -rho
+            x = -x
+            dy = -dy
 
-        theta = xp.arctan2(x, rho0 - y)
-        if n < 0:
-            theta = -theta
-
-        lam = theta / n
+        lam = xp.arctan2(x, dy) / n
         q = (C - (rho * n) ** 2) / n
 
         # Iterative inverse for phi from q

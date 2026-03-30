@@ -286,6 +286,28 @@ def test_aea_fused_roundtrip():
     assert_allclose(cp.asnumpy(lon2), cp.asnumpy(lon), atol=1e-7)
 
 
+def test_lcc_southern_hemisphere_fused_roundtrip():
+    """EPSG:3851 — NZGD2000 / NZCS2000, southern hemisphere LCC (n < 0)."""
+    lon = cp.array([170.0, 175.0, 168.0], dtype=cp.float64)
+    lat = cp.array([-40.0, -45.0, -35.0], dtype=cp.float64)
+    t = Transformer.from_crs("EPSG:4326", "EPSG:3851")
+    x, y = t.transform(lon, lat)
+    lon2, lat2 = t.transform(x, y, direction="INVERSE")
+    assert_allclose(cp.asnumpy(lon2), cp.asnumpy(lon), atol=1e-7)
+    assert_allclose(cp.asnumpy(lat2), cp.asnumpy(lat), atol=1e-7)
+
+
+def test_aea_southern_hemisphere_fused_roundtrip():
+    """EPSG:3577 — GDA94 / Australian Albers, southern hemisphere AEA (n < 0)."""
+    lon = cp.array([145.0, 150.0, 135.0], dtype=cp.float64)
+    lat = cp.array([-30.0, -35.0, -25.0], dtype=cp.float64)
+    t = Transformer.from_crs("EPSG:4326", "EPSG:3577")
+    x, y = t.transform(lon, lat)
+    lon2, lat2 = t.transform(x, y, direction="INVERSE")
+    assert_allclose(cp.asnumpy(lon2), cp.asnumpy(lon), atol=1e-7)
+    assert_allclose(cp.asnumpy(lat2), cp.asnumpy(lat), atol=1e-7)
+
+
 # ---------------------------------------------------------------------------
 # Polar Stereographic fused kernel tests
 # ---------------------------------------------------------------------------

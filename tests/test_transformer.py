@@ -162,6 +162,32 @@ def test_albers_roundtrip():
     assert_allclose(lon2, lon, atol=1e-7)
 
 
+def test_lcc_southern_hemisphere_roundtrip():
+    """EPSG:3851 — NZGD2000 / NZCS2000, southern hemisphere LCC (n < 0)."""
+    t = Transformer.from_crs("EPSG:4326", "EPSG:3851")
+    lons = np.array([170.0, 175.0, 168.0])
+    lats = np.array([-40.0, -45.0, -35.0])
+
+    x, y = t.transform(lons, lats)
+    lons2, lats2 = t.transform(x, y, direction="INVERSE")
+
+    assert_allclose(lons2, lons, atol=1e-7)
+    assert_allclose(lats2, lats, atol=1e-7)
+
+
+def test_albers_southern_hemisphere_roundtrip():
+    """EPSG:3577 — GDA94 / Australian Albers, southern hemisphere AEA (n < 0)."""
+    t = Transformer.from_crs("EPSG:4326", "EPSG:3577")
+    lons = np.array([145.0, 150.0, 135.0])
+    lats = np.array([-30.0, -35.0, -25.0])
+
+    x, y = t.transform(lons, lats)
+    lons2, lats2 = t.transform(x, y, direction="INVERSE")
+
+    assert_allclose(lons2, lons, atol=1e-7)
+    assert_allclose(lats2, lats, atol=1e-7)
+
+
 # ---------------------------------------------------------------------------
 # LAEA
 # ---------------------------------------------------------------------------

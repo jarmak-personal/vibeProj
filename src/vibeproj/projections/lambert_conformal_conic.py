@@ -125,15 +125,14 @@ class LambertConformalConic(Projection):
         e = computed["e"]
         k0 = computed["k0"]
 
-        rho = xp.sqrt(x * x + (rho0 - y) ** 2)
+        dy = rho0 - y
+        rho = xp.sqrt(x * x + dy * dy)
         if n < 0:
             rho = -rho
+            x = -x
+            dy = -dy
 
-        theta = xp.arctan2(x, rho0 - y)
-        if n < 0:
-            theta = -theta
-
-        lam = theta / n
+        lam = xp.arctan2(x, dy) / n
         ts = (rho / (F * k0)) ** (1.0 / n)
         phi = _phi2(ts, e, xp)
         return lam, phi

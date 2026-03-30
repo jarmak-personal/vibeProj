@@ -530,11 +530,10 @@ _LCC_INVERSE_SOURCE = (
 ) {{"""
     + _INV_PREAMBLE
     + """
-    {real_t} rho = sqrt(cx * cx + (rho0 - cy) * (rho0 - cy));
-    if (nn < ({real_t})0.0) rho = -rho;
-    {real_t} theta = atan2(cx, rho0 - cy);
-    if (nn < ({real_t})0.0) theta = -theta;
-    {real_t} lam = theta / nn;
+    {real_t} dy = rho0 - cy;
+    {real_t} rho = sqrt(cx * cx + dy * dy);
+    if (nn < ({real_t})0.0) {{ rho = -rho; cx = -cx; dy = -dy; }}
+    {real_t} lam = atan2(cx, dy) / nn;
     {real_t} ts = pow(rho / (F * k0), ({real_t})1.0 / nn);
     {real_t} phi = phi2(ts, e);
 """
@@ -623,11 +622,10 @@ _AEA_INVERSE_SOURCE = (
 ) {{"""
     + _INV_PREAMBLE
     + """
-    {real_t} rho = sqrt(cx * cx + (rho0 - cy) * (rho0 - cy));
-    if (nn < ({real_t})0.0) rho = -rho;
-    {real_t} theta = atan2(cx, rho0 - cy);
-    if (nn < ({real_t})0.0) theta = -theta;
-    {real_t} lam = theta / nn;
+    {real_t} dy = rho0 - cy;
+    {real_t} rho = sqrt(cx * cx + dy * dy);
+    if (nn < ({real_t})0.0) {{ rho = -rho; cx = -cx; dy = -dy; }}
+    {real_t} lam = atan2(cx, dy) / nn;
     {real_t} q = (C - (rho * nn) * (rho * nn)) / nn;
     {real_t} phi = phi_from_q(q, e, es);
 """
