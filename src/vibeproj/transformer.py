@@ -940,8 +940,9 @@ class Transformer:
 
         Notes
         -----
-        Antimeridian-crossing bounding boxes (where ``left > right`` in
-        longitude) are not supported.  Split into two boxes at ±180° first.
+        When the transformed result crosses the antimeridian (±180°),
+        the returned ``left`` will be greater than ``right``
+        (e.g. ``left=153, right=-162``), matching the pyproj convention.
         """
         if direction not in ("FORWARD", "INVERSE"):
             raise ValueError(f"Invalid direction: {direction}")
@@ -989,6 +990,16 @@ class Transformer:
         # Transform all edge points at once
         tx, ty = self.transform(x_all, y_all, direction=direction)
 
+        # Detect antimeridian crossing before filtering (needs edge structure).
+        # Only relevant when the output CRS is geographic (longitudes).
+        # Vectorized: reshape to (4 edges, n pts), diff along each edge.
+        # abs(NaN) > 180 is False, so non-finite points are safely ignored.
+        out_params = self._src_params if direction == "INVERSE" else self._dst_params
+        crosses_antimeridian = False
+        if out_params.projection_name == "longlat":
+            diffs = xp.abs(xp.diff(tx.reshape(4, n), axis=1))
+            crosses_antimeridian = bool(xp.any(diffs > 180.0))
+
         # Filter non-finite values (projections can produce NaN/inf for
         # out-of-domain coordinates)
         finite_mask = xp.isfinite(tx) & xp.isfinite(ty)
@@ -1000,5 +1011,19 @@ class Transformer:
                 "All transformed coordinates are non-finite. "
                 "The input bounding box may be outside the projection's valid domain."
             )
+
+        if crosses_antimeridian:
+            # Shift longitudes to [0, 360) so min/max span the crossing correctly.
+            # After shifting back, left > right signals the antimeridian crossing
+            # (matching pyproj convention).  Note: -180 % 360 == 180, and we use
+            # strict > 180 so ±180° stays as +180 (same geographic meridian).
+            tx_shifted = tx % 360.0
+            left_x = float(tx_shifted.min())
+            right_x = float(tx_shifted.max())
+            if left_x > 180.0:
+                left_x -= 360.0
+            if right_x > 180.0:
+                right_x -= 360.0
+            return left_x, float(ty.min()), right_x, float(ty.max())
 
         return float(tx.min()), float(ty.min()), float(tx.max()), float(ty.max())

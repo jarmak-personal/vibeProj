@@ -265,3 +265,65 @@ def test_bounds_lcc():
 
     # Conic projections have significant curvature — allow wider tolerance
     assert_allclose(got, expected, atol=10.0)
+
+
+# ---------------------------------------------------------------------------
+# Antimeridian crossing
+# ---------------------------------------------------------------------------
+
+
+def test_bounds_antimeridian_nz_tm():
+    """NZGD2000 / NZ TM (EPSG:2193) -> WGS84 crosses the antimeridian.
+
+    pyproj returns left > right to signal the crossing; vibeproj must match.
+    """
+    left, bottom, right, top = 1000000.0, 4700000.0, 2200000.0, 6300000.0
+    expected = _pyproj_bounds("EPSG:2193", "EPSG:4326", left, bottom, right, top)
+
+    t = Transformer.from_crs("EPSG:2193", "EPSG:4326")
+    got = t.transform_bounds(left, bottom, right, top)
+
+    # Verify left > right (antimeridian signal)
+    assert got[0] > got[2], f"Expected left > right for antimeridian crossing, got {got}"
+    assert_allclose(got, expected, atol=0.001)
+
+
+def test_bounds_antimeridian_utm60n():
+    """UTM zone 60N (EPSG:32660) -> WGS84 crosses the antimeridian.
+
+    Central meridian is 177°E, so wide bounds straddle ±180°.
+    """
+    left, bottom, right, top = 100000.0, 0.0, 900000.0, 9500000.0
+    expected = _pyproj_bounds("EPSG:32660", "EPSG:4326", left, bottom, right, top)
+
+    t = Transformer.from_crs("EPSG:32660", "EPSG:4326")
+    got = t.transform_bounds(left, bottom, right, top)
+
+    assert got[0] > got[2], f"Expected left > right for antimeridian crossing, got {got}"
+    assert_allclose(got, expected, atol=0.001)
+
+
+def test_bounds_antimeridian_utm1s():
+    """UTM zone 1S (EPSG:32701) -> WGS84 crosses the antimeridian.
+
+    Central meridian is 177°W.
+    """
+    left, bottom, right, top = 100000.0, 8000000.0, 900000.0, 9800000.0
+    expected = _pyproj_bounds("EPSG:32701", "EPSG:4326", left, bottom, right, top)
+
+    t = Transformer.from_crs("EPSG:32701", "EPSG:4326")
+    got = t.transform_bounds(left, bottom, right, top)
+
+    assert got[0] > got[2], f"Expected left > right for antimeridian crossing, got {got}"
+    assert_allclose(got, expected, atol=0.001)
+
+
+def test_bounds_no_false_antimeridian():
+    """Non-crossing geographic output should NOT produce left > right."""
+    # UTM 31N inverse -> geographic, far from the antimeridian
+    left, bottom, right, top = 200000.0, 4400000.0, 700000.0, 5600000.0
+
+    t = Transformer.from_crs("EPSG:32631", "EPSG:4326")
+    got = t.transform_bounds(left, bottom, right, top)
+
+    assert got[0] < got[2], f"Non-crossing case should have left < right, got {got}"

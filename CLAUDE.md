@@ -42,7 +42,7 @@ GPU-accelerated coordinate projection library. 24 projections, each with a fused
 - **Bounds transform** (`Transformer.transform_bounds()`) — densifies bounding box edges (default 21
   intermediate points per edge, matching pyproj/GDAL convention) to handle non-linear projection
   curvature, then returns the min/max envelope. Uses CuPy arrays when available for GPU dispatch.
-  Antimeridian-crossing boxes not supported (split at ±180° first).
+  Antimeridian-crossing results return `left > right` (matching pyproj convention).
 - **Compat layer** (`src/vibeproj/compat.py`) — thin Shapely 2.x / GeoPandas integration.
   Not re-exported from `__init__`; use `from vibeproj.compat import ...`. Functions:
   `reproject_geodataframe()`, `make_shapely_transform()`, `reproject_geometries()`.
