@@ -6,6 +6,7 @@
 install
 quickstart
 projections
+datum-corrections
 vibespatial
 precision
 api

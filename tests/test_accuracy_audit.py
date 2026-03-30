@@ -402,10 +402,11 @@ class TestSphericalProjectionsVsPyproj:
         vp_x, vp_y = _vibeproj_forward("robin", lat, lon)
         pp_x, pp_y = self._pyproj_forward("robin", lat, lon)
 
-        # Robinson uses linear table interpolation; PROJ uses cubic.
-        # ~13 km max at global scale is the interpolation approximation, not a formula bug.
-        assert _max_error(vp_x, pp_x) < 15000, f"robin x error: {_max_error(vp_x, pp_x):.6e}"
-        assert _max_error(vp_y, pp_y) < 5000, f"robin y error: {_max_error(vp_y, pp_y):.6e}"
+        # Robinson uses cubic polynomial interpolation matching PROJ's coefficient
+        # tables.  Sub-meter residual is from truncated coefficient precision (~5-6
+        # significant digits in PROJ's PJ_robin.c), not an algorithmic gap.
+        assert _max_error(vp_x, pp_x) < 1.5, f"robin x error: {_max_error(vp_x, pp_x):.6e}"
+        assert _max_error(vp_y, pp_y) < 1.5, f"robin y error: {_max_error(vp_y, pp_y):.6e}"
 
     # --- Winkel Tripel ---
 
@@ -488,7 +489,7 @@ class TestRoundtripAccuracy:
             ("robin", 0.0, 0.0, (-80.0, 80.0), (-170.0, 170.0), 1e-9),
             ("natearth", 0.0, 0.0, (-80.0, 80.0), (-170.0, 170.0), 1e-9),
             ("aeqd", 45.0, 0.0, (10.0, 70.0), (-40.0, 40.0), 1e-9),
-            ("wintri", 0.0, 0.0, (-70.0, 70.0), (-150.0, 150.0), 0.02),  # Newton limited
+            ("wintri", 0.0, 0.0, (-70.0, 70.0), (-150.0, 150.0), 1e-9),
         ],
     )
     def test_manual_pipeline_roundtrip(self, proj_name, lat_0, lon_0, lat_range, lon_range, atol):

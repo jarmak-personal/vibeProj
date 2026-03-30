@@ -1365,19 +1365,28 @@ _ROBIN_FORWARD_SOURCE = (
     {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
     int src_north_first, int dst_north_first, int n
 ) {{
-    const {real_t} TX[19] = {{1.0,0.9986,0.9954,0.99,0.9822,0.973,0.96,0.9427,0.9216,0.8962,0.8679,0.835,0.7986,0.7597,0.7186,0.6732,0.6213,0.5722,0.5322}};
-    const {real_t} TY[19] = {{0.0,0.062,0.124,0.186,0.248,0.31,0.372,0.434,0.4958,0.5571,0.6176,0.6769,0.7346,0.7903,0.8435,0.8936,0.9394,0.9761,1.0}};
+    // Robinson cubic polynomial coefficients (from PROJ PJ_robin.c).
+    // Variable z is offset within 5-degree interval IN DEGREES (0 <= z <= 5).
+    // value = c0 + z*(c1 + z*(c2 + z*c3))
+    const {real_t} XC0[18] = {{1.0,0.9986,0.9954,0.99,0.9822,0.973,0.96,0.9427,0.9216,0.8962,0.8679,0.835,0.7986,0.7597,0.7186,0.6732,0.6213,0.5722}};
+    const {real_t} XC1[18] = {{2.2199e-17,-0.000482243,-0.00083103,-0.00135364,-0.00167442,-0.00214868,-0.00305085,-0.00382792,-0.00467746,-0.00536223,-0.00609363,-0.00698325,-0.00755338,-0.00798324,-0.00851367,-0.00986209,-0.010418,-0.00906601}};
+    const {real_t} XC2[18] = {{-7.15515e-05,-2.4897e-05,-4.48605e-05,-5.9661e-05,-4.49547e-06,-9.03571e-05,-9.00761e-05,-6.53386e-05,-0.00010457,-3.23831e-05,-0.000113898,-6.40253e-05,-5.00009e-05,-3.5971e-05,-7.01149e-05,-0.000199569,8.83923e-05,0.000182}};
+    const {real_t} XC3[18] = {{3.1103e-06,-1.3309e-06,-9.86701e-07,3.6777e-06,-5.72411e-06,1.8736e-08,1.64917e-06,-2.6154e-06,4.81243e-06,-5.43432e-06,3.32484e-06,9.34959e-07,9.35324e-07,-2.27626e-06,-8.6303e-06,1.91974e-05,6.24051e-06,6.24051e-06}};
+    const {real_t} YC0[18] = {{-5.20417e-18,0.062,0.124,0.186,0.248,0.31,0.372,0.434,0.4958,0.5571,0.6176,0.6769,0.7346,0.7903,0.8435,0.8936,0.9394,0.9761}};
+    const {real_t} YC1[18] = {{0.0124,0.0124,0.0124,0.0123999,0.0124002,0.0123992,0.0124029,0.0123893,0.0123198,0.0121916,0.0119938,0.011713,0.0113541,0.0109107,0.0103431,0.00969686,0.00840947,0.00616527}};
+    const {real_t} YC2[18] = {{1.21431e-18,-1.26793e-09,5.07171e-09,-1.90189e-08,7.10039e-08,-2.64997e-07,9.88983e-07,-3.69093e-06,-1.02252e-05,-1.54081e-05,-2.41424e-05,-3.20223e-05,-3.97684e-05,-4.89042e-05,-6.4615e-05,-6.4636e-05,-0.000192841,-0.000256}};
+    const {real_t} YC3[18] = {{-8.45284e-11,4.22642e-10,-1.60604e-09,6.00152e-09,-2.24e-08,8.35986e-08,-3.11994e-07,-4.35621e-07,-3.45523e-07,-5.82288e-07,-5.25327e-07,-5.16405e-07,-6.09052e-07,-1.04739e-06,-1.40374e-09,-8.547e-06,-4.2106e-06,-4.2106e-06}};
     const {real_t} FXC = ({real_t})0.8487, FYC = ({real_t})1.3523;
+    const {real_t} R2D = ({real_t})57.29577951308232;
 """
     + _FWD_PREAMBLE
     + """
     {real_t} abs_phi = fabs(phi);
-    {real_t} phi_deg = abs_phi * ({real_t})180.0 / {pi};
-    int ti = (int)fmin(phi_deg / ({real_t})5.0, ({real_t})17.0);
-    {real_t} frac = phi_deg / ({real_t})5.0 - ({real_t})ti;
-    int ti1 = ti < 18 ? ti+1 : 18;
-    {real_t} X = TX[ti] + frac * (TX[ti1] - TX[ti]);
-    {real_t} Y = TY[ti] + frac * (TY[ti1] - TY[ti]);
+    int ti = (int)(abs_phi * ({real_t})11.45915590261646417544);
+    if (ti >= 18) ti = 17;
+    {real_t} z = abs_phi * R2D - ({real_t})5.0 * ({real_t})ti;
+    {real_t} X = XC0[ti] + z * (XC1[ti] + z * (XC2[ti] + z * XC3[ti]));
+    {real_t} Y = YC0[ti] + z * (YC1[ti] + z * (YC2[ti] + z * YC3[ti]));
     double easting  = (double)(FXC * X * lam) * (double)a + (double)x0;
     {real_t} sgn = phi < ({real_t})0.0 ? ({real_t})-1.0 : ({real_t})1.0;
     double northing = (double)(FYC * Y * sgn) * (double)a + (double)y0;
@@ -1392,22 +1401,51 @@ _ROBIN_INVERSE_SOURCE = (
     {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
     int src_north_first, int dst_north_first, int n
 ) {{
-    const {real_t} TX[19] = {{1.0,0.9986,0.9954,0.99,0.9822,0.973,0.96,0.9427,0.9216,0.8962,0.8679,0.835,0.7986,0.7597,0.7186,0.6732,0.6213,0.5722,0.5322}};
-    const {real_t} TY[19] = {{0.0,0.062,0.124,0.186,0.248,0.31,0.372,0.434,0.4958,0.5571,0.6176,0.6769,0.7346,0.7903,0.8435,0.8936,0.9394,0.9761,1.0}};
+    // Robinson cubic polynomial coefficients (from PROJ PJ_robin.c).
+    // Variable z is offset within 5-degree interval IN DEGREES (0 <= z <= 5).
+    const {real_t} XC0[19] = {{1.0,0.9986,0.9954,0.99,0.9822,0.973,0.96,0.9427,0.9216,0.8962,0.8679,0.835,0.7986,0.7597,0.7186,0.6732,0.6213,0.5722,0.5322}};
+    const {real_t} XC1[19] = {{2.2199e-17,-0.000482243,-0.00083103,-0.00135364,-0.00167442,-0.00214868,-0.00305085,-0.00382792,-0.00467746,-0.00536223,-0.00609363,-0.00698325,-0.00755338,-0.00798324,-0.00851367,-0.00986209,-0.010418,-0.00906601,-0.00677797}};
+    const {real_t} XC2[19] = {{-7.15515e-05,-2.4897e-05,-4.48605e-05,-5.9661e-05,-4.49547e-06,-9.03571e-05,-9.00761e-05,-6.53386e-05,-0.00010457,-3.23831e-05,-0.000113898,-6.40253e-05,-5.00009e-05,-3.5971e-05,-7.01149e-05,-0.000199569,8.83923e-05,0.000182,0.000275608}};
+    const {real_t} XC3[19] = {{3.1103e-06,-1.3309e-06,-9.86701e-07,3.6777e-06,-5.72411e-06,1.8736e-08,1.64917e-06,-2.6154e-06,4.81243e-06,-5.43432e-06,3.32484e-06,9.34959e-07,9.35324e-07,-2.27626e-06,-8.6303e-06,1.91974e-05,6.24051e-06,6.24051e-06,6.24051e-06}};
+    const {real_t} YC0[19] = {{-5.20417e-18,0.062,0.124,0.186,0.248,0.31,0.372,0.434,0.4958,0.5571,0.6176,0.6769,0.7346,0.7903,0.8435,0.8936,0.9394,0.9761,1.0}};
+    const {real_t} YC1[19] = {{0.0124,0.0124,0.0124,0.0123999,0.0124002,0.0123992,0.0124029,0.0123893,0.0123198,0.0121916,0.0119938,0.011713,0.0113541,0.0109107,0.0103431,0.00969686,0.00840947,0.00616527,0.00328947}};
+    const {real_t} YC2[19] = {{1.21431e-18,-1.26793e-09,5.07171e-09,-1.90189e-08,7.10039e-08,-2.64997e-07,9.88983e-07,-3.69093e-06,-1.02252e-05,-1.54081e-05,-2.41424e-05,-3.20223e-05,-3.97684e-05,-4.89042e-05,-6.4615e-05,-6.4636e-05,-0.000192841,-0.000256,-0.000319159}};
+    const {real_t} YC3[19] = {{-8.45284e-11,4.22642e-10,-1.60604e-09,6.00152e-09,-2.24e-08,8.35986e-08,-3.11994e-07,-4.35621e-07,-3.45523e-07,-5.82288e-07,-5.25327e-07,-5.16405e-07,-6.09052e-07,-1.04739e-06,-1.40374e-09,-8.547e-06,-4.2106e-06,-4.2106e-06,-4.2106e-06}};
     const {real_t} FXC = ({real_t})0.8487, FYC = ({real_t})1.3523;
 """
     + _INV_PREAMBLE
     + """
     {real_t} abs_y = fabs(cy) / FYC;
-    int ti = 0;
-    for (int i = 0; i < 18; i++) {{ if (TY[i+1] >= abs_y) {{ ti = i; break; }} if (i == 17) ti = 17; }}
-    int ti1 = ti < 18 ? ti+1 : 18;
-    {real_t} frac = (abs_y - TY[ti]) / fmax(TY[ti1] - TY[ti], ({real_t})1e-30);
-    {real_t} phi_deg = (({real_t})ti + frac) * ({real_t})5.0;
-    {real_t} X = TX[ti] + frac * (TX[ti1] - TX[ti]);
-    {real_t} phi = phi_deg * {pi} / ({real_t})180.0;
-    if (cy < ({real_t})0.0) phi = -phi;
-    {real_t} lam = cx / (FXC * fmax(X, ({real_t})1e-30));
+    {real_t} phi, lam;
+    if (abs_y >= ({real_t})1.0) {{
+        // Pathologic case: |lat| >= 90
+        phi = cy < ({real_t})0.0 ? ({real_t})(-1.5707963267948966) : ({real_t})1.5707963267948966;
+        lam = cx / (FXC * fmax(XC0[18], ({real_t})1e-30));
+    }} else {{
+        // Find interval via linear search on YC0
+        int ti = (int)(abs_y * ({real_t})18.0);
+        if (ti < 0) ti = 0;
+        if (ti >= 18) ti = 17;
+        while (ti > 0 && YC0[ti] > abs_y) ti--;
+        while (ti < 17 && YC0[ti+1] <= abs_y) ti++;
+        // Linear initial guess for z (in degrees, 0..5)
+        {real_t} z = ({real_t})5.0 * (abs_y - YC0[ti]) / fmax(YC0[ti+1] - YC0[ti], ({real_t})1e-30);
+        // Newton-Raphson on cubic Y(z) — converges in 2-3 iterations from linear guess.
+        {real_t} c0s = YC0[ti] - abs_y;
+        for (int it = 0; it < 4; it++) {{
+            {real_t} val = c0s + z * (YC1[ti] + z * (YC2[ti] + z * YC3[ti]));
+            {real_t} deriv = YC1[ti] + z * (({real_t})2.0 * YC2[ti] + z * ({real_t})3.0 * YC3[ti]);
+            if (fabs(deriv) < ({real_t})1e-30) break;
+            {real_t} dz = val / deriv;
+            z -= dz;
+            if (fabs(dz) < ({real_t})1e-12) break;
+        }}
+        {real_t} phi_deg = ({real_t})5.0 * ({real_t})ti + z;
+        {real_t} X = XC0[ti] + z * (XC1[ti] + z * (XC2[ti] + z * XC3[ti]));
+        phi = phi_deg * ({real_t})0.017453292519943295;
+        if (cy < ({real_t})0.0) phi = -phi;
+        lam = cx / (FXC * fmax(X, ({real_t})1e-30));
+    }}
 """
     + _INV_POSTAMBLE
     + "}}"
@@ -1447,16 +1485,32 @@ _WINTRI_INVERSE_SOURCE = (
     + """
     {real_t} lam = cx * ({real_t})2.0;
     {real_t} phi = cy;
-    for (int i = 0; i < 20; i++) {{
+    const {real_t} EPS = ({real_t})1e-12;
+    for (int i = 0; i < 10; i++) {{
         {real_t} cp = cos(phi), sp = sin(phi);
-        {real_t} chl = cos(lam * ({real_t})0.5), shl = sin(lam * ({real_t})0.5);
-        {real_t} al = acos(fmin(fmax(cp * chl, ({real_t})-1.0), ({real_t})1.0));
-        {real_t} sc = fabs(al) < ({real_t})1e-10 ? ({real_t})1.0 : sin(al) / al;
-        {real_t} fx = (({real_t})2.0*cp*shl/sc + lam*cos_phi1)*({real_t})0.5 - cx;
-        {real_t} fy = (sp/sc + phi)*({real_t})0.5 - cy;
-        lam -= fx * ({real_t})0.5;
-        phi -= fy * ({real_t})0.5;
-        if (fabs(fx) < ({real_t})1e-10 && fabs(fy) < ({real_t})1e-10) break;
+        {real_t} ch = cos(lam * ({real_t})0.5), sh = sin(lam * ({real_t})0.5);
+        {real_t} D = cp * ch;
+        {real_t} al = acos(fmin(fmax(D, ({real_t})-1.0), ({real_t})1.0));
+        {real_t} sa = sin(al);
+        int small = fabs(al) < EPS;
+        {real_t} sa_safe = small ? ({real_t})1.0 : sa;
+        {real_t} rsinc = small ? ({real_t})1.0 : al / sa_safe;
+        {real_t} sa3 = sa_safe * sa_safe * sa_safe;
+        {real_t} G = small ? ({real_t})0.0 : (sa_safe - al * D) / sa3;
+        {real_t} f1 = (({real_t})2.0 * cp * sh * rsinc + lam * cos_phi1) * ({real_t})0.5 - cx;
+        {real_t} f2 = (sp * rsinc + phi) * ({real_t})0.5 - cy;
+        {real_t} J11 = (cp * ch * rsinc + cp * cp * sh * sh * G + cos_phi1) * ({real_t})0.5;
+        {real_t} J12 = sp * sh * (D * G - rsinc);
+        {real_t} J21 = sp * cp * sh * G * ({real_t})0.25;
+        {real_t} J22 = (cp * rsinc + sp * sp * ch * G + ({real_t})1.0) * ({real_t})0.5;
+        {real_t} det = J11 * J22 - J12 * J21;
+        if (fabs(det) < ({real_t})1e-30) break;
+        {real_t} inv_det = ({real_t})1.0 / det;
+        {real_t} dlam = (J22 * f1 - J12 * f2) * inv_det;
+        {real_t} dphi = (J11 * f2 - J21 * f1) * inv_det;
+        lam -= dlam;
+        phi -= dphi;
+        if (fabs(dlam) < EPS && fabs(dphi) < EPS) break;
     }}
 """
     + _INV_POSTAMBLE

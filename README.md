@@ -12,11 +12,11 @@ On an RTX 4090 vs i9-13900k, 1M coordinates:
 
 | Projection | GPU | vs CPU |
 |---|---|---|
-| Transverse Mercator / UTM | 0.49 ms | 278x |
-| Lambert Conformal Conic | 0.53 ms | 96x |
-| Albers Equal Area | 0.27 ms | 141x |
-| Web Mercator | 0.15 ms | 123x |
-| Equal Earth | 0.43 ms | 144x |
+| Transverse Mercator / UTM | 0.49 ms | 281x |
+| Lambert Conformal Conic | 0.54 ms | 96x |
+| Albers Equal Area | 0.27 ms | 143x |
+| Web Mercator | 0.15 ms | 126x |
+| Equal Earth | 0.43 ms | 145x |
 | Plate Carrée | 0.04 ms | 311x |
 | Oblique Mercator (Hotine) | 0.76 ms | 115x |
 | Krovak | 2.08 ms | 173x |
@@ -97,7 +97,7 @@ t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
 x, y, z = t.transform(2.0, 49.0, z=45.0)  # z == 45.0
 ```
 
-For datum pairs with baked SVD corrections (e.g. NAD27 to NAD83), vibeProj achieves sub-5cm accuracy without external grid files. For other grid-only datum pairs, vibeProj warns and proceeds without a datum shift — use pyproj directly for full NTv2/NADCON grid coverage.
+For datum pairs with baked SVD corrections (e.g. NAD27 to NAD83), vibeProj achieves sub-5cm accuracy without external grid files. You can also [generate your own SVD corrections](https://jarmak-personal.github.io/vibeProj/user/datum-corrections.html) for any datum pair that pyproj supports using the included fitting tool (`tools/fit_datum_corrections.py`). For other grid-only datum pairs without a baked or custom correction, vibeProj warns and proceeds without a datum shift.
 
 ### Integration with CPU libraries
 

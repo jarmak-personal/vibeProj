@@ -725,7 +725,7 @@ def test_robin_fused_roundtrip():
         "robin",
         cp.array([40.0, -30.0, 60.0], dtype=cp.float64),
         cp.array([-100.0, 20.0, 140.0], dtype=cp.float64),
-        atol=1e-4,
+        atol=1e-7,
     )
 
 
@@ -734,7 +734,7 @@ def test_wintri_fused_roundtrip():
         "wintri",
         cp.array([40.0, -20.0, 50.0], dtype=cp.float64),
         cp.array([-80.0, 30.0, 100.0], dtype=cp.float64),
-        atol=0.01,
+        atol=1e-7,
     )
 
 

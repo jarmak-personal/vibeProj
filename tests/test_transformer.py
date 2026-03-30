@@ -759,9 +759,8 @@ def test_wintri_roundtrip():
     x, y = pipe.transform(lat, lon, np)
     inv_pipe = TransformPipeline(params, src)
     lat2, lon2 = inv_pipe.transform(x, y, np)
-    # Winkel Tripel inverse uses simplified Newton iteration — limited precision
-    assert_allclose(lat2, lat, atol=0.005)
-    assert_allclose(lon2, lon, atol=0.005)
+    assert_allclose(lat2, lat, atol=1e-7)
+    assert_allclose(lon2, lon, atol=1e-7)
 
 
 # ---------------------------------------------------------------------------

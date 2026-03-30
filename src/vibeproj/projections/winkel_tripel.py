@@ -50,28 +50,57 @@ class WinkelTripel(Projection):
 
     def inverse(self, x, y, params, computed, xp):
         cos_phi1 = computed["cos_phi1"]
-        # Newton iteration for the inverse
-        lam = x * 2
-        phi = y
-        for _ in range(20):
-            cos_phi = xp.cos(phi)
-            sin_phi = xp.sin(phi)
-            cos_half_lam = xp.cos(lam / 2)
-            sin_half_lam = xp.sin(lam / 2)
-            alpha = xp.arccos(xp.clip(cos_phi * cos_half_lam, -1.0, 1.0))
-            sinc_alpha = xp.where(xp.abs(alpha) < EPS_ANGLE, 1.0, xp.sin(alpha) / alpha)
-            fx = (2 * cos_phi * sin_half_lam / sinc_alpha + lam * cos_phi1) / 2 - x
-            fy = (sin_phi / sinc_alpha + phi) / 2 - y
-            # Approximate Jacobian (use finite differences conceptually, but simplified)
-            dlam = -fx * 0.5
-            dphi = -fy * 0.5
-            lam = lam + dlam
-            phi = phi + dphi
+        eps = EPS_ANGLE
+        # Initial guess
+        lam = x * 2.0
+        phi = y * 1.0
+
+        for _ in range(10):
+            cp = xp.cos(phi)
+            sp = xp.sin(phi)
+            ch = xp.cos(lam * 0.5)
+            sh = xp.sin(lam * 0.5)
+
+            D = cp * ch
+            alpha = xp.arccos(xp.clip(D, -1.0, 1.0))
+            sa = xp.sin(alpha)
+
+            # sinc_alpha and its reciprocal, with guard for alpha ~ 0
+            small = xp.abs(alpha) < eps
+            sa_safe = xp.where(small, 1.0, sa)
+            rsinc = xp.where(small, 1.0, alpha / sa_safe)  # 1 / sinc(alpha)
+
+            # G = (sa - alpha * D) / sa^3, derivative factor
+            sa3 = sa_safe * sa_safe * sa_safe
+            G = xp.where(small, 0.0, (sa_safe - alpha * D) / sa3)
+
+            # Forward residuals
+            f1 = (2.0 * cp * sh * rsinc + lam * cos_phi1) * 0.5 - x
+            f2 = (sp * rsinc + phi) * 0.5 - y
+
+            # Analytical Jacobian entries (2x2 per point)
+            J11 = (cp * ch * rsinc + cp * cp * sh * sh * G + cos_phi1) * 0.5
+            J12 = sp * sh * (D * G - rsinc)
+            J21 = sp * cp * sh * G * 0.25
+            J22 = (cp * rsinc + sp * sp * ch * G + 1.0) * 0.5
+
+            # Solve via Cramer's rule: J * [dlam, dphi] = -[f1, f2]
+            det = J11 * J22 - J12 * J21
+            det_safe = xp.where(xp.abs(det) < 1e-30, 1e-30, det)
+
+            dlam = (J22 * f1 - J12 * f2) / det_safe
+            dphi = (J11 * f2 - J21 * f1) / det_safe
+
+            lam = lam - dlam
+            phi = phi - dphi
+
+            # Convergence check
             if hasattr(dlam, "__len__"):
-                if xp.all((xp.abs(dlam) < EPS_ANGLE) & (xp.abs(dphi) < EPS_ANGLE)):
+                if xp.all((xp.abs(dlam) < eps) & (xp.abs(dphi) < eps)):
                     break
-            elif abs(float(dlam)) < EPS_ANGLE and abs(float(dphi)) < EPS_ANGLE:
+            elif abs(float(dlam)) < eps and abs(float(dphi)) < eps:
                 break
+
         return lam, phi
 
 
