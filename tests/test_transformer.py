@@ -134,6 +134,49 @@ def test_lcc_roundtrip():
     assert_allclose(lon2, lon, atol=1e-7)
 
 
+def test_lcc_us_survey_foot_forward():
+    """EPSG:2263 forward path preserves CRS-native US survey foot output."""
+    lon, lat = -74.05050806403209, 40.56642203412163
+
+    pp = PyProjTransformer.from_crs("EPSG:4326", "EPSG:2263", always_xy=True)
+    t = Transformer.from_crs("EPSG:4326", "EPSG:2263", always_xy=True)
+
+    exp_x, exp_y = pp.transform(lon, lat)
+    vp_x, vp_y = t.transform(lon, lat)
+
+    assert_allclose(vp_x, exp_x, atol=1e-6)
+    assert_allclose(vp_y, exp_y, atol=1e-6)
+
+
+def test_lcc_us_survey_foot_inverse():
+    """EPSG:2263 inverse path matches pyproj for a real-world repro point."""
+    x, y = 970217.0224, 145643.3322
+
+    pp = PyProjTransformer.from_crs("EPSG:2263", "EPSG:4326", always_xy=True)
+    t = Transformer.from_crs("EPSG:2263", "EPSG:4326", always_xy=True)
+
+    exp_lon, exp_lat = pp.transform(x, y)
+    vp_lon, vp_lat = t.transform(x, y)
+
+    assert_allclose(vp_lon, exp_lon, atol=1e-9)
+    assert_allclose(vp_lat, exp_lat, atol=1e-9)
+
+
+def test_lcc_us_survey_foot_transform_buffers_fp64():
+    """Zero-copy buffer path uses the same projected-unit normalization."""
+    x = np.array([970217.0224])
+    y = np.array([145643.3322])
+
+    pp = PyProjTransformer.from_crs("EPSG:2263", "EPSG:4326", always_xy=True)
+    t = Transformer.from_crs("EPSG:2263", "EPSG:4326", always_xy=True)
+
+    exp_lon, exp_lat = pp.transform(x, y)
+    vp_lon, vp_lat = t.transform_buffers(x, y, precision="fp64")
+
+    assert_allclose(vp_lon, exp_lon, atol=1e-9)
+    assert_allclose(vp_lat, exp_lat, atol=1e-9)
+
+
 # ---------------------------------------------------------------------------
 # Albers Equal Area
 # ---------------------------------------------------------------------------

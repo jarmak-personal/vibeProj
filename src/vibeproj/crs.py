@@ -33,6 +33,8 @@ class ProjectionParams:
     k_0: float = 1.0  # scale factor
     x_0: float = 0.0  # false easting (meters)
     y_0: float = 0.0  # false northing (meters)
+    x_unit_to_m: float = 1.0  # projected easting unit -> meters
+    y_unit_to_m: float = 1.0  # projected northing unit -> meters
     # UTM-specific
     utm_zone: int = 0
     south: bool = False
@@ -149,6 +151,45 @@ def _get_param(params_list, name, default=0.0):
     return default
 
 
+def _get_linear_param(params_list, name, default=0.0):
+    """Extract a linear parameter and normalize it to meters."""
+    name_norm = name.lower().replace("_", " ")
+    for p in params_list:
+        if p.name.lower() == name_norm:
+            factor = getattr(p, "unit_conversion_factor", None) or 1.0
+            return p.value * factor
+    return default
+
+
+def _get_axis_unit_factors(crs: CRS, *, first_is_north: bool) -> tuple[float, float]:
+    """Return (easting_unit_to_m, northing_unit_to_m) for projected CRS axes."""
+    if not crs.is_projected:
+        return 1.0, 1.0
+
+    x_unit_to_m = 1.0
+    y_unit_to_m = 1.0
+    axes = crs.axis_info
+
+    for axis in axes:
+        direction = axis.direction.lower()
+        factor = axis.unit_conversion_factor or 1.0
+        if direction in ("east", "west"):
+            x_unit_to_m = factor
+        elif direction in ("north", "south"):
+            y_unit_to_m = factor
+
+    # Fallback when the CRS axis directions are generic (e.g. X/Y).
+    if len(axes) >= 2:
+        first_factor = axes[0].unit_conversion_factor or 1.0
+        second_factor = axes[1].unit_conversion_factor or 1.0
+        if x_unit_to_m == 1.0 and y_unit_to_m == 1.0:
+            if first_is_north:
+                return second_factor, first_factor
+            return first_factor, second_factor
+
+    return x_unit_to_m, y_unit_to_m
+
+
 def resolve_projection_params(crs: CRS) -> ProjectionParams:
     """Extract projection parameters from a CRS.
 
@@ -159,6 +200,7 @@ def resolve_projection_params(crs: CRS) -> ProjectionParams:
     # Use abbreviation: 'Lat', 'N', 'Y' = northing-first; 'Lon', 'E', 'X' = easting-first
     axes = crs.axis_info
     first_is_north = len(axes) >= 1 and axes[0].abbrev in ("Lat", "N", "Y")
+    x_unit_to_m, y_unit_to_m = _get_axis_unit_factors(crs, first_is_north=first_is_north)
 
     if crs.is_geographic:
         return ProjectionParams(
@@ -235,18 +277,22 @@ def resolve_projection_params(crs: CRS) -> ProjectionParams:
             ),
         ),
     )
-    x_0 = _get_param(
+    x_0 = _get_linear_param(
         pl,
         "False easting",
-        _get_param(
-            pl, "Easting at false origin", _get_param(pl, "Easting at projection centre", 0.0)
+        _get_linear_param(
+            pl,
+            "Easting at false origin",
+            _get_linear_param(pl, "Easting at projection centre", 0.0),
         ),
     )
-    y_0 = _get_param(
+    y_0 = _get_linear_param(
         pl,
         "False northing",
-        _get_param(
-            pl, "Northing at false origin", _get_param(pl, "Northing at projection centre", 0.0)
+        _get_linear_param(
+            pl,
+            "Northing at false origin",
+            _get_linear_param(pl, "Northing at projection centre", 0.0),
         ),
     )
 
@@ -260,6 +306,8 @@ def resolve_projection_params(crs: CRS) -> ProjectionParams:
         k_0=k_0,
         x_0=x_0,
         y_0=y_0,
+        x_unit_to_m=x_unit_to_m,
+        y_unit_to_m=y_unit_to_m,
         north_first=first_is_north,
     )
 

@@ -242,16 +242,20 @@ _FWD_PREAMBLE = """
 """
 
 _FWD_POSTAMBLE = """
-    if (dst_north_first) {{ out_x[idx] = (double)northing; out_y[idx] = (double)easting; }}
-    else                 {{ out_x[idx] = (double)easting;  out_y[idx] = (double)northing; }}
+    double d_easting_out = (double)easting / x_unit_to_m;
+    double d_northing_out = (double)northing / y_unit_to_m;
+    if (dst_north_first) {{ out_x[idx] = d_northing_out; out_y[idx] = d_easting_out; }}
+    else                 {{ out_x[idx] = d_easting_out;  out_y[idx] = d_northing_out; }}
 """
 
 _INV_PREAMBLE = """
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n) return;
     double d_arg1 = in_x[idx], d_arg2 = in_y[idx];
-    double d_northing, d_easting;
-    if (src_north_first) {{ d_northing = d_arg1; d_easting = d_arg2; }} else {{ d_easting = d_arg1; d_northing = d_arg2; }}
+    double d_northing_in, d_easting_in;
+    if (src_north_first) {{ d_northing_in = d_arg1; d_easting_in = d_arg2; }} else {{ d_easting_in = d_arg1; d_northing_in = d_arg2; }}
+    double d_easting = d_easting_in * x_unit_to_m;
+    double d_northing = d_northing_in * y_unit_to_m;
     // Offset/scale removal in fp64 before cast to compute precision
     {real_t} cx = ({real_t})((d_easting - (double)x0) / (double)a);
     {real_t} cy = ({real_t})((d_northing - (double)y0) / (double)a);
@@ -274,6 +278,17 @@ extern "C" __global__ void __launch_bounds__(256) {func}(
 """
 
 _INV_SIGNATURE = _FWD_SIGNATURE  # same
+
+_KERNEL_UNIT_SIGNATURE_NEEDLE = "int src_north_first, int dst_north_first, int n"
+_KERNEL_UNIT_SIGNATURE_REPLACEMENT = (
+    "double x_unit_to_m, double y_unit_to_m,\n"
+    "    int src_north_first, int dst_north_first, int n"
+)
+
+
+def _inject_linear_unit_args(source: str) -> str:
+    """Inject projected-unit ABI params into compiled kernel source."""
+    return source.replace(_KERNEL_UNIT_SIGNATURE_NEEDLE, _KERNEL_UNIT_SIGNATURE_REPLACEMENT)
 
 # ===================================================================
 # Plate Carrée kernels
@@ -1671,9 +1686,11 @@ extern "C" __global__ void __launch_bounds__(256) tm_forward_ds(
     // Scale/offset in fp64
     double easting  = ds_to_double(ds_mul(ds_from_double(Qn), Ce)) * a + x0;
     double northing = (ds_to_double(ds_add(ds_mul(ds_from_double(Qn), Cn), ds_from_double(Zb)))) * a + y0;
+    double easting_out = easting / x_unit_to_m;
+    double northing_out = northing / y_unit_to_m;
 
-    if (dst_north_first) {{ out_x[idx] = northing; out_y[idx] = easting; }}
-    else                 {{ out_x[idx] = easting;  out_y[idx] = northing; }}
+    if (dst_north_first) {{ out_x[idx] = northing_out; out_y[idx] = easting_out; }}
+    else                 {{ out_x[idx] = easting_out;  out_y[idx] = northing_out; }}
 }}
 """
 )
@@ -1693,8 +1710,10 @@ extern "C" __global__ void __launch_bounds__(256) tm_inverse_ds(
     if (idx >= n) return;
 
     double d1 = in_x[idx], d2 = in_y[idx];
-    double d_n, d_e;
-    if (src_north_first) {{ d_n = d1; d_e = d2; }} else {{ d_e = d1; d_n = d2; }}
+    double d_n_in, d_e_in;
+    if (src_north_first) {{ d_n_in = d1; d_e_in = d2; }} else {{ d_e_in = d1; d_n_in = d2; }}
+    double d_e = d_e_in * x_unit_to_m;
+    double d_n = d_n_in * y_unit_to_m;
 
     // Remove offset/scale in fp64, then convert to ds
     ds_t Cn = ds_from_double(((d_n - y0) / a - Zb) / Qn);
@@ -1843,7 +1862,7 @@ def _get_kernel(projection_name: str, direction: str, compute_dtype: str):
             ds_key = (projection_name, direction)
             if ds_key in _DS_SOURCE_MAP:
                 source, func_name = _DS_SOURCE_MAP[ds_key]
-                source = source.format()
+                source = _inject_linear_unit_args(source.format())
             else:
                 # Fallback to fp64 (RLock allows re-entrant acquisition)
                 warnings.warn(
@@ -1854,10 +1873,12 @@ def _get_kernel(projection_name: str, direction: str, compute_dtype: str):
                 return _get_kernel(projection_name, direction, "float64")
         else:
             template, func_name = _SOURCE_MAP[(projection_name, direction)]
-            source = template.format(
-                real_t=_TYPE_MAP[compute_dtype],
-                pi=_PI_LITERALS[compute_dtype],
-                tol=_TOL_LITERALS[compute_dtype],
+            source = _inject_linear_unit_args(
+                template.format(
+                    real_t=_TYPE_MAP[compute_dtype],
+                    pi=_PI_LITERALS[compute_dtype],
+                    tol=_TOL_LITERALS[compute_dtype],
+                )
             )
 
         kernel = cp.RawKernel(source, func_name)
@@ -2006,41 +2027,39 @@ def fused_transform(
 
     # Build args per projection
     base = (arg1, arg2, out_x, out_y)
+    unit_args = (
+        np.float64(computed.get("x_unit_to_m", 1.0)),
+        np.float64(computed.get("y_unit_to_m", 1.0)),
+    )
+
+    def _with_units(*params):
+        return base + (*params, *unit_args, snf, dnf, nn)
 
     try:
         if projection_name in ("webmerc", "sinu"):
-            args = base + (
+            args = _with_units(
                 real_t(computed["lam0"]),
                 real_t(computed["a"]),
                 real_t(computed["x0"]),
                 real_t(computed["y0"]),
-                snf,
-                dnf,
-                nn,
             )
 
         elif projection_name == "eqc":
-            args = base + (
+            args = _with_units(
                 real_t(computed["cos_lat_ts"]),
                 real_t(computed["lam0"]),
                 real_t(computed["a"]),
                 real_t(computed["x0"]),
                 real_t(computed["y0"]),
-                snf,
-                dnf,
-                nn,
             )
 
         elif projection_name == "merc":
-            args = base + (
+            args = _with_units(
                 real_t(computed["e"]),
                 real_t(computed["lam0"]),
                 real_t(computed["a"]),
                 real_t(computed["x0"]),
                 real_t(computed["y0"]),
-                snf,
-                dnf,
-                nn,
             )
 
         elif projection_name == "tmerc":
@@ -2050,7 +2069,7 @@ def fused_transform(
             else:
                 c6 = [real_t(c) for c in computed["cgb"]]
                 g6 = [real_t(c) for c in computed["utg"]]
-            args = base + (
+            args = _with_units(
                 *c6,
                 *g6,
                 real_t(computed["Qn"]),
@@ -2059,13 +2078,10 @@ def fused_transform(
                 real_t(computed["a"]),
                 real_t(computed["x0"]),
                 real_t(computed["y0"]),
-                snf,
-                dnf,
-                nn,
             )
 
         elif projection_name == "lcc":
-            args = base + (
+            args = _with_units(
                 real_t(computed["n"]),
                 real_t(computed["F"]),
                 real_t(computed["rho0"]),
@@ -2075,13 +2091,10 @@ def fused_transform(
                 real_t(computed["a"]),
                 real_t(computed["x0"]),
                 real_t(computed["y0"]),
-                snf,
-                dnf,
-                nn,
             )
 
         elif projection_name == "stere":
-            args = base + (
+            args = _with_units(
                 real_t(computed["akm1"]),
                 real_t(computed["sign"]),
                 real_t(computed["e"]),
@@ -2089,13 +2102,10 @@ def fused_transform(
                 real_t(computed["a"]),
                 real_t(computed["x0"]),
                 real_t(computed["y0"]),
-                snf,
-                dnf,
-                nn,
             )
 
         elif projection_name == "aea":
-            args = base + (
+            args = _with_units(
                 real_t(computed["n"]),
                 real_t(computed["C"]),
                 real_t(computed["rho0"]),
@@ -2105,14 +2115,11 @@ def fused_transform(
                 real_t(computed["a"]),
                 real_t(computed["x0"]),
                 real_t(computed["y0"]),
-                snf,
-                dnf,
-                nn,
             )
 
         elif projection_name == "laea":
             mode_map = {"oblique": 0, "equatorial": 1, "north_pole": 2, "south_pole": 3}
-            args = base + (
+            args = _with_units(
                 np.int32(mode_map[computed["mode"]]),
                 real_t(computed["Rq"]),
                 real_t(computed["D"]),
@@ -2125,14 +2132,11 @@ def fused_transform(
                 real_t(computed["a"]),
                 real_t(computed["x0"]),
                 real_t(computed["y0"]),
-                snf,
-                dnf,
-                nn,
             )
 
         elif projection_name == "eqearth":
             if direction == "forward":
-                args = base + (
+                args = _with_units(
                     real_t(computed["e"]),
                     real_t(computed["qp"]),
                     real_t(computed["rqda"]),
@@ -2140,12 +2144,9 @@ def fused_transform(
                     real_t(computed["a"]),
                     real_t(computed["x0"]),
                     real_t(computed["y0"]),
-                    snf,
-                    dnf,
-                    nn,
                 )
             else:
-                args = base + (
+                args = _with_units(
                     real_t(computed["e"]),
                     real_t(computed["es"]),
                     real_t(computed["qp"]),
@@ -2154,13 +2155,10 @@ def fused_transform(
                     real_t(computed["a"]),
                     real_t(computed["x0"]),
                     real_t(computed["y0"]),
-                    snf,
-                    dnf,
-                    nn,
                 )
 
         elif projection_name == "omerc":
-            args = base + (
+            args = _with_units(
                 real_t(computed["e"]),
                 real_t(computed["B"]),
                 real_t(computed["A_norm"]),
@@ -2174,13 +2172,10 @@ def fused_transform(
                 real_t(computed["a"]),
                 real_t(computed["x0"]),
                 real_t(computed["y0"]),
-                snf,
-                dnf,
-                nn,
             )
 
         elif projection_name == "krovak":
-            args = base + (
+            args = _with_units(
                 real_t(computed["e"]),
                 real_t(computed["B"]),
                 real_t(computed["k"]),
@@ -2193,37 +2188,28 @@ def fused_transform(
                 real_t(computed["a"]),
                 real_t(computed["x0"]),
                 real_t(computed["y0"]),
-                snf,
-                dnf,
-                nn,
             )
 
         elif projection_name in ("moll", "eck4", "eck6"):
-            args = base + (
+            args = _with_units(
                 real_t(computed["lam0"]),
                 real_t(computed["a"]),
                 real_t(computed["x0"]),
                 real_t(computed["y0"]),
-                snf,
-                dnf,
-                nn,
             )
 
         elif projection_name == "cea":
             if direction == "forward":
-                args = base + (
+                args = _with_units(
                     real_t(computed["e"]),
                     real_t(computed["k0"]),
                     real_t(computed["lam0"]),
                     real_t(computed["a"]),
                     real_t(computed["x0"]),
                     real_t(computed["y0"]),
-                    snf,
-                    dnf,
-                    nn,
                 )
             else:
-                args = base + (
+                args = _with_units(
                     real_t(computed["e"]),
                     real_t(computed["es"]),
                     real_t(computed["k0"]),
@@ -2231,26 +2217,20 @@ def fused_transform(
                     real_t(computed["a"]),
                     real_t(computed["x0"]),
                     real_t(computed["y0"]),
-                    snf,
-                    dnf,
-                    nn,
                 )
 
         elif projection_name in ("ortho", "gnom", "aeqd"):
-            args = base + (
+            args = _with_units(
                 real_t(computed["sin_phi0"]),
                 real_t(computed["cos_phi0"]),
                 real_t(computed["lam0"]),
                 real_t(computed["a"]),
                 real_t(computed["x0"]),
                 real_t(computed["y0"]),
-                snf,
-                dnf,
-                nn,
             )
 
         elif projection_name == "sterea":
-            args = base + (
+            args = _with_units(
                 real_t(computed["e"]),
                 real_t(computed["n"]),
                 real_t(computed["c"]),
@@ -2262,13 +2242,10 @@ def fused_transform(
                 real_t(computed["a"]),
                 real_t(computed["x0"]),
                 real_t(computed["y0"]),
-                snf,
-                dnf,
-                nn,
             )
 
         elif projection_name == "geos":
-            args = base + (
+            args = _with_units(
                 real_t(computed["H"]),
                 real_t(computed["h"]),
                 real_t(computed["r_eq2"]),
@@ -2277,32 +2254,23 @@ def fused_transform(
                 real_t(computed["a"]),
                 real_t(computed["x0"]),
                 real_t(computed["y0"]),
-                snf,
-                dnf,
-                nn,
             )
 
         elif projection_name in ("robin", "natearth"):
-            args = base + (
+            args = _with_units(
                 real_t(computed["lam0"]),
                 real_t(computed["a"]),
                 real_t(computed["x0"]),
                 real_t(computed["y0"]),
-                snf,
-                dnf,
-                nn,
             )
 
         elif projection_name == "wintri":
-            args = base + (
+            args = _with_units(
                 real_t(computed["cos_phi1"]),
                 real_t(computed["lam0"]),
                 real_t(computed["a"]),
                 real_t(computed["x0"]),
                 real_t(computed["y0"]),
-                snf,
-                dnf,
-                nn,
             )
 
         else:

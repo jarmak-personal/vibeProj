@@ -259,6 +259,13 @@ class TransformPipeline:
 
         if self.mode in ("forward", "inverse"):
             self.computed = self.projection.setup(self.proj_params)
+            self.computed.setdefault("x_unit_to_m", self.proj_params.x_unit_to_m)
+            self.computed.setdefault("y_unit_to_m", self.proj_params.y_unit_to_m)
+        elif self.mode == "proj_to_proj":
+            self.src_computed.setdefault("x_unit_to_m", self.src.x_unit_to_m)
+            self.src_computed.setdefault("y_unit_to_m", self.src.y_unit_to_m)
+            self.dst_computed.setdefault("x_unit_to_m", self.dst.x_unit_to_m)
+            self.dst_computed.setdefault("y_unit_to_m", self.dst.y_unit_to_m)
 
     def transform(
         self, x, y, xp, *, z=None, out_x=None, out_y=None, out_z=None, precision="auto", stream=None
@@ -478,6 +485,8 @@ class TransformPipeline:
         a = computed.get("a", self.proj_params.ellipsoid.a)
         x0 = computed.get("x0", self.proj_params.x_0)
         y0 = computed.get("y0", self.proj_params.y_0)
+        x_unit_to_m = computed.get("x_unit_to_m", self.proj_params.x_unit_to_m)
+        y_unit_to_m = computed.get("y_unit_to_m", self.proj_params.y_unit_to_m)
         lam0 = computed.get("lam0", math.radians(self.proj_params.lon_0))
 
         # Convert to radians
@@ -493,6 +502,10 @@ class TransformPipeline:
         # Scale by semi-major axis and add false easting/northing
         easting = easting * a + x0
         northing = northing * a + y0
+
+        # Projected CRS I/O stays in the CRS native linear units.
+        easting = easting / x_unit_to_m
+        northing = northing / y_unit_to_m
 
         # Output in destination CRS axis order
         if self.dst_north_first:
@@ -624,7 +637,13 @@ class TransformPipeline:
         a = computed.get("a", self.proj_params.ellipsoid.a)
         x0 = computed.get("x0", self.proj_params.x_0)
         y0 = computed.get("y0", self.proj_params.y_0)
+        x_unit_to_m = computed.get("x_unit_to_m", self.proj_params.x_unit_to_m)
+        y_unit_to_m = computed.get("y_unit_to_m", self.proj_params.y_unit_to_m)
         lam0 = computed.get("lam0", math.radians(self.proj_params.lon_0))
+
+        # Projected CRS inputs are expressed in the CRS native linear units.
+        easting = easting * x_unit_to_m
+        northing = northing * y_unit_to_m
 
         # Remove false easting/northing and scale
         x = (easting - x0) / a

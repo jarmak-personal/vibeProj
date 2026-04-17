@@ -1,5 +1,7 @@
 """Tests for CRS parsing and resolution."""
 
+import pytest
+
 from vibeproj.crs import parse_crs_input, resolve_projection_params
 
 
@@ -60,6 +62,16 @@ def test_resolve_lcc():
     crs = parse_crs_input(2154)  # France Lambert 93
     params = resolve_projection_params(crs)
     assert params.projection_name == "lcc"
+
+
+def test_resolve_lcc_us_survey_foot_units():
+    crs = parse_crs_input(2263)  # NAD83 / New York Long Island (ftUS)
+    params = resolve_projection_params(crs)
+    assert params.projection_name == "lcc"
+    assert params.x_unit_to_m == pytest.approx(0.30480060960121924)
+    assert params.y_unit_to_m == pytest.approx(0.30480060960121924)
+    assert params.x_0 == pytest.approx(300000.0)
+    assert params.y_0 == pytest.approx(0.0)
 
 
 def test_resolve_albers():

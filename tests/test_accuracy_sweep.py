@@ -17,6 +17,7 @@ import pytest
 from pyproj import Proj
 from pyproj import Transformer as PyProjTransformer
 
+from _accuracy_cases import EPSG_SWEEP, WGS84_A, finite_mask, make_lon_lat_grid
 from vibeproj import Transformer
 from vibeproj.crs import ProjectionParams
 from vibeproj.ellipsoid import WGS84
@@ -26,82 +27,10 @@ from vibeproj.pipeline import TransformPipeline
 # Helpers
 # ---------------------------------------------------------------------------
 
-WGS84_A = 6378137.0
-
-
-def _make_grid(lat_range, lon_range, n=15):
-    """Create an n x n grid and return (lon, lat) arrays in always_xy order."""
-    lat = np.linspace(lat_range[0], lat_range[1], n)
-    lon = np.linspace(lon_range[0], lon_range[1], n)
-    lon_g, lat_g = np.meshgrid(lon, lat)
-    return lon_g.ravel(), lat_g.ravel()
-
-
-def _finite_mask(*arrays):
-    """Return a boolean mask where all arrays are finite."""
-    mask = np.ones(arrays[0].shape, dtype=bool)
-    for a in arrays:
-        mask &= np.isfinite(a)
-    return mask
-
 
 # ---------------------------------------------------------------------------
 # EPSG sweep registry
 # ---------------------------------------------------------------------------
-
-EPSG_SWEEP = [
-    # (label, crs_spec, lat_range, lon_range, fwd_tol_m, inv_tol_deg)
-    #
-    # Ranges pushed to CRS area-of-use edges where projection math is most
-    # stressed.  Tolerances calibrated against pyproj on 15x15 grids.
-    #
-    # --- LCC (sign-sensitive n) ---
-    ("lcc_nh_france", "EPSG:2154", (41.2, 51.5), (-9.8, 10.3), 0.01, 1e-9),
-    ("lcc_sh_nz", "EPSG:3851", (-55, -26), (161, 179), 0.01, 1e-9),
-    ("lcc_sh_australia", "EPSG:3112", (-44, -10), (112, 154), 0.01, 1e-9),
-    #
-    # --- AEA (sign-sensitive n) ---
-    ("aea_nh_conus", "EPSG:5070", (24.5, 49.5), (-124.5, -66.5), 0.01, 1e-9),
-    ("aea_sh_australia", "EPSG:3577", (-44, -10), (112, 154), 0.01, 1e-9),
-    #
-    # --- Polar Stereographic (sign flag) ---
-    # Avoid exact poles (lon undefined at ±90°; pyproj and vibeproj may
-    # return different arbitrary longitudes, causing a spurious 180° diff).
-    ("stere_south", "EPSG:3031", (-89.9, -60), (-180, 180), 0.1, 1e-8),
-    ("stere_north", "EPSG:3413", (60, 89.9), (-180, 180), 0.1, 1e-8),
-    #
-    # --- LAEA (oblique) ---
-    ("laea_oblique_nh", "EPSG:3035", (33, 73), (-32, 47), 0.01, 1e-7),
-    #
-    # --- Transverse Mercator (hemisphere) — full zone extent ---
-    ("tmerc_nh", "EPSG:32631", (0, 84), (0, 6), 1e-3, 1e-9),
-    ("tmerc_sh", "EPSG:32756", (-80, 0), (150, 156), 1e-3, 1e-9),
-    ("tmerc_equatorial", "EPSG:32648", (-8, 8), (102, 108), 1e-3, 1e-9),
-    #
-    # --- Web Mercator ---
-    ("webmerc", "EPSG:3857", (-85, 85), (-179, 179), 0.01, 1e-9),
-    #
-    # --- Mercator ---
-    ("merc", "EPSG:3395", (-80, 80), (-179, 179), 0.01, 1e-9),
-    #
-    # --- Equidistant Cylindrical ---
-    ("eqc", "EPSG:4087", (-80, 80), (-179, 179), 0.01, 1e-9),
-    #
-    # --- Equal Earth ---
-    ("eqearth_greenwich", "EPSG:8857", (-85, 85), (-179, 179), 0.01, 1e-7),
-    #
-    # --- Cylindrical Equal Area ---
-    ("cea_ease", "EPSG:6933", (-85, 85), (-179, 179), 0.1, 1e-7),
-    #
-    # --- Oblique Mercator ---
-    ("omerc_malaysia", "EPSG:3168", (1, 7), (99.5, 104.5), 0.01, 1e-9),
-    #
-    # --- Oblique Stereographic (cross-datum) ---
-    ("sterea_rd", "EPSG:28992", (50.7, 53.7), (3.2, 7.3), 10.0, 1e-4),
-    #
-    # --- Krovak (cross-datum) ---
-    ("krovak_cz", "EPSG:5514", (48.5, 51.1), (12, 18.9), 17.0, 2e-4),
-]
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +140,7 @@ def _pp_proj_inverse(proj_name, x, y, lat_0=0.0, lon_0=0.0):
 )
 def test_forward_vs_pyproj_epsg(label, crs_spec, lat_range, lon_range, fwd_tol_m, inv_tol_deg):
     """Forward: vibeproj vs pyproj on an n x n grid (EPSG-based)."""
-    lon, lat = _make_grid(lat_range, lon_range, n=15)
+    lon, lat = make_lon_lat_grid(lat_range, lon_range, n=15)
 
     vp = Transformer.from_crs("EPSG:4326", crs_spec)  # always_xy=True default
     pp = PyProjTransformer.from_crs("EPSG:4326", crs_spec, always_xy=True)
@@ -219,7 +148,7 @@ def test_forward_vs_pyproj_epsg(label, crs_spec, lat_range, lon_range, fwd_tol_m
     vp_x, vp_y = vp.transform(lon, lat)
     pp_x, pp_y = pp.transform(lon, lat)
 
-    mask = _finite_mask(vp_x, vp_y, pp_x, pp_y)
+    mask = finite_mask(vp_x, vp_y, pp_x, pp_y)
     assert mask.sum() > 0, f"No finite points for {label}"
 
     err = np.sqrt((vp_x[mask] - pp_x[mask]) ** 2 + (vp_y[mask] - pp_y[mask]) ** 2)
@@ -234,7 +163,7 @@ def test_forward_vs_pyproj_epsg(label, crs_spec, lat_range, lon_range, fwd_tol_m
 )
 def test_inverse_vs_pyproj_epsg(label, crs_spec, lat_range, lon_range, fwd_tol_m, inv_tol_deg):
     """Inverse: use pyproj forward as input, compare vibeproj inverse vs pyproj inverse."""
-    lon, lat = _make_grid(lat_range, lon_range, n=15)
+    lon, lat = make_lon_lat_grid(lat_range, lon_range, n=15)
 
     vp = Transformer.from_crs("EPSG:4326", crs_spec)  # always_xy=True default
     pp = PyProjTransformer.from_crs("EPSG:4326", crs_spec, always_xy=True)
@@ -242,7 +171,7 @@ def test_inverse_vs_pyproj_epsg(label, crs_spec, lat_range, lon_range, fwd_tol_m
     # Generate projected coords via pyproj forward
     pp_x, pp_y = pp.transform(lon, lat)
 
-    mask_fwd = _finite_mask(pp_x, pp_y)
+    mask_fwd = finite_mask(pp_x, pp_y)
     if mask_fwd.sum() == 0:
         pytest.skip(f"No finite forward points for {label}")
 
@@ -257,7 +186,7 @@ def test_inverse_vs_pyproj_epsg(label, crs_spec, lat_range, lon_range, fwd_tol_m
     )
     vp_inv_lon, vp_inv_lat = vp.transform(pp_x_valid, pp_y_valid, direction="INVERSE")
 
-    mask_inv = _finite_mask(pp_inv_lon, pp_inv_lat, vp_inv_lon, vp_inv_lat)
+    mask_inv = finite_mask(pp_inv_lon, pp_inv_lat, vp_inv_lon, vp_inv_lat)
     assert mask_inv.sum() > 0, f"No finite inverse points for {label}"
 
     err_lon = float(np.max(np.abs(vp_inv_lon[mask_inv] - pp_inv_lon[mask_inv])))
@@ -283,12 +212,12 @@ def test_forward_vs_pyproj_proj(
     label, proj_name, lat_0, lon_0, lat_range, lon_range, fwd_tol_m, inv_tol_deg
 ):
     """Forward: vibeproj vs pyproj on an n x n grid (+proj-based spherical)."""
-    lon, lat = _make_grid(lat_range, lon_range, n=15)
+    lon, lat = make_lon_lat_grid(lat_range, lon_range, n=15)
 
     vp_x, vp_y = _vp_proj_forward(proj_name, lon, lat, lat_0=lat_0, lon_0=lon_0)
     pp_x, pp_y = _pp_proj_forward(proj_name, lon, lat, lat_0=lat_0, lon_0=lon_0)
 
-    mask = _finite_mask(vp_x, vp_y, pp_x, pp_y)
+    mask = finite_mask(vp_x, vp_y, pp_x, pp_y)
     assert mask.sum() > 0, f"No finite points for {label}"
 
     err = np.sqrt((vp_x[mask] - pp_x[mask]) ** 2 + (vp_y[mask] - pp_y[mask]) ** 2)
@@ -305,12 +234,12 @@ def test_inverse_vs_pyproj_proj(
     label, proj_name, lat_0, lon_0, lat_range, lon_range, fwd_tol_m, inv_tol_deg
 ):
     """Inverse: use pyproj forward as input, compare vibeproj inverse vs pyproj inverse."""
-    lon, lat = _make_grid(lat_range, lon_range, n=15)
+    lon, lat = make_lon_lat_grid(lat_range, lon_range, n=15)
 
     # Generate projected coords via pyproj forward
     pp_x, pp_y = _pp_proj_forward(proj_name, lon, lat, lat_0=lat_0, lon_0=lon_0)
 
-    mask_fwd = _finite_mask(pp_x, pp_y)
+    mask_fwd = finite_mask(pp_x, pp_y)
     if mask_fwd.sum() == 0:
         pytest.skip(f"No finite forward points for {label}")
 
@@ -325,7 +254,7 @@ def test_inverse_vs_pyproj_proj(
         proj_name, pp_x_valid, pp_y_valid, lat_0=lat_0, lon_0=lon_0
     )
 
-    mask_inv = _finite_mask(pp_inv_lon, pp_inv_lat, vp_inv_lon, vp_inv_lat)
+    mask_inv = finite_mask(pp_inv_lon, pp_inv_lat, vp_inv_lon, vp_inv_lat)
     assert mask_inv.sum() > 0, f"No finite inverse points for {label}"
 
     err_lon = float(np.max(np.abs(vp_inv_lon[mask_inv] - pp_inv_lon[mask_inv])))

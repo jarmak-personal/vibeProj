@@ -7,6 +7,7 @@ import pytest
 from numpy.testing import assert_allclose
 from pyproj import Transformer as PyProjTransformer
 
+from _accuracy_cases import UNIT_EQUIVALENT_PAIRS
 from vibeproj import Transformer
 
 
@@ -265,6 +266,52 @@ def test_bounds_lcc():
 
     # Conic projections have significant curvature — allow wider tolerance
     assert_allclose(got, expected, atol=10.0)
+
+
+# ---------------------------------------------------------------------------
+# Non-meter projected units
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "label, src_crs, dst_crs, lat_range, lon_range, tol_m",
+    UNIT_EQUIVALENT_PAIRS,
+    ids=[case[0] for case in UNIT_EQUIVALENT_PAIRS],
+)
+def test_bounds_non_meter_forward_inverse(label, src_crs, dst_crs, lat_range, lon_range, tol_m):
+    """Non-meter projected CRS bounds match pyproj in both directions."""
+    left, bottom, right, top = lon_range[0], lat_range[0], lon_range[1], lat_range[1]
+
+    expected = _pyproj_bounds("EPSG:4326", src_crs, left, bottom, right, top)
+    t = Transformer.from_crs("EPSG:4326", src_crs)
+    got = t.transform_bounds(left, bottom, right, top)
+    assert_allclose(got, expected, atol=1.0)
+
+    expected_inv = _pyproj_bounds(src_crs, "EPSG:4326", *expected)
+    t_inv = Transformer.from_crs(src_crs, "EPSG:4326")
+    got_inv = t_inv.transform_bounds(*expected)
+    assert_allclose(got_inv, expected_inv, atol=0.001)
+
+
+@pytest.mark.parametrize(
+    "label, src_crs, dst_crs, lat_range, lon_range, tol_m",
+    UNIT_EQUIVALENT_PAIRS,
+    ids=[case[0] for case in UNIT_EQUIVALENT_PAIRS],
+)
+def test_bounds_projected_unit_pairs(label, src_crs, dst_crs, lat_range, lon_range, tol_m):
+    """Projected-to-projected bounds match pyproj for meter/foot equivalent CRSs."""
+    left, bottom, right, top = lon_range[0], lat_range[0], lon_range[1], lat_range[1]
+    src_bounds = _pyproj_bounds("EPSG:4326", src_crs, left, bottom, right, top)
+
+    expected = _pyproj_bounds(src_crs, dst_crs, *src_bounds)
+    t = Transformer.from_crs(src_crs, dst_crs)
+    got = t.transform_bounds(*src_bounds)
+    assert_allclose(got, expected, atol=1.0)
+
+    expected_inv = _pyproj_bounds(dst_crs, src_crs, *expected)
+    t_inv = Transformer.from_crs(dst_crs, src_crs)
+    got_inv = t_inv.transform_bounds(*expected)
+    assert_allclose(got_inv, expected_inv, atol=1.0)
 
 
 # ---------------------------------------------------------------------------

@@ -93,6 +93,24 @@ def _make_grid(min_corner, max_corner, nx=50, ny=50):
     return x.ravel(), y.ravel()
 
 
+def _run_buffers_gpu_vs_cpu(crs_from, crs_to, x, y, atol=1e-4, direction="FORWARD"):
+    """Run transform_buffers on GPU and CPU, compare results."""
+    t = Transformer.from_crs(crs_from, crs_to, always_xy=False)
+
+    x_np = np.asarray(x, dtype=np.float64)
+    y_np = np.asarray(y, dtype=np.float64)
+    cpu_x, cpu_y = t.transform_buffers(x_np, y_np, direction=direction)
+
+    x_cp = cp.asarray(x, dtype=cp.float64)
+    y_cp = cp.asarray(y, dtype=cp.float64)
+    gpu_x, gpu_y = t.transform_buffers(x_cp, y_cp, direction=direction)
+
+    assert_allclose(cp.asnumpy(gpu_x), np.asarray(cpu_x), atol=atol)
+    assert_allclose(cp.asnumpy(gpu_y), np.asarray(cpu_y), atol=atol)
+
+    return cpu_x, cpu_y, gpu_x, gpu_y
+
+
 # ---------------------------------------------------------------------------
 # Transverse Mercator fused kernel tests
 # ---------------------------------------------------------------------------
@@ -135,6 +153,22 @@ def test_tmerc_fused_roundtrip():
 
     assert_allclose(cp.asnumpy(lat2), cp.asnumpy(lat), atol=1e-7)
     assert_allclose(cp.asnumpy(lon2), cp.asnumpy(lon), atol=1e-7)
+
+
+def test_tmerc_non_meter_transform_buffers_fused_matches_numpy():
+    """US-foot TM fused buffers match the NumPy path."""
+    lat = np.array([31.75, 34.0, 36.5])
+    lon = np.array([-111.2, -110.4, -109.3])
+    _run_buffers_gpu_vs_cpu("EPSG:4326", "EPSG:2222", lat, lon, atol=0.01)
+
+
+def test_tmerc_non_meter_inverse_transform_buffers_fused_matches_numpy():
+    """US-foot TM fused inverse buffers match the NumPy path."""
+    lat = np.array([31.75, 34.0, 36.5])
+    lon = np.array([-111.2, -110.4, -109.3])
+    t = Transformer.from_crs("EPSG:4326", "EPSG:2222", always_xy=False)
+    proj_x, proj_y = t.transform(np.asarray(lat), np.asarray(lon))
+    _run_buffers_gpu_vs_cpu("EPSG:2222", "EPSG:4326", proj_x, proj_y, atol=1e-7)
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +297,22 @@ def test_lcc_fused_roundtrip():
     lat2, lon2 = t.transform(x, y, direction="INVERSE")
     assert_allclose(cp.asnumpy(lat2), cp.asnumpy(lat), atol=1e-7)
     assert_allclose(cp.asnumpy(lon2), cp.asnumpy(lon), atol=1e-7)
+
+
+def test_lcc_non_meter_transform_buffers_fused_matches_numpy():
+    """US-survey-foot LCC fused buffers match the NumPy path."""
+    lat = np.array([40.6, 40.85, 41.1])
+    lon = np.array([-74.05, -73.7, -72.2])
+    _run_buffers_gpu_vs_cpu("EPSG:4326", "EPSG:2263", lat, lon, atol=0.01)
+
+
+def test_lcc_non_meter_inverse_transform_buffers_fused_matches_numpy():
+    """US-survey-foot LCC fused inverse buffers match the NumPy path."""
+    lat = np.array([40.6, 40.85, 41.1])
+    lon = np.array([-74.05, -73.7, -72.2])
+    t = Transformer.from_crs("EPSG:4326", "EPSG:2263", always_xy=False)
+    proj_x, proj_y = t.transform(np.asarray(lat), np.asarray(lon))
+    _run_buffers_gpu_vs_cpu("EPSG:2263", "EPSG:4326", proj_x, proj_y, atol=1e-7)
 
 
 # ---------------------------------------------------------------------------
