@@ -207,9 +207,7 @@ def test_proj_to_proj_transform_buffers_unit_pairs_vs_pyproj(
     )
 
     exp_inv_x, exp_inv_y = pp.transform(exp_x, exp_y, direction=TransformDirection.INVERSE)
-    got_inv_x, got_inv_y = vp.transform_buffers(
-        exp_x.copy(), exp_y.copy(), direction="INVERSE"
-    )
+    got_inv_x, got_inv_y = vp.transform_buffers(exp_x.copy(), exp_y.copy(), direction="INVERSE")
     _assert_proj_to_proj_matches(
         "transform_buffers",
         got_inv_x,

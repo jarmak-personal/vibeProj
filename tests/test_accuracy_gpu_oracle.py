@@ -238,7 +238,9 @@ def _proj_to_proj_inputs(src_crs, lat_range, lon_range):
     return src_x[mask], src_y[mask]
 
 
-def _assert_proj_to_proj_matches(api_name, result_x, result_y, exp_x, exp_y, tol_m, label, direction):
+def _assert_proj_to_proj_matches(
+    api_name, result_x, result_y, exp_x, exp_y, tol_m, label, direction
+):
     max_err = _max_planar_error_m(result_x, result_y, exp_x, exp_y)
     assert max_err < tol_m, (
         f"{label} GPU {api_name} {direction} proj_to_proj error {max_err:.6e} m exceeds {tol_m} m"
@@ -358,11 +360,7 @@ def test_gpu_proj_to_proj_transform_chunked_unit_pairs_vs_pyproj(
 
 @pytest.mark.parametrize(
     "label, crs_spec, lat_range, lon_range, fwd_tol_m, inv_tol_deg",
-    [
-        case
-        for case in EPSG_SWEEP
-        if case[1] in ("EPSG:2222", "EPSG:3435")
-    ],
+    [case for case in EPSG_SWEEP if case[1] in ("EPSG:2222", "EPSG:3435")],
     ids=[f"{case[0]}_ds" for case in EPSG_SWEEP if case[1] in ("EPSG:2222", "EPSG:3435")],
 )
 def test_gpu_transform_buffers_ds_vs_pyproj_non_meter_tmerc(
