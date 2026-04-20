@@ -281,14 +281,14 @@ _INV_SIGNATURE = _FWD_SIGNATURE  # same
 
 _KERNEL_UNIT_SIGNATURE_NEEDLE = "int src_north_first, int dst_north_first, int n"
 _KERNEL_UNIT_SIGNATURE_REPLACEMENT = (
-    "double x_unit_to_m, double y_unit_to_m,\n"
-    "    int src_north_first, int dst_north_first, int n"
+    "double x_unit_to_m, double y_unit_to_m,\n    int src_north_first, int dst_north_first, int n"
 )
 
 
 def _inject_linear_unit_args(source: str) -> str:
     """Inject projected-unit ABI params into compiled kernel source."""
     return source.replace(_KERNEL_UNIT_SIGNATURE_NEEDLE, _KERNEL_UNIT_SIGNATURE_REPLACEMENT)
+
 
 # ===================================================================
 # Plate Carrée kernels
