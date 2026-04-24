@@ -3,7 +3,7 @@
 project = "vibeProj"
 copyright = "2026, vibeProj Contributors"
 author = "vibeProj Contributors"
-release = "1.0.4"
+release = "1.0.5"
 
 extensions = [
     "myst_parser",
