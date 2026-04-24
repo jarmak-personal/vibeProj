@@ -9,16 +9,16 @@ from vibeproj import Transformer
 t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
 
 # Transform a single point (scalar)
-x, y = t.transform(49.0, 2.0)
+x, y = t.transform(2.0, 49.0)
 
 # Transform arrays
 import numpy as np
-lat = np.array([49.0, 48.8566, 40.7128])
 lon = np.array([2.0, 2.3522, -74.006])
-x, y = t.transform(lat, lon)
+lat = np.array([49.0, 48.8566, 40.7128])
+x, y = t.transform(lon, lat)
 
 # Inverse transform
-lat2, lon2 = t.transform(x, y, direction="INVERSE")
+lon2, lat2 = t.transform(x, y, direction="INVERSE")
 ```
 
 ## CRS input formats
@@ -47,11 +47,11 @@ run on the GPU automatically using fused NVRTC kernels:
 ```python
 import cupy as cp
 
-lat = cp.array([49.0, 48.8566, 40.7128], dtype=cp.float64)
 lon = cp.array([2.0, 2.3522, -74.006], dtype=cp.float64)
+lat = cp.array([49.0, 48.8566, 40.7128], dtype=cp.float64)
 
 t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
-x, y = t.transform(lat, lon)  # runs on GPU
+x, y = t.transform(lon, lat)  # runs on GPU
 ```
 
 NumPy arrays always use the CPU path. CuPy arrays always use the GPU path.
@@ -68,15 +68,15 @@ import cupy as cp
 t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
 
 # Input arrays (already on GPU)
-lat = cp.asarray(lat_data, dtype=cp.float64)
 lon = cp.asarray(lon_data, dtype=cp.float64)
+lat = cp.asarray(lat_data, dtype=cp.float64)
 
 # Pre-allocate output
-out_x = cp.empty_like(lat)
-out_y = cp.empty_like(lon)
+out_x = cp.empty_like(lon)
+out_y = cp.empty_like(lat)
 
 # Transform in-place -- no intermediate allocation
-t.transform_buffers(lat, lon, out_x=out_x, out_y=out_y)
+t.transform_buffers(lon, lat, out_x=out_x, out_y=out_y)
 ```
 
 The returned arrays are the same objects as `out_x` and `out_y`.

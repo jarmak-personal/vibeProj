@@ -183,10 +183,11 @@ def test_extract_helmert_same_datum_returns_none():
 
 
 def test_extract_helmert_wgs84_grs80_small_shift():
-    """WGS84 -> NAD83 has a ~1m Helmert, but _cross_datum is False for this pair.
+    """WGS84 -> NAD83 has optional Helmert operations behind PROJ's no-op.
 
-    extract_helmert() will find the small shift if called directly, but the
-    Transformer never calls it because the ellipsoids are effectively identical.
+    extract_helmert() can find the small shift if called directly, but
+    Transformer uses the operation plan and keeps PROJ's best authoritative
+    no-op strategy for this pair.
     """
     from pyproj import CRS
     from vibeproj.crs import extract_helmert
@@ -232,17 +233,40 @@ def test_same_datum_pipeline_no_helmert():
     for src, dst in [
         ("EPSG:4326", "EPSG:32631"),
         ("EPSG:4326", "EPSG:3857"),
-        ("EPSG:4326", "EPSG:2154"),
-        ("EPSG:4326", "EPSG:5070"),
+        ("EPSG:4326", "EPSG:32618"),
     ]:
         t = Transformer.from_crs(src, dst)
         assert t._helmert is None, f"Expected no Helmert for {src} -> {dst}"
+        assert t._cross_datum is False
 
 
-def test_wgs84_grs80_no_helmert():
-    """WGS84/GRS80 treated as same datum (0.1mm difference in b)."""
+def test_wgs84_grs80_authoritative_noop_plan():
+    """WGS84/NAD83 is cross-datum, but PROJ's best operation is a no-op."""
     t = Transformer.from_crs("EPSG:4326", "EPSG:5070")  # NAD83/GRS80 Albers
+    assert t._cross_datum is True
     assert t._helmert is None
+    assert t._datum_plan.uses_authoritative_noop is True
+    assert t.accuracy == "datum no-op (4 m PROJ accuracy)"
+
+
+def test_grid_required_same_ellipsoid_warns_when_unsupported():
+    """Same ellipsoid does not hide datum-grid requirements."""
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        t = Transformer.from_crs("EPSG:4269", "EPSG:6318")
+
+    assert t._cross_datum is True
+    assert t._helmert is None
+    assert t._datum_plan.warning_level == "unsupported"
+    assert any("nadcon5" in grid for grid in t._datum_plan.missing_grids)
+    assert t.accuracy == "degraded \u2014 no datum shift applied"
+
+    our_warnings = [
+        w for w in caught if "grid-based shifts" in str(w.message).lower()
+    ]
+    assert len(our_warnings) == 1
 
 
 def test_cross_datum_has_helmert():

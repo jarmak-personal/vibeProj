@@ -52,8 +52,8 @@
 from vibeproj import Transformer
 
 t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
-x, y = t.transform(49.0, 2.0)           # scalar
-x, y = t.transform(lat_array, lon_array) # NumPy or CuPy arrays
+x, y = t.transform(2.0, 49.0)           # scalar
+x, y = t.transform(lon_array, lat_array) # NumPy or CuPy arrays
 ```
 
 ```{raw} html

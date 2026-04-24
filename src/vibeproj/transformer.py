@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal, overload
 
 import numpy as np
 
-from vibeproj.crs import resolve_transform
+from vibeproj.crs import build_datum_operation_plan, resolve_transform
 from vibeproj.pipeline import TransformPipeline
 from vibeproj.runtime import get_array_module, to_device
 
@@ -105,18 +105,21 @@ class Transformer:
         self._src_label = f"EPSG:{src_epsg}" if src_epsg else str(crs_from)
         self._dst_label = f"EPSG:{dst_epsg}" if dst_epsg else str(crs_to)
 
-        # Datum shift detection and Helmert extraction
-        src_ell = src_crs.ellipsoid
-        dst_ell = dst_crs.ellipsoid
-        self._cross_datum = (
-            src_ell is not None
-            and dst_ell is not None
-            and abs(src_ell.semi_major_metre - dst_ell.semi_major_metre) > 1.0
-        )
+        # Datum shift detection and Helmert extraction.  Datum/reference-frame
+        # changes are CRS operations, not ellipsoid-size comparisons.
+        self._datum_plan = build_datum_operation_plan(src_crs, dst_crs)
+        self._cross_datum = self._datum_plan.cross_datum
         self._helmert = None
         self._helmert_has_rates = False
         self._epoch_applied = False
-        if self._cross_datum:
+        should_try_helmert = self._cross_datum and (
+            self._datum_plan.best_has_helmert
+            or (
+                self._datum_plan.has_available_helmert
+                and not self._datum_plan.uses_authoritative_noop
+            )
+        )
+        if should_try_helmert:
             from vibeproj.crs import extract_helmert
 
             helmert_raw = extract_helmert(src_crs, dst_crs)
@@ -167,15 +170,25 @@ class Transformer:
 
                 self._svd_correction = correction
 
-        if self._cross_datum and self._helmert is None and self._svd_correction is None:
+        if (
+            self._cross_datum
+            and self._helmert is None
+            and self._svd_correction is None
+            and self._datum_plan.warning_level == "unsupported"
+        ):
             # No Helmert or SVD correction available (grid-only datum shift)
-            src_datum = src_crs.datum.name if src_crs.datum else "unknown"
-            dst_datum = dst_crs.datum.name if dst_crs.datum else "unknown"
+            src_datum = self._datum_plan.source_datum or "unknown"
+            dst_datum = self._datum_plan.target_datum or "unknown"
+            grid_msg = ""
+            if self._datum_plan.missing_grids:
+                grid_msg = f" Missing grids: {', '.join(self._datum_plan.missing_grids)}."
             warnings.warn(
                 f"Source and destination CRS use different datums "
                 f"({src_datum} \u2192 {dst_datum}). No Helmert transformation "
                 f"available \u2014 grid-based shifts (NTv2) are not yet supported. "
-                f"Results may differ from pyproj by meters to hundreds of meters.",
+                f"Results may differ from pyproj by meters to hundreds of meters."
+                f"{grid_msg}",
+                RuntimeWarning,
                 stacklevel=2,
             )
 
@@ -265,12 +278,20 @@ class Transformer:
             "sub-decimeter" — cross-datum with 15-param time-dependent Helmert
             evaluated at a known epoch.
             "sub-meter" — cross-datum with 7-param Helmert.
+            "datum no-op (... m PROJ accuracy)" — PROJ selected an explicit
+            no-op datum operation with meter-level expected accuracy.
             "degraded — no datum shift applied" — different datums; results
             may differ from pyproj by meters to hundreds of meters.
         """
         if self._svd_correction is not None:
             return "sub-5cm"
         if self._cross_datum and self._helmert is None:
+            if (
+                self._datum_plan.uses_authoritative_noop
+                and self._datum_plan.expected_accuracy_m is not None
+            ):
+                acc = f"{self._datum_plan.expected_accuracy_m:g}"
+                return f"datum no-op ({acc} m PROJ accuracy)"
             return "degraded \u2014 no datum shift applied"
         if self._cross_datum and self._helmert is not None:
             if self._epoch_applied:

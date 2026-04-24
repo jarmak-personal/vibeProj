@@ -75,10 +75,11 @@ x, y = pipe.transform(lat_array, lon_array, np)  # or cp for GPU
 
 ## Datum shifting
 
-When the source and destination CRS use different geodetic datums (e.g.,
-WGS84 vs OSGB36), vibeProj applies a **Helmert 7-parameter transformation**
-automatically. This covers ~80% of real-world cross-datum transforms with
-~1--5 metre accuracy.
+When the source and destination CRS use different geodetic datums or
+reference frames, vibeProj asks pyproj/PROJ for the coordinate-operation
+plan instead of guessing from ellipsoid parameters. If the selected or
+best supported operation contains a Helmert step, vibeProj applies a
+**Helmert 7-parameter transformation** automatically.
 
 ```python
 # Cross-datum: WGS84 -> British National Grid (OSGB36 / Airy 1830)
@@ -89,8 +90,11 @@ print(t.accuracy)  # "sub-meter"
 
 Helmert parameters are extracted from pyproj's EPSG database at construction
 time; the actual datum shift math runs on vibeProj's own GPU kernels (or
-NumPy on CPU). Same-datum transforms have **zero overhead** -- the datum
-shift code path is bypassed entirely when no Helmert is needed.
+NumPy on CPU). Same-datum transforms have **zero overhead**. Some datum
+pairs, such as common WGS84/NAD83 operations, are also represented by PROJ
+as explicit no-op operations with meter-level expected accuracy; vibeProj
+keeps those no-op transforms but reports them separately from same-datum
+sub-millimeter transforms.
 
 15-parameter time-dependent Helmert is also supported for sub-decimeter
 accuracy on modern datum pairs (e.g. ITRF to ETRS89). Pass an explicit

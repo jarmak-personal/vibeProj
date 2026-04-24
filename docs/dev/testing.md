@@ -43,12 +43,12 @@ For projections with EPSG codes, validate output against pyproj:
 
 ```python
 def test_my_forward():
-    pp = PyProjTransformer.from_crs("EPSG:4326", "EPSG:XXXX")
+    pp = PyProjTransformer.from_crs("EPSG:4326", "EPSG:XXXX", always_xy=True)
     t = Transformer.from_crs("EPSG:4326", "EPSG:XXXX")
 
-    lat, lon = np.array([40.0]), np.array([-74.0])
-    exp_x, exp_y = pp.transform(lat, lon)
-    vp_x, vp_y = t.transform(lat, lon)
+    lon, lat = np.array([-74.0]), np.array([40.0])
+    exp_x, exp_y = pp.transform(lon, lat)
+    vp_x, vp_y = t.transform(lon, lat)
 
     assert_allclose(vp_x, exp_x, atol=0.01)
     assert_allclose(vp_y, exp_y, atol=0.01)
@@ -61,11 +61,11 @@ Forward then inverse should recover the original coordinates:
 ```python
 def test_my_roundtrip():
     t = Transformer.from_crs("EPSG:4326", "EPSG:XXXX")
-    lat, lon = 40.0, -74.0
-    x, y = t.transform(lat, lon)
-    lat2, lon2 = t.transform(x, y, direction="INVERSE")
-    assert_allclose(lat2, lat, atol=1e-7)
+    lon, lat = -74.0, 40.0
+    x, y = t.transform(lon, lat)
+    lon2, lat2 = t.transform(x, y, direction="INVERSE")
     assert_allclose(lon2, lon, atol=1e-7)
+    assert_allclose(lat2, lat, atol=1e-7)
 ```
 
 ### GPU vs CPU comparison

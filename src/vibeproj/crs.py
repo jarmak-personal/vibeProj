@@ -8,7 +8,7 @@ from __future__ import annotations
 import math
 import warnings
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from pyproj import CRS
 from pyproj.exceptions import CRSError
@@ -42,6 +42,40 @@ class ProjectionParams:
     north_first: bool = False
     # Extra params for specific projections
     extra: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class DatumOperationPlan:
+    """Datum/reference-frame operation metadata from pyproj/PROJ.
+
+    This is intentionally an internal planning layer, not a public
+    TransformerPlan API.  It records whether a datum operation is needed and
+    how well vibeProj can represent the operation with its current kernels.
+    """
+
+    cross_datum: bool
+    source_datum: str | None = None
+    target_datum: str | None = None
+    operation: str | None = None
+    expected_accuracy_m: float | None = None
+    area_of_use: str | None = None
+    best_available: bool | None = None
+    missing_grids: tuple[str, ...] = ()
+    best_has_helmert: bool = False
+    has_available_helmert: bool = False
+    best_is_noop: bool = False
+    best_is_ballpark: bool = False
+    warning_level: Literal["ok", "degraded", "unsupported"] = "ok"
+
+    @property
+    def uses_authoritative_noop(self) -> bool:
+        """True when PROJ's best available operation is an explicit no-op."""
+        return (
+            self.cross_datum
+            and self.best_available is True
+            and self.best_is_noop
+            and not self.best_is_ballpark
+        )
 
 
 def parse_crs_input(crs_input: CRSInput) -> CRS:
@@ -349,6 +383,120 @@ def resolve_transform(
     src_params = resolve_projection_params(src_crs)
     dst_params = resolve_projection_params(dst_crs)
     return src_params, dst_params, src_crs, dst_crs
+
+
+def _safe_proj4(transformer) -> str:
+    """Return a transformer's PROJ string, or an empty string if unavailable."""
+    try:
+        return transformer.to_proj4() or ""
+    except Exception:
+        return ""
+
+
+def _transformer_has_helmert(transformer) -> bool:
+    return "+proj=helmert" in _safe_proj4(transformer)
+
+
+def _transformer_is_noop(transformer) -> bool:
+    return _safe_proj4(transformer).strip() == "+proj=noop"
+
+
+def _missing_grid_names(unavailable_operations) -> tuple[str, ...]:
+    """Return unique missing grid names from TransformerGroup metadata."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for operation in unavailable_operations:
+        grids = getattr(operation, "grids", ()) or ()
+        for grid in grids:
+            if getattr(grid, "available", True):
+                continue
+            name = getattr(grid, "short_name", "") or getattr(grid, "full_name", "")
+            if name and name not in seen:
+                names.append(name)
+                seen.add(name)
+    return tuple(names)
+
+
+def build_datum_operation_plan(src_crs: CRS, dst_crs: CRS) -> DatumOperationPlan:
+    """Inspect the datum/reference-frame operation needed between two CRS.
+
+    pyproj/PROJ is the source of truth for datum operation metadata.  This
+    function only plans and classifies operations; it does not execute them.
+    """
+    src_geo = src_crs.geodetic_crs
+    dst_geo = dst_crs.geodetic_crs
+    if src_geo is None or dst_geo is None:
+        return DatumOperationPlan(cross_datum=False)
+
+    src_datum = src_geo.datum.name if src_geo.datum else None
+    dst_datum = dst_geo.datum.name if dst_geo.datum else None
+    if src_geo.datum == dst_geo.datum:
+        return DatumOperationPlan(
+            cross_datum=False,
+            source_datum=src_datum,
+            target_datum=dst_datum,
+        )
+
+    from pyproj.transformer import TransformerGroup
+
+    try:
+        tg = TransformerGroup(src_geo, dst_geo)
+    except Exception as exc:
+        warnings.warn(
+            f"Failed to query datum operation metadata: {exc}. "
+            "Proceeding without datum shift — coordinates may be offset.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return DatumOperationPlan(
+            cross_datum=True,
+            source_datum=src_datum,
+            target_datum=dst_datum,
+            warning_level="unsupported",
+        )
+
+    transformers = list(tg.transformers)
+    best = transformers[0] if transformers else None
+    best_description = getattr(best, "description", None) if best is not None else None
+    best_accuracy = getattr(best, "accuracy", None) if best is not None else None
+    if best_accuracy is not None and best_accuracy < 0:
+        best_accuracy = None
+    best_area = getattr(getattr(best, "area_of_use", None), "name", None)
+    best_has_helmert = best is not None and _transformer_has_helmert(best)
+    has_available_helmert = any(_transformer_has_helmert(t) for t in transformers)
+    best_is_noop = best is not None and _transformer_is_noop(best)
+    best_is_ballpark = bool(best_description and "ballpark" in best_description.lower())
+    missing_grids = _missing_grid_names(tg.unavailable_operations)
+
+    warning_level: Literal["ok", "degraded", "unsupported"] = "ok"
+    if best is None:
+        warning_level = "unsupported"
+    elif best_has_helmert:
+        warning_level = "ok"
+    elif best_is_noop and not best_is_ballpark and tg.best_available:
+        warning_level = "degraded"
+    elif has_available_helmert:
+        warning_level = "degraded"
+    elif missing_grids or best_is_ballpark:
+        warning_level = "unsupported"
+    else:
+        warning_level = "unsupported"
+
+    return DatumOperationPlan(
+        cross_datum=True,
+        source_datum=src_datum,
+        target_datum=dst_datum,
+        operation=best_description,
+        expected_accuracy_m=best_accuracy,
+        area_of_use=best_area,
+        best_available=tg.best_available,
+        missing_grids=missing_grids,
+        best_has_helmert=best_has_helmert,
+        has_available_helmert=has_available_helmert,
+        best_is_noop=best_is_noop,
+        best_is_ballpark=best_is_ballpark,
+        warning_level=warning_level,
+    )
 
 
 # ---------------------------------------------------------------------------

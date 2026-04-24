@@ -19,10 +19,10 @@ The `transform_buffers()` method accepts a `precision` parameter:
 
 ```python
 # Full precision (default)
-t.transform_buffers(lat, lon, precision="fp64")
+t.transform_buffers(lon, lat, precision="fp64")
 
 # Experimental double-single arithmetic (TM only)
-t.transform_buffers(lat, lon, precision="ds")
+t.transform_buffers(lon, lat, precision="ds")
 ```
 
 ## Why auto always uses fp64

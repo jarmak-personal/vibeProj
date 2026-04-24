@@ -9,7 +9,7 @@ available in the [API Reference](/api/index) section (powered by sphinx-autoapi)
 
 The primary user-facing class.
 
-### `Transformer.from_crs(crs_from, crs_to)`
+### `Transformer.from_crs(crs_from, crs_to, *, always_xy=True, datum_shift="accurate", epoch=None)`
 
 Create a transformer between two coordinate reference systems.
 
@@ -21,6 +21,9 @@ Create a transformer between two coordinate reference systems.
   - Tuple: `("EPSG", 4326)`
   - pyproj `CRS` object
 - `crs_to` -- Target CRS. Same formats as `crs_from`.
+- `always_xy` -- If `True` (default), geographic CRS coordinates use longitude, latitude order. If `False`, use native CRS axis order.
+- `datum_shift` -- `"accurate"` (default) uses time-dependent Helmert parameters when available; `"fast"` uses base 7-parameter Helmert parameters.
+- `epoch` -- Optional decimal year for time-dependent Helmert transforms.
 
 **Returns:** `Transformer` instance.
 
@@ -34,7 +37,7 @@ Transform coordinates.
 
 **Parameters:**
 
-- `x`, `y` -- Input coordinates. Accepts scalars, lists, NumPy arrays, or CuPy arrays. For geographic CRS, `x` = latitude, `y` = longitude (pyproj convention).
+- `x`, `y` -- Input coordinates. Accepts scalars, lists, NumPy arrays, or CuPy arrays. By default, `always_xy=True`, so geographic CRS input/output is `x` = longitude, `y` = latitude. Pass `always_xy=False` to use native CRS axis order.
 - `z` -- Optional ellipsoidal height in meters. When a Helmert datum shift is active (cross-datum transform), z is transformed through the ECEF intermediate. When no datum shift is needed, z is passed through unchanged.
 - `direction` -- `"FORWARD"` or `"INVERSE"`.
 
@@ -42,13 +45,13 @@ Transform coordinates.
 
 ```python
 # Forward: geographic -> projected
-easting, northing = t.transform(49.0, 2.0)
+easting, northing = t.transform(2.0, 49.0)
 
 # Inverse: projected -> geographic
-lat, lon = t.transform(easting, northing, direction="INVERSE")
+lon, lat = t.transform(easting, northing, direction="INVERSE")
 
 # Array input
-x, y = t.transform(lat_array, lon_array)
+x, y = t.transform(lon_array, lat_array)
 
 # With ellipsoidal height (cross-datum: z is transformed; same-datum: z passthrough)
 x, y, z_out = t.transform(lon, lat, z=45.0)
@@ -73,12 +76,12 @@ and dtype conversion for maximum throughput.
 ```python
 out_x = cp.empty(n, dtype=cp.float64)
 out_y = cp.empty(n, dtype=cp.float64)
-rx, ry = t.transform_buffers(lat, lon, out_x=out_x, out_y=out_y)
+rx, ry = t.transform_buffers(lon, lat, out_x=out_x, out_y=out_y)
 assert rx is out_x  # same object, no allocation
 
 # With height (cross-datum transforms)
 out_z = cp.empty(n, dtype=cp.float64)
-rx, ry, rz = t.transform_buffers(lat, lon, h, out_x=out_x, out_y=out_y, out_z=out_z)
+rx, ry, rz = t.transform_buffers(lon, lat, h, out_x=out_x, out_y=out_y, out_z=out_z)
 ```
 
 ## Pipeline API
@@ -129,6 +132,7 @@ Read-only property indicating the accuracy classification of this transform.
 - `"sub-5cm"` -- cross-datum with SVD-compressed grid correction (e.g. NAD27 to NAD83).
 - `"sub-decimeter"` -- cross-datum with 15-param time-dependent Helmert at a known epoch.
 - `"sub-meter"` -- cross-datum with Helmert 7-parameter shift applied (~1--5m).
+- `"datum no-op (... m PROJ accuracy)"` -- PROJ's best available datum operation is an explicit no-op with meter-level expected accuracy.
 - `"degraded — no datum shift applied"` -- cross-datum, no Helmert or SVD correction available.
 
 ```python

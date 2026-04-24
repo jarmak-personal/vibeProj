@@ -122,13 +122,13 @@ zero-copy semantics:
 
 ```python
 # Project: geographic → UTM
-t.transform_buffers(lat, lon, out_x=easting, out_y=northing)
+t.transform_buffers(lon, lat, out_x=easting, out_y=northing)
 
 # Unproject: UTM → geographic
 t.transform_buffers(
     easting, northing,
     direction="INVERSE",
-    out_x=lat_out, out_y=lon_out,
+    out_x=lon_out, out_y=lat_out,
 )
 ```
 
