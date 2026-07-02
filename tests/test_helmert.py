@@ -263,9 +263,7 @@ def test_grid_required_same_ellipsoid_warns_when_unsupported():
     assert any("nadcon5" in grid for grid in t._datum_plan.missing_grids)
     assert t.accuracy == "degraded \u2014 no datum shift applied"
 
-    our_warnings = [
-        w for w in caught if "grid-based shifts" in str(w.message).lower()
-    ]
+    our_warnings = [w for w in caught if "grid-based shifts" in str(w.message).lower()]
     assert len(our_warnings) == 1
 
 
