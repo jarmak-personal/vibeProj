@@ -5,9 +5,19 @@ kernels.  They contain no device selection or public policy logic: callers
 choose an implementation on the host and compile exactly one source variant.
 """
 
+import struct
+
 from vibeproj._fixed_trig_device_fns import FIXED_TRIG_DEVICE_FNS
+from vibeproj.transcendentals import PROJECTION_FIXED_Q62_MAX_SCALE_M
 
 # fmt: off
+
+# The shared registry owns the physical-scale domain. Its exact binary64 bits
+# feed the device-side integer range check so the host and CUDA limits cannot
+# drift independently.
+_PROJECTION_FIXED_Q62_MAX_SCALE_BITS = struct.unpack(
+    "=Q", struct.pack("=d", PROJECTION_FIXED_Q62_MAX_SCALE_M)
+)[0]
 
 NATIVE_PAIRED_SINCOS_DEVICE_FNS = r"""
 // ---- Native paired sine/cosine ----
@@ -24,6 +34,131 @@ __device__ __forceinline__ void vp_native_sincos(
     sincos(angle, sin_out, cos_out);
 }
 """
+
+
+PROJECTION_BOUNDED_Q62_DEVICE_FNS = (
+    FIXED_TRIG_DEVICE_FNS
+    + f"\n#define VP_PROJECTION_FIXED_Q62_MAX_SCALE_M {PROJECTION_FIXED_Q62_MAX_SCALE_M:.1f}\n"
+    + f"#define VP_PROJECTION_FIXED_Q62_MAX_SCALE_BITS 0x{_PROJECTION_FIXED_Q62_MAX_SCALE_BITS:016x}ULL\n"
+    + r"""
+// ---- Shared projection-domain Q1.62 primitives ----
+// Callers pass their proved angular bound and launch-uniform physical scale.
+// Negated comparisons send non-finite and out-of-domain inputs through native
+// libdevice. The scale predicate is uniform because one projection scale is a
+// scalar kernel argument shared by every coordinate in the launch.
+__device__ __forceinline__ bool vp_projection_fixed_scale_is_qualified(
+    double physical_scale
+) {
+    // Positive IEEE-754 binary64 values are monotonically ordered by their
+    // unsigned representation. One integer range comparison rejects +0,
+    // negative values, infinities, NaNs, and values above the scale ceiling
+    // without adding slow fp64 comparisons to every coordinate.
+    const unsigned long long bits = (unsigned long long)__double_as_longlong(
+        physical_scale
+    );
+    return bits - 1ULL < VP_PROJECTION_FIXED_Q62_MAX_SCALE_BITS;
+}
+
+__device__ __forceinline__ void vp_projection_fixed_sincos(
+    double angle,
+    double max_abs_angle,
+    double physical_scale,
+    double* sin_out,
+    double* cos_out
+) {
+    if (!(vp_projection_fixed_scale_is_qualified(physical_scale)
+          && fabs(angle) <= max_abs_angle && fabs(angle) <= VP_PI_D)) {
+        sincos(angle, sin_out, cos_out);
+        return;
+    }
+    vp_fixed_sincos_bounded(angle, sin_out, cos_out);
+}
+
+// Two-angle form makes the projection-domain guard atomic: if either value
+// is invalid, both pairs retain native behavior. This is used when both pairs
+// feed one result, such as orthographic forward.
+__device__ __forceinline__ void vp_projection_fixed_sincos_pair(
+    double first,
+    double first_max_abs,
+    double* first_sin,
+    double* first_cos,
+    double second,
+    double second_max_abs,
+    double* second_sin,
+    double* second_cos,
+    double physical_scale
+) {
+    const bool in_domain =
+        vp_projection_fixed_scale_is_qualified(physical_scale)
+        && fabs(first) <= first_max_abs && fabs(first) <= VP_PI_D
+        && fabs(second) <= second_max_abs && fabs(second) <= VP_PI_D;
+    if (!in_domain) {
+        sincos(first, first_sin, first_cos);
+        sincos(second, second_sin, second_cos);
+        return;
+    }
+
+    vp_q62_t sin_fixed;
+    vp_q62_t cos_fixed;
+    vp_fixed_sincos_reduced(first, &sin_fixed, &cos_fixed);
+    *first_sin = vp_q62_to_double(sin_fixed);
+    *first_cos = vp_q62_to_double(cos_fixed);
+    vp_fixed_sincos_reduced(second, &sin_fixed, &cos_fixed);
+    *second_sin = vp_q62_to_double(sin_fixed);
+    *second_cos = vp_q62_to_double(cos_fixed);
+}
+
+// Cosine-only specialization avoids evaluating and converting the unused
+// sine polynomial in projections such as sinusoidal forward.
+__device__ __forceinline__ double vp_projection_fixed_cos(
+    double angle, double max_abs_angle, double physical_scale
+) {
+    if (!(vp_projection_fixed_scale_is_qualified(physical_scale)
+          && fabs(angle) <= max_abs_angle && fabs(angle) <= VP_PI_D)) {
+        return cos(angle);
+    }
+
+    const int quadrant = __double2int_rn(
+        angle * 0.6366197723675813430755350534900574
+    );
+    const vp_q62_t residual = vp_q62_from_double(
+        angle - (double)quadrant * 1.5707963267948966192313216916397514
+    );
+    const vp_q62_t r2 = vp_q62_mul(residual, residual);
+    const bool use_sine = quadrant & 1;
+
+    // Select coefficients instead of branching by quadrant. Random geographic
+    // inputs mix quadrants within a warp; a branch executes both full Horner
+    // paths serially. Align sin(r)/r with a leading zero r^18 coefficient so
+    // either result uses one degree-18 Horner chain.
+    vp_q62_t horner = use_sine ? (vp_q62_t)0LL : (vp_q62_t)-720LL;
+    horner = (use_sine ? (vp_q62_t)12966LL : (vp_q62_t)220414LL)
+        + vp_q62_mul(r2, horner);
+    horner = (use_sine ? (vp_q62_t)-3526632LL : (vp_q62_t)-52899477LL)
+        + vp_q62_mul(r2, horner);
+    horner = (use_sine ? (vp_q62_t)740592679LL : (vp_q62_t)9627704831LL)
+        + vp_q62_mul(r2, horner);
+    horner = (use_sine ? (vp_q62_t)-115532457973LL : (vp_q62_t)-1270857037706LL)
+        + vp_q62_mul(r2, horner);
+    horner = (use_sine ? (vp_q62_t)12708570377060LL : (vp_q62_t)114377133393536LL)
+        + vp_q62_mul(r2, horner);
+    horner = (use_sine ? (vp_q62_t)-915017067148291LL : (vp_q62_t)-6405119470038039LL)
+        + vp_q62_mul(r2, horner);
+    horner = (use_sine ? (vp_q62_t)38430716820228232LL : (vp_q62_t)192153584101141152LL)
+        + vp_q62_mul(r2, horner);
+    horner = (use_sine ? (vp_q62_t)-768614336404564608LL : (vp_q62_t)-2305843009213693952LL)
+        + vp_q62_mul(r2, horner);
+    horner = (vp_q62_t)4611686018427387904LL + vp_q62_mul(r2, horner);
+    const vp_q62_t scale = use_sine
+        ? residual : (vp_q62_t)4611686018427387904LL;
+    vp_q62_t result = vp_q62_mul(scale, horner);
+
+    // Quadrant signs for cosine are +, -, -, +.
+    if ((quadrant + 1) & 2) result = -result;
+    return vp_q62_to_double(result);
+}
+"""
+)
 
 
 TM_UTM_QUALIFIED_DEVICE_FNS = (

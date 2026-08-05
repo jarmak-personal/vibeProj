@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import importlib.util
+import sys
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,9 +16,15 @@ import vibeproj
 from vibeproj import Transformer
 from vibeproj.fused_kernels import _SUPPORTED
 from vibeproj.transcendentals import (
+    AccuracyContract,
     HELMERT_FIXED_Q62,
     HELMERT_FIXED_Q62_MIN_ELEMENTS,
     NATIVE_LIBDEVICE,
+    ORTHO_FORWARD_FIXED_Q62,
+    ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+    PROJECTION_FIXED_Q62_MAX_SCALE_M,
+    SINU_FORWARD_FIXED_Q62,
+    SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
     TMERC_FIXED_Q62,
     TMERC_FIXED_Q62_MIN_ELEMENTS,
     DeviceCapability,
@@ -24,6 +32,16 @@ from vibeproj.transcendentals import (
     list_transcendental_strategies,
     resolve_transcendental_strategy,
 )
+
+
+def test_accuracy_contract_preserves_legacy_positional_notes_argument():
+    contract = AccuracyContract("reference", 1.0, 2.0, "legacy notes")
+
+    assert contract.reference == "reference"
+    assert contract.max_horizontal_error_m == 1.0
+    assert contract.max_vertical_error_m == 2.0
+    assert contract.notes == "legacy notes"
+    assert contract.max_physical_scale_m is None
 
 
 EXPECTED_FUSED_PATHS = frozenset(
@@ -74,6 +92,22 @@ EXPECTED_REGISTRY_MATRIX = frozenset(
             (),
             ("auto", "fp64", "fp32", "ds"),
             0,
+        ),
+        (
+            SINU_FORWARD_FIXED_Q62,
+            TranscendentalOperation.PROJECTION,
+            ("sinu.forward",),
+            ((8, 9),),
+            ("auto", "fp64"),
+            SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+        ),
+        (
+            ORTHO_FORWARD_FIXED_Q62,
+            TranscendentalOperation.PROJECTION,
+            ("ortho.forward",),
+            ((8, 9),),
+            ("auto", "fp64"),
+            ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
         ),
         (
             HELMERT_FIXED_Q62,
@@ -158,6 +192,69 @@ def test_registry_exactly_matches_documented_coverage_matrix():
         registry[0].family = "mutated"  # type: ignore[misc]
 
 
+def test_wave1_registry_entries_expose_exact_public_contracts():
+    entries = {
+        entry.implementation_id: entry
+        for entry in list_transcendental_strategies()
+        if entry.implementation_id in {SINU_FORWARD_FIXED_Q62, ORTHO_FORWARD_FIXED_Q62}
+    }
+    assert set(entries) == {SINU_FORWARD_FIXED_Q62, ORTHO_FORWARD_FIXED_Q62}
+    expected_thresholds = {
+        SINU_FORWARD_FIXED_Q62: SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+        ORTHO_FORWARD_FIXED_Q62: ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+    }
+    for implementation_id, entry in entries.items():
+        assert entry.operation is TranscendentalOperation.PROJECTION
+        assert entry.supported_policies == ("auto", "accelerated")
+        assert entry.supported_backends == ("cuda",)
+        assert entry.supported_compute_capabilities == ((8, 9),)
+        assert entry.min_fp32_to_fp64_ratio == 16
+        assert entry.supported_compute_precisions == ("auto", "fp64")
+        assert entry.min_elements == expected_thresholds[implementation_id]
+        assert entry.accuracy.reference == NATIVE_LIBDEVICE
+        assert entry.accuracy.max_horizontal_error_m == 1e-8
+        assert entry.accuracy.max_vertical_error_m is None
+        assert entry.accuracy.max_physical_scale_m == PROJECTION_FIXED_Q62_MAX_SCALE_M
+        assert entry.native_fallback is True
+        assert entry.priority == 0
+
+
+def test_wave1_exact_ids_and_thresholds_are_exported():
+    import vibeproj.transcendentals as transcendental_module
+    from vibeproj._transcendental_device_fns import (
+        PROJECTION_FIXED_Q62_MAX_SCALE_M as DEVICE_MAX_SCALE_M,
+    )
+
+    for name in (
+        "SINU_FORWARD_FIXED_Q62",
+        "SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS",
+        "ORTHO_FORWARD_FIXED_Q62",
+        "ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS",
+        "PROJECTION_FIXED_Q62_MAX_SCALE_M",
+    ):
+        assert name in transcendental_module.__all__
+        assert getattr(transcendental_module, name)
+    assert PROJECTION_FIXED_Q62_MAX_SCALE_M == DEVICE_MAX_SCALE_M
+
+
+def test_every_accelerated_registry_domain_resolves_to_its_exact_entry():
+    accelerated = tuple(
+        entry
+        for entry in list_transcendental_strategies()
+        if entry.implementation_id != NATIVE_LIBDEVICE
+    )
+    for entry in accelerated:
+        for domain in entry.domains:
+            decision = resolve_transcendental_strategy(
+                entry.operation,
+                "accelerated",
+                device=ADA_4090,
+                domain=domain,
+                precision="fp64",
+            )
+            assert decision.implementation_id == entry.implementation_id
+
+
 @pytest.mark.parametrize(
     "call",
     [
@@ -229,6 +326,18 @@ def test_resolver_reuses_decisions_but_keys_cache_by_complete_device_context():
             "global",
             HELMERT_FIXED_Q62,
             HELMERT_FIXED_Q62_MIN_ELEMENTS,
+        ),
+        (
+            TranscendentalOperation.PROJECTION,
+            "sinu.forward",
+            SINU_FORWARD_FIXED_Q62,
+            SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+        ),
+        (
+            TranscendentalOperation.PROJECTION,
+            "ortho.forward",
+            ORTHO_FORWARD_FIXED_Q62,
+            ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
         ),
     ],
 )
@@ -317,8 +426,17 @@ def test_all_48_fused_paths_resolve_nonempty_decisions_for_every_policy(device):
             if policy == "native":
                 assert decision.implementation_id == NATIVE_LIBDEVICE
                 assert decision.fallback is False
-            elif device == ADA_4090 and family == "tmerc" and direction == "forward":
-                assert decision.implementation_id == TMERC_FIXED_Q62
+            elif device == ADA_4090 and (family, direction) in {
+                ("tmerc", "forward"),
+                ("sinu", "forward"),
+                ("ortho", "forward"),
+            }:
+                expected = {
+                    "tmerc": TMERC_FIXED_Q62,
+                    "sinu": SINU_FORWARD_FIXED_Q62,
+                    "ortho": ORTHO_FORWARD_FIXED_Q62,
+                }[family]
+                assert decision.implementation_id == expected
                 assert decision.fallback is False
             else:
                 assert decision.implementation_id == NATIVE_LIBDEVICE
@@ -376,6 +494,12 @@ def test_ada_qualified_helmert_resolves_accelerated(policy):
         (TranscendentalOperation.TMERC_FORWARD, "utm", "fp64", CPU),
         (TranscendentalOperation.TMERC_FORWARD, "global", "fp64", ADA_4090),
         (TranscendentalOperation.TMERC_FORWARD, "utm", "fp32", ADA_4090),
+        (TranscendentalOperation.PROJECTION, "sinu.inverse", "fp64", ADA_4090),
+        (TranscendentalOperation.PROJECTION, "ortho.inverse", "fp64", ADA_4090),
+        (TranscendentalOperation.PROJECTION, "sinu.forward", "fp32", ADA_4090),
+        (TranscendentalOperation.PROJECTION, "ortho.forward", "ds", ADA_4090),
+        (TranscendentalOperation.PROJECTION, "sinu.forward", "fp64", HOPPER_H100),
+        (TranscendentalOperation.PROJECTION, "ortho.forward", "fp64", CPU),
     ],
 )
 def test_explicit_accelerated_is_portable_native_fallback(operation, domain, precision, device):
@@ -449,10 +573,48 @@ def test_tmerc_atan_identity_operation_contract():
     assert max_error <= 2.3e-16
 
 
+def test_rejected_eck4_inverse_q62_pair_reproduces_edge_amplification():
+    root = Path(__file__).resolve().parents[1]
+    module_spec = importlib.util.spec_from_file_location(
+        "vibeproj_eck4_inverse_rejection",
+        root / "benchmarks/eck4_inverse_rejection.py",
+    )
+    assert module_spec is not None and module_spec.loader is not None
+    rejection_module = importlib.util.module_from_spec(module_spec)
+    sys.modules[module_spec.name] = rejection_module
+    module_spec.loader.exec_module(rejection_module)
+
+    result = rejection_module.reproduce_eck4_inverse_edge()
+
+    assert result["cy_over_c_y"] == -0.999994
+    assert result["longitude_rad"] == np.pi
+    assert result["research_device_speedup"] == pytest.approx(1.0891340311)
+    assert result["research_wall_speedup"] == pytest.approx(1.0891271130)
+    assert result["horizontal_error_nm"] == pytest.approx(271.916335, abs=1e-6)
+    assert result["horizontal_error_m"] > result["gate_m"]
+    assert result["passes_gate"] is False
+
+
 def _documented_ids(path: Path, heading: str) -> set[str]:
     text = path.read_text(encoding="utf-8")
     section = text.split(heading, maxsplit=1)[1].split("\n## ", maxsplit=1)[0]
     return set(re.findall(r"^\| `([^`]+)` \|", section, flags=re.MULTILINE))
+
+
+def _load_policy_benchmark_module():
+    module_name = "vibeproj_bench_transcendental_policy"
+    if module_name in sys.modules:
+        return sys.modules[module_name]
+    root = Path(__file__).resolve().parents[1]
+    module_spec = importlib.util.spec_from_file_location(
+        module_name,
+        root / "benchmarks/bench_transcendental_policy.py",
+    )
+    assert module_spec is not None and module_spec.loader is not None
+    benchmark_module = importlib.util.module_from_spec(module_spec)
+    sys.modules[module_spec.name] = benchmark_module
+    module_spec.loader.exec_module(benchmark_module)
+    return benchmark_module
 
 
 def test_user_and_developer_coverage_tables_name_exact_registry_ids():
@@ -472,6 +634,8 @@ def test_documented_auto_thresholds_match_registry_exactly():
     root = Path(__file__).resolve().parents[1]
     expected = {
         HELMERT_FIXED_Q62: HELMERT_FIXED_Q62_MIN_ELEMENTS,
+        ORTHO_FORWARD_FIXED_Q62: ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+        SINU_FORWARD_FIXED_Q62: SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
         TMERC_FIXED_Q62: TMERC_FIXED_Q62_MIN_ELEMENTS,
     }
     for relative_path, heading in (
@@ -487,3 +651,71 @@ def test_documented_auto_thresholds_match_registry_exactly():
                 if line.startswith(f"| `{implementation_id}` |")
             )
             assert f"| {min_elements:,} |" in row
+
+
+def test_wave1_benchmark_specs_enforce_complete_public_qualification_surface():
+    benchmark_module = _load_policy_benchmark_module()
+    QUALIFICATION_SPECS = benchmark_module.QUALIFICATION_SPECS
+    _prepare_case = benchmark_module._prepare_case
+    _qualification_workload_sizes = benchmark_module._qualification_workload_sizes
+
+    expected = {
+        "sinu-forward": (SINU_FORWARD_FIXED_Q62, SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS),
+        "ortho-forward": (ORTHO_FORWARD_FIXED_Q62, ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS),
+    }
+    for index, (case_name, (implementation_id, min_elements)) in enumerate(expected.items()):
+        specification = QUALIFICATION_SPECS[case_name]
+        assert specification.implementation_id == implementation_id
+        assert specification.min_elements == min_elements
+        assert specification.coordinate_contract_m == 1e-8
+        assert specification.operation == TranscendentalOperation.PROJECTION.value
+        assert specification.domain == f"{case_name.removesuffix('-forward')}.forward"
+        assert specification.direction == "forward"
+        assert specification.max_physical_scale_m == PROJECTION_FIXED_Q62_MAX_SCALE_M
+        assert specification.expected_kernel_nodes == 1
+        assert _qualification_workload_sizes((32, 5_000_000), specification) == (
+            32,
+            min_elements - 1,
+            min_elements,
+            5_000_000,
+        )
+
+        case = _prepare_case(np, case_name, 128, 20260805 + index)
+        assert np.all(np.isfinite(case.host_x))
+        assert np.all(np.isfinite(case.host_y))
+        assert np.any(np.isfinite(case.edge_host_x))
+        assert np.any(np.isfinite(case.edge_host_y))
+        assert np.any(~np.isfinite(case.edge_host_x))
+        assert np.any(~np.isfinite(case.edge_host_y))
+        assert case.qualification is specification
+
+
+def test_every_accelerated_registry_id_has_matching_benchmark_contract():
+    benchmark_module = _load_policy_benchmark_module()
+    specifications = tuple(benchmark_module.QUALIFICATION_SPECS.values())
+    accelerated_entries = tuple(
+        entry
+        for entry in list_transcendental_strategies()
+        if entry.implementation_id != NATIVE_LIBDEVICE
+    )
+
+    assert {entry.implementation_id for entry in accelerated_entries} == {
+        specification.implementation_id
+        for specification in specifications
+        if specification.implementation_id != NATIVE_LIBDEVICE
+    }
+    for entry in accelerated_entries:
+        matching = tuple(
+            specification
+            for specification in specifications
+            if specification.implementation_id == entry.implementation_id
+        )
+        assert matching
+        for specification in matching:
+            assert specification.operation == entry.operation.value
+            assert specification.domain in entry.domains
+            assert specification.min_elements == entry.min_elements
+            assert specification.coordinate_contract_m == entry.accuracy.max_horizontal_error_m
+            assert specification.max_physical_scale_m == entry.accuracy.max_physical_scale_m
+            if entry.operation is TranscendentalOperation.PROJECTION:
+                assert specification.domain.endswith(f".{specification.direction}")

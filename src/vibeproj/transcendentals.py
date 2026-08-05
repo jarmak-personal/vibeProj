@@ -19,8 +19,13 @@ ComputePrecision = Literal["auto", "fp64", "fp32", "ds"]
 NATIVE_LIBDEVICE = "native.libdevice"
 HELMERT_FIXED_Q62 = "helmert.fixed_q62"
 TMERC_FIXED_Q62 = "tmerc.forward.fixed_q62"
+SINU_FORWARD_FIXED_Q62 = "sinu.forward.fixed_q62"
+ORTHO_FORWARD_FIXED_Q62 = "ortho.forward.fixed_q62"
+PROJECTION_FIXED_Q62_MAX_SCALE_M = 6_400_000.0
 TMERC_FIXED_Q62_MIN_ELEMENTS = 256
 HELMERT_FIXED_Q62_MIN_ELEMENTS = 131_072
+SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS = 524_288
+ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS = 262_144
 
 
 class TranscendentalOperation(str, Enum):
@@ -50,6 +55,7 @@ class AccuracyContract:
     max_horizontal_error_m: float
     max_vertical_error_m: float | None = None
     notes: str = ""
+    max_physical_scale_m: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +79,7 @@ class StrategyImplementation:
     domains: tuple[str, ...]
     accuracy: AccuracyContract
     native_fallback: bool
+    priority: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +177,55 @@ _REGISTRY = (
         domains=("global",),
         accuracy=_NATIVE_ACCURACY,
         native_fallback=False,
+    ),
+    StrategyImplementation(
+        implementation_id=SINU_FORWARD_FIXED_Q62,
+        operation=TranscendentalOperation.PROJECTION,
+        family="qualified_sinu_transcendentals",
+        supported_policies=("auto", "accelerated"),
+        supported_backends=("cuda",),
+        supported_compute_capabilities=((8, 9),),
+        min_fp32_to_fp64_ratio=16,
+        supported_compute_precisions=("auto", "fp64"),
+        min_elements=SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+        domains=("sinu.forward",),
+        accuracy=AccuracyContract(
+            reference=NATIVE_LIBDEVICE,
+            max_horizontal_error_m=1e-8,
+            max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+            notes=(
+                "Qualified sinusoidal-forward Q1.62 cosine over finite latitude "
+                "[-pi/2, pi/2] and wrapped longitude [-pi, pi], with native fallback "
+                "outside the guarded domain or above 6,400,000 m physical scale. "
+                "Final public WGS84 maximum/p99 horizontal error: 3.725/1.863 nm."
+            ),
+        ),
+        native_fallback=True,
+    ),
+    StrategyImplementation(
+        implementation_id=ORTHO_FORWARD_FIXED_Q62,
+        operation=TranscendentalOperation.PROJECTION,
+        family="qualified_ortho_transcendentals",
+        supported_policies=("auto", "accelerated"),
+        supported_backends=("cuda",),
+        supported_compute_capabilities=((8, 9),),
+        min_fp32_to_fp64_ratio=16,
+        supported_compute_precisions=("auto", "fp64"),
+        min_elements=ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+        domains=("ortho.forward",),
+        accuracy=AccuracyContract(
+            reference=NATIVE_LIBDEVICE,
+            max_horizontal_error_m=1e-8,
+            max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+            notes=(
+                "Qualified orthographic-forward Q1.62 paired trig over finite latitude "
+                "[-pi/2, pi/2] and wrapped longitude [-pi, pi], with atomic native "
+                "fallback outside the guarded domain or above 6,400,000 m physical "
+                "scale. Final public WGS84 maximum/p99 horizontal error: "
+                "2.033106/1.396984 nm."
+            ),
+        ),
+        native_fallback=True,
     ),
     StrategyImplementation(
         implementation_id=HELMERT_FIXED_Q62,
@@ -328,10 +384,13 @@ def _implementation(
 
 def _supports(
     implementation: StrategyImplementation,
+    policy: TranscendentalPolicy,
     device: DeviceCapability,
     domain: str,
     precision: str,
 ) -> bool:
+    if policy not in implementation.supported_policies:
+        return False
     if device.backend not in implementation.supported_backends:
         return False
     if (
@@ -351,6 +410,55 @@ def _supports(
     if minimum is not None and (device.fp32_to_fp64_ratio or 0) < minimum:
         return False
     return True
+
+
+def _accelerated_candidate(
+    operation: TranscendentalOperation,
+    policy: TranscendentalPolicy,
+    device: DeviceCapability,
+    domain: str,
+    precision: ComputePrecision,
+) -> tuple[StrategyImplementation | None, tuple[StrategyImplementation, ...], bool]:
+    """Return the highest-priority eligible accelerated implementation.
+
+    Hardware, policy, domain, and precision eligibility is applied before
+    priority and ambiguity handling. The candidate tuple and boolean retain
+    enough information to explain exact native fallback causes.
+    """
+    operation_candidates = tuple(
+        implementation
+        for implementation in _REGISTRY
+        if implementation.operation is operation
+        and implementation.implementation_id != NATIVE_LIBDEVICE
+    )
+    domain_candidates = tuple(
+        implementation
+        for implementation in operation_candidates
+        if "*" in implementation.domains or domain in implementation.domains
+    )
+    eligible_candidates = tuple(
+        implementation
+        for implementation in domain_candidates
+        if _supports(implementation, policy, device, domain, precision)
+    )
+    if not eligible_candidates:
+        return None, domain_candidates, bool(operation_candidates)
+    highest_priority = max(implementation.priority for implementation in eligible_candidates)
+    preferred = tuple(
+        implementation
+        for implementation in eligible_candidates
+        if implementation.priority == highest_priority
+    )
+    if len(preferred) > 1:
+        implementation_ids = ", ".join(
+            sorted(implementation.implementation_id for implementation in preferred)
+        )
+        raise RuntimeError(
+            f"Ambiguous accelerated transcendental implementations for "
+            f"{operation.value!r} in {domain!r} at priority {highest_priority}: "
+            f"{implementation_ids}"
+        )
+    return preferred[0], domain_candidates, bool(operation_candidates)
 
 
 def resolve_transcendental_strategy(
@@ -408,26 +516,26 @@ def _resolve_transcendental_strategy_cached(
     """Build and cache an immutable decision for an exact execution context."""
 
     native = _implementation(resolved_operation, NATIVE_LIBDEVICE)
-    accelerated_id = {
-        TranscendentalOperation.HELMERT: HELMERT_FIXED_Q62,
-        TranscendentalOperation.TMERC_FORWARD: TMERC_FIXED_Q62,
-    }.get(resolved_operation)
-    accelerated = (
-        _implementation(resolved_operation, accelerated_id) if accelerated_id is not None else None
-    )
+    accelerated = None
+    domain_candidates: tuple[StrategyImplementation, ...] = ()
+    operation_has_accelerated = False
+    if requested != "native":
+        accelerated, domain_candidates, operation_has_accelerated = _accelerated_candidate(
+            resolved_operation,
+            requested,
+            device,
+            domain,
+            precision,
+        )
 
     if requested == "native":
         chosen = native
         reason = "native policy requested"
         fallback = False
-    elif (
-        accelerated is not None
-        and _supports(accelerated, device, domain, precision)
-        and (
-            requested == "accelerated"
-            or workload_size is None
-            or workload_size >= accelerated.min_elements
-        )
+    elif accelerated is not None and (
+        requested == "accelerated"
+        or workload_size is None
+        or workload_size >= accelerated.min_elements
     ):
         chosen = accelerated
         reason = (
@@ -438,33 +546,42 @@ def _resolve_transcendental_strategy_cached(
     else:
         chosen = native
         fallback = requested == "accelerated"
+        explanation_candidate = accelerated
+        if explanation_candidate is None and len(domain_candidates) == 1:
+            explanation_candidate = domain_candidates[0]
         if (
             accelerated is not None
             and requested == "auto"
             and workload_size is not None
             and workload_size < accelerated.min_elements
-            and _supports(accelerated, device, domain, precision)
         ):
             unsupported_reason = (
                 f"workload size {workload_size} is below the accelerated crossover "
                 f"{accelerated.min_elements}"
             )
-        elif accelerated is None:
+        elif not domain_candidates and operation_has_accelerated:
+            unsupported_reason = f"domain {domain!r} is not accuracy-qualified"
+        elif not operation_has_accelerated:
             unsupported_reason = "no accuracy-qualified accelerated implementation is registered"
+        elif explanation_candidate is None:
+            unsupported_reason = (
+                "no accelerated implementation is eligible for the complete "
+                "policy/device/precision context"
+            )
+        elif requested not in explanation_candidate.supported_policies:
+            unsupported_reason = f"policy {requested!r} is not supported"
         elif device.backend != "cuda":
             unsupported_reason = f"{device.backend} backend has no CUDA accelerated implementation"
-        elif domain not in accelerated.domains:
-            unsupported_reason = f"domain {domain!r} is not accuracy-qualified"
-        elif precision not in accelerated.supported_compute_precisions:
+        elif precision not in explanation_candidate.supported_compute_precisions:
             unsupported_reason = f"compute precision {precision!r} is not supported"
-        elif device.compute_capability not in accelerated.supported_compute_capabilities:
+        elif device.compute_capability not in explanation_candidate.supported_compute_capabilities:
             unsupported_reason = (
                 f"compute capability {device.compute_capability!r} is not accuracy-qualified"
             )
         else:
             unsupported_reason = (
                 f"fp32:fp64 ratio {device.fp32_to_fp64_ratio!r} does not meet "
-                f"the required {accelerated.min_fp32_to_fp64_ratio}"
+                f"the required {explanation_candidate.min_fp32_to_fp64_ratio}"
             )
         if requested == "accelerated":
             reason = f"accelerated policy fell back to native: {unsupported_reason}"
@@ -519,7 +636,12 @@ __all__ = [
     "HELMERT_FIXED_Q62",
     "HELMERT_FIXED_Q62_MIN_ELEMENTS",
     "NATIVE_LIBDEVICE",
+    "ORTHO_FORWARD_FIXED_Q62",
+    "ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS",
+    "PROJECTION_FIXED_Q62_MAX_SCALE_M",
     "ProjectionImplementation",
+    "SINU_FORWARD_FIXED_Q62",
+    "SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS",
     "StrategyDecision",
     "StrategyExplanation",
     "StrategyImplementation",

@@ -10,6 +10,7 @@ Uses CuPy RawKernel for NVRTC compilation and caching.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 import threading
 import warnings
 
@@ -18,6 +19,8 @@ import numpy as np
 from vibeproj.transcendentals import (
     HELMERT_FIXED_Q62,
     NATIVE_LIBDEVICE,
+    ORTHO_FORWARD_FIXED_Q62,
+    SINU_FORWARD_FIXED_Q62,
     TMERC_FIXED_Q62,
 )
 
@@ -92,6 +95,7 @@ from vibeproj._ds_device_fns import DS_DEVICE_FNS as _DS_ARITH  # noqa: E402
 from vibeproj._transcendental_device_fns import (  # noqa: E402
     HELMERT_FIXED_Q62_DEVICE_FNS as _HELMERT_FIXED_Q62_DEVICE_FNS,
     NATIVE_PAIRED_SINCOS_DEVICE_FNS as _NATIVE_PAIRED_SINCOS_DEVICE_FNS,
+    PROJECTION_BOUNDED_Q62_DEVICE_FNS as _PROJECTION_BOUNDED_Q62_DEVICE_FNS,
     TM_UTM_QUALIFIED_DEVICE_FNS as _TM_UTM_QUALIFIED_DEVICE_FNS,
 )
 
@@ -2009,6 +2013,73 @@ _TYPE_MAP = {
     "float32": "float",
 }
 
+# Exact implementation IDs target one projection-direction-precision tuple.
+# The registry remains host-owned; this table only validates and materializes
+# the exact implementation selected for a fused launch.
+_PROJECTION_IMPLEMENTATION_TARGETS = {
+    TMERC_FIXED_Q62: ("tmerc", "forward", "float64"),
+    SINU_FORWARD_FIXED_Q62: ("sinu", "forward", "float64"),
+    ORTHO_FORWARD_FIXED_Q62: ("ortho", "forward", "float64"),
+}
+
+_PROJECTION_FIXED_Q62_REWRITES = {
+    SINU_FORWARD_FIXED_Q62: (
+        "sinu_forward_fixed_q62",
+        (
+            (
+                "cos(phi)",
+                "vp_projection_fixed_cos("
+                "phi, (fabs(phi) <= 0.5 * VP_PI_D && fabs(lam) <= VP_PI_D) "
+                "? 0.5 * VP_PI_D : -1.0, a)",
+            ),
+        ),
+    ),
+    ORTHO_FORWARD_FIXED_Q62: (
+        "ortho_forward_fixed_q62",
+        (
+            (
+                "vp_native_sincos(phi, &sin_phi, &cos_phi);\n"
+                "    double sin_lam, cos_lam;\n"
+                "    vp_native_sincos(lam, &sin_lam, &cos_lam);",
+                "double sin_lam, cos_lam;\n"
+                "    vp_projection_fixed_sincos_pair(\n"
+                "        phi, 0.5 * VP_PI_D, &sin_phi, &cos_phi,\n"
+                "        lam, VP_PI_D, &sin_lam, &cos_lam, a\n"
+                "    );",
+            ),
+        ),
+    ),
+}
+
+
+def _build_projection_fixed_q62_source(
+    projection_name: str,
+    direction: str,
+    implementation_id: str,
+) -> tuple[str, str]:
+    """Build one fp64 fused source from shared guarded Q1.62 primitives."""
+    template, native_func_name = _SOURCE_MAP[(projection_name, direction)]
+    function_name, replacements = _PROJECTION_FIXED_Q62_REWRITES[implementation_id]
+    source = _inject_linear_unit_args(
+        template.format(
+            real_t="double",
+            pi=_PI_LITERALS["float64"],
+            tol=_TOL_LITERALS["float64"],
+        )
+    )
+    if source.count(native_func_name) != 1:
+        raise RuntimeError(
+            f"Expected one {native_func_name!r} kernel while building {implementation_id!r}"
+        )
+    source = source.replace(native_func_name, function_name)
+    for native_expression, accelerated_expression in replacements:
+        if source.count(native_expression) != 1:
+            raise RuntimeError(
+                f"Expected one {native_expression!r} site while building {implementation_id!r}"
+            )
+        source = source.replace(native_expression, accelerated_expression)
+    return _PROJECTION_BOUNDED_Q62_DEVICE_FNS + source, function_name
+
 
 def _resolve_tmerc_forward_mode(mode: str) -> str:
     if mode not in ("fp64", "int64"):
@@ -2032,14 +2103,15 @@ def _validate_projection_implementation(
 ) -> None:
     if implementation_id == NATIVE_LIBDEVICE:
         return
-    if implementation_id != TMERC_FIXED_Q62:
+    target = _PROJECTION_IMPLEMENTATION_TARGETS.get(implementation_id)
+    if target is None:
         raise ValueError(
             f"Unsupported transcendental implementation for fused projection kernel: "
             f"{implementation_id!r}"
         )
-    if (projection_name, direction, compute_dtype) != ("tmerc", "forward", "float64"):
+    if (projection_name, direction, compute_dtype) != target:
         raise ValueError(
-            f"{TMERC_FIXED_Q62!r} is qualified only for fp64 forward Transverse Mercator"
+            f"{implementation_id!r} is qualified only for {target[2]} {target[0]}.{target[1]}"
         )
 
 
@@ -2077,7 +2149,13 @@ def _get_kernel(
         if key in _kernel_cache:
             return _kernel_cache[key]
 
-        if (projection_name, direction, compute_dtype) == (
+        if transcendental_impl in _PROJECTION_FIXED_Q62_REWRITES:
+            source, func_name = _build_projection_fixed_q62_source(
+                projection_name,
+                direction,
+                transcendental_impl,
+            )
+        elif (projection_name, direction, compute_dtype) == (
             "tmerc",
             "forward",
             "float64",
@@ -2139,6 +2217,7 @@ def compile_kernels(
     projections=None,
     *,
     precision="auto",
+    projection_variants: Iterable[tuple[str, str, str]] | None = None,
     transcendental_impl=NATIVE_LIBDEVICE,
     tmerc_mode=None,
 ):
@@ -2151,9 +2230,13 @@ def compile_kernels(
         If None, compiles all supported projections.
     precision : str
         Compute precision: "auto"/"fp64"/"fp32"/"ds".
+    projection_variants : iterable of tuple, optional
+        Concrete ``(projection, direction, implementation_id)`` variants to
+        compile. Duplicate triples are compiled once. This exact plan takes
+        precedence over ``projections`` and the legacy scalar argument.
     transcendental_impl : str
-        Exact registry implementation ID for forward TM. Other projection
-        operations use the native implementation by design.
+        Legacy scalar exact implementation ID. It is applied only to its
+        qualified projection-direction target.
     tmerc_mode : str, optional
         Private compatibility override for deterministic legacy benchmarks.
     """
@@ -2164,18 +2247,38 @@ def compile_kernels(
     compute_dtype = {"auto": "float64", "fp64": "float64", "fp32": "float32", "ds": "ds"}.get(
         precision, "float64"
     )
-    if projections is None:
-        targets = list(_SUPPORTED)
-    else:
-        targets = [
-            (p, d) for p in projections for d in ("forward", "inverse") if (p, d) in _SUPPORTED
-        ]
-    for proj_name, direction in targets:
-        operation_impl = (
-            transcendental_impl
-            if (proj_name, direction) == ("tmerc", "forward")
-            else NATIVE_LIBDEVICE
+    if projection_variants is not None:
+        concrete_targets = tuple(dict.fromkeys(projection_variants))
+        for projection_name, direction, _implementation_id in concrete_targets:
+            if (projection_name, direction) not in _SUPPORTED:
+                raise ValueError(
+                    f"Unsupported fused projection compile target: {(projection_name, direction)!r}"
+                )
+    elif projections is None:
+        concrete_targets = tuple(
+            (projection_name, direction, NATIVE_LIBDEVICE)
+            for projection_name, direction in _SUPPORTED
         )
+    else:
+        concrete_targets = tuple(
+            (projection_name, direction, NATIVE_LIBDEVICE)
+            for projection_name in projections
+            for direction in ("forward", "inverse")
+            if (projection_name, direction) in _SUPPORTED
+        )
+    implementation_target = _PROJECTION_IMPLEMENTATION_TARGETS.get(transcendental_impl)
+    if transcendental_impl != NATIVE_LIBDEVICE and implementation_target is None:
+        raise ValueError(
+            "Unsupported transcendental implementation for fused projection kernel: "
+            f"{transcendental_impl!r}"
+        )
+    for proj_name, direction, planned_impl in concrete_targets:
+        operation_impl = planned_impl
+        if projection_variants is None and (
+            implementation_target is not None
+            and (proj_name, direction) == implementation_target[:2]
+        ):
+            operation_impl = transcendental_impl
         kernel = _get_kernel(
             proj_name,
             direction,

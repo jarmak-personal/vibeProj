@@ -33,10 +33,21 @@ from typing import Any
 
 import numpy as np
 
+from vibeproj.transcendentals import (
+    HELMERT_FIXED_Q62,
+    HELMERT_FIXED_Q62_MIN_ELEMENTS,
+    NATIVE_LIBDEVICE,
+    ORTHO_FORWARD_FIXED_Q62,
+    ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+    PROJECTION_FIXED_Q62_MAX_SCALE_M,
+    SINU_FORWARD_FIXED_Q62,
+    SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+    TMERC_FIXED_Q62,
+    TMERC_FIXED_Q62_MIN_ELEMENTS,
+)
+
 
 POLICIES = ("native", "accelerated", "auto")
-CASES = ("tmerc-forward", "tmerc-inverse", "helmert-forward", "helmert-inverse")
-WORKLOAD_GRID_CASES = ("tmerc-forward", "helmert-forward", "helmert-inverse")
 EARTH_RADIUS_M = 6_378_137.0
 DEFAULT_WORKLOAD_SIZES = (
     32,
@@ -61,6 +72,98 @@ DEFAULT_WORKLOAD_SIZES = (
 
 
 @dataclass(frozen=True)
+class QualificationSpec:
+    """Reusable public-policy gates for one family and direction."""
+
+    implementation_id: str
+    operation: str
+    domain: str
+    direction: str
+    min_elements: int
+    coordinate_contract_m: float
+    max_physical_scale_m: float | None = None
+    expected_kernel_nodes: int = 1
+
+
+QUALIFICATION_SPECS = {
+    "tmerc-forward": QualificationSpec(
+        implementation_id=TMERC_FIXED_Q62,
+        operation="tmerc.forward",
+        domain="utm",
+        direction="forward",
+        min_elements=TMERC_FIXED_Q62_MIN_ELEMENTS,
+        coordinate_contract_m=1e-8,
+    ),
+    "tmerc-inverse": QualificationSpec(
+        implementation_id=NATIVE_LIBDEVICE,
+        operation="projection",
+        domain="tmerc.inverse",
+        direction="inverse",
+        min_elements=0,
+        coordinate_contract_m=1e-8,
+    ),
+    "helmert-forward": QualificationSpec(
+        implementation_id=HELMERT_FIXED_Q62,
+        operation="helmert",
+        domain="global",
+        direction="forward",
+        min_elements=HELMERT_FIXED_Q62_MIN_ELEMENTS,
+        coordinate_contract_m=1e-8,
+    ),
+    "helmert-inverse": QualificationSpec(
+        implementation_id=HELMERT_FIXED_Q62,
+        operation="helmert",
+        domain="global",
+        direction="inverse",
+        min_elements=HELMERT_FIXED_Q62_MIN_ELEMENTS,
+        coordinate_contract_m=1e-8,
+    ),
+    "sinu-forward": QualificationSpec(
+        implementation_id=SINU_FORWARD_FIXED_Q62,
+        operation="projection",
+        domain="sinu.forward",
+        direction="forward",
+        min_elements=SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+        coordinate_contract_m=1e-8,
+        max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+    ),
+    "ortho-forward": QualificationSpec(
+        implementation_id=ORTHO_FORWARD_FIXED_Q62,
+        operation="projection",
+        domain="ortho.forward",
+        direction="forward",
+        min_elements=ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+        coordinate_contract_m=1e-8,
+        max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+    ),
+}
+CASES = tuple(QUALIFICATION_SPECS)
+WORKLOAD_GRID_CASES = tuple(
+    name
+    for name, qualification in QUALIFICATION_SPECS.items()
+    if qualification.implementation_id != NATIVE_LIBDEVICE
+)
+
+
+def _qualification_workload_sizes(
+    requested_sizes: tuple[int, ...],
+    qualification: QualificationSpec,
+) -> tuple[int, ...]:
+    """Return the requested grid with threshold-1 and threshold included."""
+    if not requested_sizes:
+        return ()
+    return tuple(
+        sorted(
+            {
+                *requested_sizes,
+                qualification.min_elements - 1,
+                qualification.min_elements,
+            }
+        )
+    )
+
+
+@dataclass(frozen=True)
 class BenchmarkCase:
     """Prepared GPU inputs and metadata for one transform direction."""
 
@@ -77,7 +180,9 @@ class BenchmarkCase:
     domain: dict[str, Any]
     edges: dict[str, list[float | str]]
     output_is_geographic: bool
-    expected_kernel_nodes: int
+    oracle_from_crs: str
+    oracle_to_crs: str
+    qualification: QualificationSpec
 
 
 def _device_metadata(cp: Any, device_id: int) -> dict[str, Any]:
@@ -138,7 +243,9 @@ def _prepare_tmerc_forward(cp: Any, n: int, rng: np.random.Generator) -> Benchma
             "latitude_degrees": [*edge_lat, 0.0, 0.0, 0.0],
         },
         output_is_geographic=False,
-        expected_kernel_nodes=1,
+        oracle_from_crs="EPSG:4326",
+        oracle_to_crs="EPSG:32631",
+        qualification=QUALIFICATION_SPECS["tmerc-forward"],
     )
 
 
@@ -176,7 +283,9 @@ def _prepare_tmerc_inverse(cp: Any, n: int, rng: np.random.Generator) -> Benchma
             "northing_m": [*edge_northing, 0.0, 0.0, 0.0],
         },
         output_is_geographic=True,
-        expected_kernel_nodes=1,
+        oracle_from_crs="EPSG:4326",
+        oracle_to_crs="EPSG:32631",
+        qualification=QUALIFICATION_SPECS["tmerc-inverse"],
     )
 
 
@@ -222,7 +331,169 @@ def _prepare_helmert(cp: Any, n: int, rng: np.random.Generator, direction: str) 
             "latitude_degrees": [*edge_y, 0.0, 0.0, 0.0],
         },
         output_is_geographic=True,
-        expected_kernel_nodes=1,
+        oracle_from_crs="EPSG:4326",
+        oracle_to_crs="EPSG:4277",
+        qualification=QUALIFICATION_SPECS[name],
+    )
+
+
+_SPHERICAL_LONG_LAT_CRS = "+proj=longlat +R=6378137 +type=crs"
+
+
+def _json_edge_values(values: np.ndarray) -> list[float | str]:
+    result: list[float | str] = []
+    for value in values:
+        if np.isnan(value):
+            result.append("nan")
+        elif np.isposinf(value):
+            result.append("+inf")
+        elif np.isneginf(value):
+            result.append("-inf")
+        else:
+            result.append(float(value))
+    return result
+
+
+def _prepare_spherical_projection_forward(
+    cp: Any,
+    n: int,
+    rng: np.random.Generator,
+    *,
+    name: str,
+    target_crs: str,
+    longitude_range: tuple[float, float],
+    latitude_range: tuple[float, float],
+    edge_longitude: np.ndarray,
+    edge_latitude: np.ndarray,
+) -> BenchmarkCase:
+    """Prepare one reusable spherical forward-projection qualification case."""
+    from vibeproj import Transformer
+
+    transformer = Transformer.from_crs(
+        _SPHERICAL_LONG_LAT_CRS,
+        target_crs,
+        always_xy=True,
+    )
+    longitude = rng.uniform(*longitude_range, n).astype(np.float64)
+    latitude = rng.uniform(*latitude_range, n).astype(np.float64)
+    family = name.removesuffix("-forward")
+    return BenchmarkCase(
+        name=name,
+        family=family,
+        direction="FORWARD",
+        transformer=transformer,
+        input_x=cp.asarray(longitude),
+        input_y=cp.asarray(latitude),
+        host_x=longitude,
+        host_y=latitude,
+        edge_host_x=edge_longitude,
+        edge_host_y=edge_latitude,
+        domain={
+            "crs": f"{_SPHERICAL_LONG_LAT_CRS} -> {target_crs}",
+            "longitude_degrees": list(longitude_range),
+            "latitude_degrees": list(latitude_range),
+        },
+        edges={
+            "longitude_degrees": _json_edge_values(edge_longitude),
+            "latitude_degrees": _json_edge_values(edge_latitude),
+        },
+        output_is_geographic=False,
+        oracle_from_crs=_SPHERICAL_LONG_LAT_CRS,
+        oracle_to_crs=target_crs,
+        qualification=QUALIFICATION_SPECS[name],
+    )
+
+
+def _prepare_sinu_forward(cp: Any, n: int, rng: np.random.Generator) -> BenchmarkCase:
+    edge_latitude = np.asarray(
+        [
+            -90.0,
+            np.nextafter(-90.0, math.inf),
+            0.0,
+            np.nextafter(90.0, -math.inf),
+            90.0,
+            np.nextafter(-90.0, -math.inf),
+            np.nextafter(90.0, math.inf),
+            -100.0,
+            100.0,
+            -np.inf,
+            np.inf,
+            np.nan,
+            40.0,
+            40.0,
+        ],
+        dtype=np.float64,
+    )
+    edge_longitude = np.asarray(
+        [-180.0, -180.0, 0.0, 180.0, 180.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, np.inf, np.nan],
+        dtype=np.float64,
+    )
+    return _prepare_spherical_projection_forward(
+        cp,
+        n,
+        rng,
+        name="sinu-forward",
+        target_crs="+proj=sinu +lon_0=0 +R=6378137 +units=m +type=crs",
+        longitude_range=(-170.0, 170.0),
+        latitude_range=(-80.0, 80.0),
+        edge_longitude=edge_longitude,
+        edge_latitude=edge_latitude,
+    )
+
+
+def _prepare_ortho_forward(cp: Any, n: int, rng: np.random.Generator) -> BenchmarkCase:
+    edge_latitude = np.asarray(
+        [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            -45.0,
+            -90.0,
+            90.0,
+            np.nextafter(-90.0, -math.inf),
+            np.nextafter(90.0, math.inf),
+            -100.0,
+            100.0,
+            -np.inf,
+            np.inf,
+            np.nan,
+            40.0,
+            40.0,
+        ],
+        dtype=np.float64,
+    )
+    edge_longitude = np.asarray(
+        [
+            np.nextafter(90.0, 0.0),
+            90.0,
+            np.nextafter(90.0, math.inf),
+            120.0,
+            180.0,
+            -180.0,
+            180.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            np.inf,
+            np.nan,
+        ],
+        dtype=np.float64,
+    )
+    return _prepare_spherical_projection_forward(
+        cp,
+        n,
+        rng,
+        name="ortho-forward",
+        target_crs="+proj=ortho +lat_0=45 +lon_0=0 +R=6378137 +units=m +type=crs",
+        longitude_range=(-30.0, 30.0),
+        latitude_range=(20.0, 70.0),
+        edge_longitude=edge_longitude,
+        edge_latitude=edge_latitude,
     )
 
 
@@ -236,6 +507,10 @@ def _prepare_case(cp: Any, name: str, n: int, seed: int) -> BenchmarkCase:
         return _prepare_helmert(cp, n, rng, "FORWARD")
     if name == "helmert-inverse":
         return _prepare_helmert(cp, n, rng, "INVERSE")
+    if name == "sinu-forward":
+        return _prepare_sinu_forward(cp, n, rng)
+    if name == "ortho-forward":
+        return _prepare_ortho_forward(cp, n, rng)
     raise ValueError(f"Unknown benchmark case: {name}")
 
 
@@ -548,10 +823,11 @@ def _pyproj_reference(case: BenchmarkCase, limit: int) -> tuple[np.ndarray, np.n
     from pyproj import Transformer as PyProjTransformer
     from pyproj.enums import TransformDirection
 
-    if case.family == "tmerc":
-        oracle = PyProjTransformer.from_crs("EPSG:4326", "EPSG:32631", always_xy=True)
-    else:
-        oracle = PyProjTransformer.from_crs("EPSG:4326", "EPSG:4277", always_xy=True)
+    oracle = PyProjTransformer.from_crs(
+        case.oracle_from_crs,
+        case.oracle_to_crs,
+        always_xy=True,
+    )
     direction = (
         TransformDirection.FORWARD if case.direction == "FORWARD" else TransformDirection.INVERSE
     )
@@ -586,6 +862,75 @@ def _edge_accuracy(cp: Any, case: BenchmarkCase, precision: str) -> dict[str, An
         native_y,
         geographic=case.output_is_geographic,
     )
+
+
+def _scale_guard_behavior(cp: Any, case: BenchmarkCase, precision: str) -> dict[str, Any]:
+    """Verify uniform native execution above a projection's scale contract."""
+    maximum_scale = case.qualification.max_physical_scale_m
+    if maximum_scale is None:
+        return {"required": False, "qualification_pass": True, "probes": []}
+
+    from vibeproj import Transformer
+
+    longitude_host = np.asarray([-180.0, -120.0, 0.0, 120.0, 180.0, np.inf, np.nan])
+    latitude_host = np.asarray([-90.0, -45.0, 0.0, 45.0, 90.0, 40.0, 40.0])
+    longitude = cp.asarray(longitude_host)
+    latitude = cp.asarray(latitude_host)
+    probes = []
+    for raw_scale in (np.nextafter(maximum_scale, math.inf), 1e12):
+        physical_scale = float(raw_scale)
+        source_crs = f"+proj=longlat +R={physical_scale:.17g} +type=crs"
+        projection_parameters = f"+proj={case.family} +lon_0=0"
+        if case.family == "ortho":
+            projection_parameters += " +lat_0=45"
+        target_crs = f"{projection_parameters} +R={physical_scale:.17g} +units=m +type=crs"
+        transformer = Transformer.from_crs(source_crs, target_crs, always_xy=True)
+        outputs = {}
+        for policy in ("native", "accelerated"):
+            out_x = cp.empty(longitude.size, dtype=cp.float64)
+            out_y = cp.empty(latitude.size, dtype=cp.float64)
+            transformer.transform_buffers(
+                longitude,
+                latitude,
+                out_x=out_x,
+                out_y=out_y,
+                precision=precision,
+                transcendentals=policy,
+            )
+            outputs[policy] = (cp.asnumpy(out_x), cp.asnumpy(out_y))
+        native_x, native_y = outputs["native"]
+        accelerated_x, accelerated_y = outputs["accelerated"]
+        bitwise_native = bool(
+            np.array_equal(accelerated_x.view(np.uint64), native_x.view(np.uint64))
+            and np.array_equal(accelerated_y.view(np.uint64), native_y.view(np.uint64))
+        )
+        strategy = _resolved_strategy(
+            transformer,
+            "accelerated",
+            "FORWARD",
+            precision=precision,
+            workload_size=int(longitude.size),
+        )
+        strategy_remains_selected = strategy["implementation_ids"] == [
+            case.qualification.implementation_id
+        ]
+        probes.append(
+            {
+                "physical_scale_m": float(physical_scale),
+                "strategy": strategy,
+                "strategy_remains_selected": strategy_remains_selected,
+                "bitwise_native_outputs": bitwise_native,
+            }
+        )
+    return {
+        "required": True,
+        "maximum_qualified_scale_m": maximum_scale,
+        "probes": probes,
+        "qualification_pass": all(
+            probe["strategy_remains_selected"] and probe["bitwise_native_outputs"]
+            for probe in probes
+        ),
+    }
 
 
 def _run_case(cp: Any, case: BenchmarkCase, args: argparse.Namespace) -> dict[str, Any]:
@@ -680,6 +1025,7 @@ def _run_case(cp: Any, case: BenchmarkCase, args: argparse.Namespace) -> dict[st
         for policy, (out_x, out_y) in host_outputs.items()
     }
     edge_error_vs_native = _edge_accuracy(cp, case, args.precision)
+    scale_guard = _scale_guard_behavior(cp, case, args.precision)
 
     strategies = {
         policy: _resolved_strategy(
@@ -692,10 +1038,17 @@ def _run_case(cp: Any, case: BenchmarkCase, args: argparse.Namespace) -> dict[st
         for policy in POLICIES
     }
     accelerated_ids = strategies["accelerated"]["implementation_ids"]
-    accelerated_is_native = accelerated_ids == ["native.libdevice"]
+    qualification = case.qualification
+    accelerated_is_native = qualification.implementation_id == NATIVE_LIBDEVICE
+    expected_accelerated_ids = [qualification.implementation_id]
+    expected_auto_id = (
+        qualification.implementation_id
+        if not accelerated_is_native and args.n >= qualification.min_elements
+        else NATIVE_LIBDEVICE
+    )
     repeat_speedups = timing["accelerated"]["repeat_speedups_vs_native"]
     wall_repeat_speedups = wall_timing["accelerated"]["repeat_speedups_vs_native"]
-    coordinate_contract_m = 1e-8
+    coordinate_contract_m = qualification.coordinate_contract_m
     accelerated_native_error = errors_vs_native["accelerated"]["max_m"]
     native_pyproj_error = errors_vs_pyproj["native"]["max_m"]
     accelerated_pyproj_error = errors_vs_pyproj["accelerated"]["max_m"]
@@ -704,6 +1057,11 @@ def _run_case(cp: Any, case: BenchmarkCase, args: argparse.Namespace) -> dict[st
     gates = {
         "speedup_threshold": 1.05,
         "accelerated_resolved_native_only": accelerated_is_native,
+        "native_policy_resolution_pass": strategies["native"]["implementation_ids"]
+        == [NATIVE_LIBDEVICE],
+        "accelerated_policy_resolution_pass": accelerated_ids == expected_accelerated_ids,
+        "auto_policy_resolution_pass": strategies["auto"]["implementation_ids"]
+        == [expected_auto_id],
         "median_speedup_pass": accelerated_is_native
         or timing["accelerated"]["speedup_vs_native"] >= 1.05,
         "three_repeat_speedup_pass": accelerated_is_native
@@ -724,7 +1082,7 @@ def _run_case(cp: Any, case: BenchmarkCase, args: argparse.Namespace) -> dict[st
         and all(graph["returned_preallocated_outputs"] for graph in graphs),
         "cuda_graph_capture_pass": all(graph["captured"] for graph in graphs),
         "expected_kernel_topology_pass": all(
-            graph["captured"] and graph["kernel_nodes"] == case.expected_kernel_nodes
+            graph["captured"] and graph["kernel_nodes"] == qualification.expected_kernel_nodes
             for graph in graphs
         ),
         "no_copy_nodes": all(graph["captured"] and graph["memcpy_nodes"] == 0 for graph in graphs),
@@ -737,6 +1095,7 @@ def _run_case(cp: Any, case: BenchmarkCase, args: argparse.Namespace) -> dict[st
         "edge_coordinate_contract_pass": edge_error_vs_native["max_m"] is not None
         and edge_error_vs_native["max_m"] <= coordinate_contract_m
         and edge_error_vs_native["nonfinite_match"],
+        "scale_guard_native_behavior_pass": scale_guard["qualification_pass"],
         "no_pyproj_regression": accelerated_pyproj_error is not None
         and native_pyproj_error is not None
         and accelerated_pyproj_error <= native_pyproj_error + coordinate_contract_m,
@@ -746,6 +1105,9 @@ def _run_case(cp: Any, case: BenchmarkCase, args: argparse.Namespace) -> dict[st
         "three_repeat_speedup_pass",
         "wall_median_speedup_pass",
         "wall_three_repeat_speedup_pass",
+        "native_policy_resolution_pass",
+        "accelerated_policy_resolution_pass",
+        "auto_policy_resolution_pass",
         "no_steady_state_allocator_calls",
         "preallocated_output_identity",
         "cuda_graph_capture_pass",
@@ -754,6 +1116,7 @@ def _run_case(cp: Any, case: BenchmarkCase, args: argparse.Namespace) -> dict[st
         "no_memset_nodes",
         "native_coordinate_contract_pass",
         "edge_coordinate_contract_pass",
+        "scale_guard_native_behavior_pass",
         "no_pyproj_regression",
     )
     gates["qualification_pass"] = all(bool(gates[name]) for name in required_gate_names)
@@ -768,16 +1131,18 @@ def _run_case(cp: Any, case: BenchmarkCase, args: argparse.Namespace) -> dict[st
         "repeats": args.repeats,
         "domain": case.domain,
         "edge_inputs": case.edges,
+        "qualification_spec": asdict(qualification),
         "strategies": strategies,
         "device_timing": timing,
         "wall_timing": wall_timing,
         "error_vs_native_m": errors_vs_native,
         "edge_error_vs_native_m": edge_error_vs_native,
+        "scale_guard": scale_guard,
         "error_vs_pyproj_m": errors_vs_pyproj,
         "instrumentation": instrumentation,
         "hot_path": {
             "preallocated_outputs": True,
-            "expected_kernel_nodes": case.expected_kernel_nodes,
+            "expected_kernel_nodes": qualification.expected_kernel_nodes,
             "copy_direction": (
                 "No transfer direction is inferred; CUDA graph labels are reported verbatim."
             ),
@@ -902,24 +1267,13 @@ def _run_workload_grid(
     args: argparse.Namespace,
     selected_cases: tuple[str, ...],
 ) -> list[dict[str, Any]]:
-    """Measure synchronized public dispatch over logarithmic workload sizes."""
-    from vibeproj.transcendentals import (
-        HELMERT_FIXED_Q62,
-        HELMERT_FIXED_Q62_MIN_ELEMENTS,
-        NATIVE_LIBDEVICE,
-        TMERC_FIXED_Q62,
-        TMERC_FIXED_Q62_MIN_ELEMENTS,
-    )
-
-    qualifications = {
-        "tmerc-forward": (TMERC_FIXED_Q62, TMERC_FIXED_Q62_MIN_ELEMENTS),
-        "helmert-forward": (HELMERT_FIXED_Q62, HELMERT_FIXED_Q62_MIN_ELEMENTS),
-        "helmert-inverse": (HELMERT_FIXED_Q62, HELMERT_FIXED_Q62_MIN_ELEMENTS),
-    }
+    """Measure public dispatch over the grid plus each crossover boundary."""
     rows = []
     case_names = tuple(name for name in WORKLOAD_GRID_CASES if name in selected_cases)
     for case_index, case_name in enumerate(case_names):
-        for n in args.workload_sizes:
+        qualification = QUALIFICATION_SPECS[case_name]
+        workload_sizes = _qualification_workload_sizes(args.workload_sizes, qualification)
+        for n in workload_sizes:
             case = _prepare_case(cp, case_name, n, args.seed + 10_000 + case_index)
             outputs = {
                 policy: (cp.empty(n, dtype=cp.float64), cp.empty(n, dtype=cp.float64))
@@ -964,7 +1318,8 @@ def _run_workload_grid(
                 )
                 for policy in POLICIES
             }
-            accelerated_id, min_elements = qualifications[case_name]
+            accelerated_id = qualification.implementation_id
+            min_elements = qualification.min_elements
             below_crossover = n < min_elements
             expected_auto_id = NATIVE_LIBDEVICE if below_crossover else accelerated_id
             auto_speedup = timing["auto"]["speedup_vs_native"]
@@ -995,6 +1350,7 @@ def _run_workload_grid(
                     "precision": args.precision,
                     "qualified_implementation_id": accelerated_id,
                     "min_elements": min_elements,
+                    "threshold_boundary": n in {min_elements - 1, min_elements},
                     "below_crossover": below_crossover,
                     "strategies": strategies,
                     "wall_timing": timing,
@@ -1116,6 +1472,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "oracle_n": min(args.oracle_n, args.n),
             "policies": list(POLICIES),
             "workload_sizes": list(args.workload_sizes),
+            "qualification_specs": {
+                name: asdict(specification) for name, specification in QUALIFICATION_SPECS.items()
+            },
+            "workload_grid_includes_threshold_boundaries": True,
             "interleaved_cuda_events": True,
             "cuda_event_measurement": "device execution between CUDA events",
             "wall_measurement": (
@@ -1174,6 +1534,8 @@ def main() -> None:
         parser.error(
             "--enforce-gates requires every default logarithmic workload size from 32 to 5000000"
         )
+    if args.enforce_gates and args.precision not in ("auto", "fp64"):
+        parser.error("--enforce-gates requires fp64-equivalent precision ('auto' or 'fp64')")
 
     results = run(args)
     if args.json:

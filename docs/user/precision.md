@@ -38,11 +38,19 @@ instruction sequences, which are expensive on consumer GPUs with weak fp64
 throughput.
 
 On validated Ada `sm_89` consumer GPUs, auto dispatch accelerates bounded
-Helmert and forward UTM transcendentals with table-free Q1.62 trig. Forward UTM
-also uses bounded fp64-accurate correction polynomials for
-`atan2` and `asinh`. Inputs outside those domains fall back per-coordinate to
-native fp64. Datacenter, unknown, and future GPUs conservatively use native
-fp64 until independently benchmarked.
+Helmert, forward UTM, sinusoidal-forward, and orthographic-forward
+transcendentals with table-free Q1.62 trig. Forward UTM also uses bounded
+fp64-accurate correction polynomials for `atan2` and `asinh`. Sinusoidal and
+orthographic remain fp64-only and use native math above the qualified
+6,400,000 m physical scale. Datacenter, unknown, and future GPUs conservatively
+use native fp64 until independently benchmarked.
+
+There are two distinct kinds of fallback. The host resolver reports
+`native.libdevice` when the policy, hardware, direction, precision, domain, or
+workload is not qualified. When the host selects a fixed implementation, its
+uniform and per-coordinate guards can still execute native special functions
+for unsupported scale, non-finite, or out-of-domain values; the public
+`StrategyDecision` continues to report the selected implementation ID.
 
 ## Double-single arithmetic
 

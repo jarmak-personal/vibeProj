@@ -50,12 +50,19 @@ for decision in explanation.decisions:
 
 The implementation ID, not a kernel's private function name, is the stable
 identifier to record in benchmark results. `list_transcendental_strategies()`
-returns the immutable registry of known implementations.
+returns the immutable registry of known implementations. Projection entries
+with a uniform scale guard expose it as
+`accuracy.max_physical_scale_m`.
 
 Transform calls always resolve `auto` with the concrete input size. An
 `explain_strategy()` or `compile()` call with no workload size describes or
 precompiles the hardware-qualified variant without imposing the crossover;
 pass `workload_size=` to make introspection match a planned transform exactly.
+Module-level `warm_up(["tmerc"])` has no CRS domain to inspect, so on a
+qualified `auto` or `accelerated` device it compiles both generic-TM native and
+forward-UTM accelerated variants, plus the native inverse. A Transformer's
+`compile()` uses its concrete CRS domains and compiles only the deduplicated
+variants reachable in either transform direction.
 
 ## Qualified hardware and coverage
 
@@ -66,14 +73,21 @@ The initial accelerated coverage is deliberately small:
 | `native.libdevice` | Every fused family/direction and Helmert | CUDA native special math, including paired native `sincos` where implemented | All devices and CPU/no-GPU fallback | n/a |
 | `helmert.fixed_q62` | Helmert datum shift | Bounded sine/cosine only; ECEF, square root, and `atan2` remain native fp64 | Ada `sm_89` consumer GPUs | 131,072 |
 | `tmerc.forward.fixed_q62` | Forward UTM only | Bounded sine/cosine, the TM latitude correction, and bounded `asinh`; remaining math stays fp64 | Ada `sm_89` consumer GPUs | 256 |
+| `sinu.forward.fixed_q62` | Sinusoidal forward only | Guarded Q1.62 cosine; remaining arithmetic stays fp64 | Ada `sm_89` consumer GPUs | 524,288 |
+| `ortho.forward.fixed_q62` | Orthographic forward only | Atomically guarded Q1.62 sine/cosine pairs; remaining arithmetic stays fp64 | Ada `sm_89` consumer GPUs | 262,144 |
 
 On a qualified RTX 4090, `"auto"` resolves the specialized implementations at
 or above the listed sizes; below them it resolves native. Explicit
 `"accelerated"` can select the specialized implementation at any size. Generic
-Transverse Mercator, inverse UTM,
-all other projection families, unsupported precision combinations, unknown
-devices, and inputs outside an implementation's guarded domain resolve or
-fall back to `native.libdevice`.
+Transverse Mercator, inverse UTM, sinusoidal inverse, orthographic inverse, all
+other projection families, unsupported precision combinations, and unknown
+devices resolve or fall back to `native.libdevice`. Guarded input values do not
+change the host decision: a selected fixed `StrategyDecision` remains selected
+while its kernel executes the native branch for those values. The two
+projection-specific Q1.62 implementations
+are fp64-only; `precision="fp32"` and `precision="ds"` stay native. Planning
+calls with `precision="auto"` may select them because the corresponding fused
+kernel resolves to fp64.
 
 H100, Hopper, and other datacenter GPUs remain native. Their much stronger
 native fp64 throughput changes the performance trade-off, and acceleration
@@ -98,10 +112,35 @@ against native policy. The current release gates are:
   error `2.3e-16 rad` over the full guard. (The tighter `6.9e-4` correction
   bound applies to normal UTM's `+/-3 degree` zone.) The complete projected
   result must differ from native by `< 1e-8 m`.
+- Sinusoidal forward: Q1.62 cosine is used only at physical scale
+  `0 < scale <= 6,400,000 m`, for finite latitude in
+  `[-pi/2, pi/2]` with wrapped longitude in `[-pi, pi]`. Other coordinates use
+  native cosine. The complete projected result must differ from native by
+  `< 1e-8 m`; final WGS84 qualification measured 3.725/1.863 nm maximum/p99.
+- Orthographic forward: at physical scale `0 < scale <= 6,400,000 m`, both
+  latitude and wrapped-longitude sine/cosine pairs use one atomic guard over
+  `[-pi/2, pi/2]` and `[-pi, pi]`. If either argument is invalid, both pairs
+  use native math. The complete projected result must differ from native by
+  `< 1e-8 m`; final WGS84 qualification measured 2.033106/1.396984 nm
+  maximum/p99.
 - Non-finite, out-of-domain, wide-TM, near-pole, and otherwise unsupported
-  coordinates take the native branch per coordinate.
+coordinates take the native branch per coordinate.
+
+Host strategy fallback and kernel guards are intentionally distinct. An
+unsupported backend, device, direction, precision, or domain produces an
+observable `StrategyDecision` for `native.libdevice`. A qualified Sinu/Ortho
+decision remains on its fixed implementation ID when the physical scale is
+above 6,400,000 m, while the kernel uniformly executes native math. This keeps
+dispatch inspectable without claiming the guarded inputs were accelerated.
 
 These are native-equivalence contracts for the implementation change. The
 existing projection accuracy requirements against pyproj still apply; an
 accelerated implementation may not spend that error budget merely because it
 passes its native-equivalence bound.
+
+The exact IDs, guarded-domain contracts, and automatic thresholds above are
+public. On the qualified RTX 4090 at 5,000,000 randomized coordinates, the
+final enforced public benchmark measured 1.096x synchronized-wall speedup for
+sinusoidal forward and 1.341x for orthographic forward. These measurements
+qualify the listed hardware and thresholds; they are not a performance promise
+for other devices or workloads.

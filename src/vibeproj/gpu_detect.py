@@ -1,9 +1,10 @@
 """GPU type detection for automatic precision selection.
 
 Queries the NVIDIA driver to determine fp64:fp32 throughput ratio.
-Projection arithmetic remains fp64. Validated Ada consumer GPUs use bounded
-INT64 trig inside Helmert and guarded forward-UTM transcendentals; datacenter
-and unknown GPUs use native paired fp64 sine/cosine.
+Projection arithmetic remains fp64. The central registry can select bounded
+transcendental implementations for qualified Helmert, UTM, and projection
+domains on validated Ada consumer GPUs. Datacenter and unknown GPUs retain
+native fp64 until independently qualified.
 """
 
 from __future__ import annotations
@@ -41,8 +42,9 @@ def select_compute_precision() -> str:
     """Select compute precision based on GPU type.
 
     Always returns ``"fp64"`` for arithmetic and I/O. Individual fused
-    kernels can still select validated bounded transcendental strategies for
-    the current device without exposing a lower-precision public mode.
+    kernels can still select any registry-qualified bounded transcendental
+    strategy for the current device and exact operation domain without
+    exposing a lower-precision public mode.
     """
     return "fp64"
 

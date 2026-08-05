@@ -37,7 +37,7 @@ shared native pairing helper (or the equivalent double-single helper).
 |---|---|---|---|---|---|---|---|
 | `eqc` | forward | none | n/a | none | arithmetic only | none | T0 |
 | `eqc` | inverse | none | n/a | none | arithmetic only | none | T0 |
-| `sinu` | forward | `cos(phi)` | `phi`: unknown | none | `native.libdevice` | native only | T1 |
+| `sinu` | forward | `cos(phi)` | kernel-boundary `phi`: unknown; accelerated guard requires finite `|phi| <= pi/2`, wrapped `|lambda| <= pi`, and `0 < scale <= 6,400,000 m` | none | `native.libdevice`, or `sinu.forward.fixed_q62` | qualified guarded implementation; native otherwise | T2 |
 | `sinu` | inverse | `cos(phi)` | inverse `phi`: unknown | none | `native.libdevice` | native only | T3 |
 | `merc` | forward | `sin`, `tan`, `pow`, `log` | `phi` and singular distance to poles: unknown | none | `native.libdevice` | native only | T3 |
 | `merc` | inverse | `exp`, `atan`, iterative `sin`/`pow` | normalized northing and exponent: unbounded | none | `native.libdevice` | native only | T3 |
@@ -57,7 +57,7 @@ shared native pairing helper (or the equivalent double-single helper).
 | `eqearth` | inverse | iterative polynomial, `sin`/`cos`, clamped `asin`, iterative `sin`/`cos`/`log` | authalic inverse input clamped; projected coordinates otherwise unknown | pair `theta`; iterative pair `phi` | `native.libdevice` | paired native only | T3 |
 | `cea` | forward | `sin`, `log` | `phi`: unknown | none | `native.libdevice` | native only | T3 |
 | `cea` | inverse | clamped `asin`, iterative `sin`/`cos`/`log` | initial `asin` argument clamped; projected northing otherwise unknown | iterative pair `phi` | `native.libdevice` | paired native only | T3 |
-| `ortho` | forward | `sin`/`cos` of `phi` and `lambda` | `phi`: unknown; `lambda` finite wrapped | pair `phi`; pair `lambda` | `native.libdevice` | paired native only | T1 |
+| `ortho` | forward | `sin`/`cos` of `phi` and `lambda` | kernel-boundary `phi`: unknown; accelerated atomic guard requires finite `|phi| <= pi/2`, wrapped `|lambda| <= pi`, and `0 < scale <= 6,400,000 m` | pair `phi`; pair `lambda` | `native.libdevice`, or `ortho.forward.fixed_q62` | qualified guarded implementation; native otherwise | T2 |
 | `ortho` | inverse | `sqrt`, clamped `asin`, `sin`/`cos`, `atan2` | central-angle `asin` input clamped; projected radius otherwise unknown | pair central angle | `native.libdevice` | paired native only | T3 |
 | `gnom` | forward | `sin`/`cos` of `phi` and `lambda` | `phi`: unknown; horizon denominator can approach zero | pair `phi`; pair `lambda` | `native.libdevice` | paired native only | T3 |
 | `gnom` | inverse | `sqrt`, `atan`, `sin`/`cos`, `asin`, `atan2` | projected radius unbounded; derived `asin` input not explicitly clamped | pair central angle | `native.libdevice` | paired native only | T3 |
@@ -94,11 +94,17 @@ The user-facing coverage matrix is intentionally narrower than the inventory:
 | `native.libdevice` | `*` | forward/inverse/Helmert | all supported | universal fallback | 0 | all special math |
 | `helmert.fixed_q62` | `helmert` | datum shift | all public modes (Helmert kernel stays fp64) | Ada `sm_89`, weak-native-fp64 consumer class | 131,072 | `sin`, `cos`; `|angle| <= pi`, near-pole native guard |
 | `tmerc.forward.fixed_q62` | `tmerc` | forward UTM | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 256 | paired `sin`/`cos`, TM `atan2` correction, `asinh`; per-operation guards above |
+| `sinu.forward.fixed_q62` | `sinu` | forward | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 524,288 | Q1.62 `cos(phi)`; valid latitude/wrapped longitude and `0 < scale <= 6,400,000 m`, native otherwise |
+| `ortho.forward.fixed_q62` | `ortho` | forward | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 262,144 | Q1.62 paired `sin`/`cos`; atomic argument guard and `0 < scale <= 6,400,000 m`, native otherwise |
 
 `tests/test_transcendental_coverage.py` binds these IDs and capabilities to
 the public registry and resolver. Adding a documented accelerated row without
 registry support, or registry support without updating the contract, fails the
 test. Native-only inventory rows do not imply an accelerated registry entry.
+For a domain with multiple future hardware variants, the resolver filters
+policy, backend, compute capability, fp32:fp64 ratio, and precision first, then
+chooses the highest explicit registry priority. An equal-priority eligible tie
+is rejected as ambiguous; registration order is never a tie-breaker.
 
 ## Qualification and benchmark protocol
 
@@ -128,10 +134,20 @@ reported verbatim; the benchmark does not infer a host/device transfer
 direction from a memory-pool delta or a hard-coded constant. `--enforce-gates`
 exits nonzero if any required gate fails.
 
+For every registry entry with a physical-scale ceiling, untimed public probes
+at `nextafter(max_scale, +inf)` and `1e12 m` mechanically require the fixed
+StrategyDecision to remain selected while both output arrays match native
+bit-for-bit. This distinguishes host strategy fallback from the kernel's
+uniform scale guard; normal per-coordinate argument guards follow the same
+principle without changing the selected ID.
+
 The default workload grid covers 32 through 5,000,000 elements on logarithmic
-steps for forward UTM and both Helmert directions. `auto` must resolve native
-below the registry's `min_elements` and the qualified implementation at or
-above it. The small-size gate permits at most 2% aggregate and 5% per-repeat
+steps for forward UTM, both Helmert directions, sinusoidal forward, and
+orthographic forward. Each case also injects its exact `min_elements - 1` and
+`min_elements` boundary sizes. `auto` must resolve native below the registry's
+threshold and the qualified implementation at or above it; `native` must
+remain native, and explicit `accelerated` must resolve the exact qualified ID.
+The small-size gate permits at most 2% aggregate and 5% per-repeat
 wall variation between identical native implementations; this is measurement
 noise tolerance, not a performance claim. At and above `min_elements`, every
 tested grid size must show at least 5% wall-clock improvement in all three
@@ -187,6 +203,14 @@ The older scripts have narrower purposes:
   alternative fixed-core evidence. Their experimental modes are not public
   policies.
 
+Eckert IV's Wave 1 inverse trig-pair experiment remains research-only. Replacing
+the native inverse `sin(theta), cos(theta)` pair with Q1.62 measured a benign
+1.0891x device speedup, but at `cy / C_y = -0.999994` and `lambda = pi` its
+sub-ULP pair error amplifies to about 271.916 nm, failing the 10 nm gate. Run
+`python benchmarks/eck4_inverse_rejection.py` or the matching deterministic
+coverage test to reproduce the edge. No `eck4` implementation ID, registry row,
+or public threshold is permitted without a new proof and full qualification.
+
 ### Ada qualification evidence
 
 The public-policy benchmark was run on an RTX 4090 (`sm_89`, fp32:fp64 ratio
@@ -236,6 +260,32 @@ used as evidence for these claims. The Helmert pyproj absolute difference is
 dominated by the selected datum operation and missing optional OSTN15 grid;
 the qualification gate is that the accelerated result does not regress the
 same native baseline.
+
+### Wave 1 projection qualification evidence
+
+The final public-policy benchmark ran serially on the qualified RTX 4090 with
+5,000,000 randomized coordinates, 10 warm-up rounds, 50 interleaved iterations,
+and three repeats. Both cases passed every enforced normal, guard-edge,
+non-finite, pyproj-regression, public-resolution, allocation, caller-output,
+CUDA-graph topology, threshold-boundary, and full-grid gate.
+
+| Case | Native / accelerated device p50 | Device speedup | Native / accelerated wall p50 | Wall speedup | Max / p99 error vs native |
+|---|---:|---:|---:|---:|---:|
+| sinusoidal forward | 0.427008 / 0.389120 ms | 1.097x | 0.405246 / 0.369870 ms | 1.096x | 3.725 / 1.863 nm |
+| orthographic forward | 0.703488 / 0.520192 ms | 1.352x | 0.661692 / 0.493275 ms | 1.341x | 2.033 / 1.397 nm |
+
+Sinusoidal's initial 262,144 candidate threshold had one randomized wall repeat
+below 1.05x. The final 524,288 threshold passed at 1.069x, 1.065x, and 1.066x;
+`auto` remained native at 524,287. Orthographic passed at 262,144 with 1.204x,
+1.206x, and 1.194x wall speedups; `auto` remained native at 262,143. Every
+larger tested grid size through 5,000,000 passed all three repeats. Companion
+inverse paths remain `native.libdevice`.
+
+At the exact 6,400,000 m scale ceiling, a separate two-million-coordinate
+dense proof measured 3.725290298 nm maximum error for sinusoidal and
+2.832507030 nm across orthographic origins `{-90, -45, 0, 45, 90}`. The exact
+ceiling and its nextafter-below value retain Q1.62; nextafter-above, `1e12`,
+zero, negative, infinity, and NaN scales execute bitwise-native uniformly.
 
 ### Go/no-go gates
 

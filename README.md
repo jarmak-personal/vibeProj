@@ -95,10 +95,12 @@ print(t.explain_strategy(transcendentals="accelerated"))
 
 `transcendentals="accelerated"` uses an accuracy-qualified implementation when
 the transform and GPU are supported, and explicitly falls back to native math
-otherwise. Initial automatic acceleration is limited to bounded Helmert and
-forward UTM operations on validated Ada `sm_89` consumer GPUs and only above
-their measured workload-size crossovers; Hopper and unmeasured devices remain
-native. See the
+otherwise. Automatic acceleration currently covers bounded Helmert, forward
+UTM, sinusoidal-forward, and orthographic-forward operations on validated Ada
+`sm_89` consumer GPUs above their measured workload-size crossovers; Hopper and
+unmeasured devices remain native. A selected accelerated kernel may still take
+its guarded native branch for individual out-of-domain coordinates or a
+uniformly unsupported physical scale. See the
 [transcendental policy](https://jarmak-personal.github.io/vibeProj/user/transcendentals.html).
 
 ### Cross-datum transforms (Helmert)
@@ -153,7 +155,8 @@ t.transform_buffers(buf.x, buf.y, buf.z, out_x=new_x, out_y=new_y, out_z=new_z)
 - **fp64 I/O** — input/output arrays always double precision (ADR-0002 compliant)
 - **Inspectable transcendental policy** — a central registry resolves
   `auto`/`native`/`accelerated` from hardware, projection domain, direction,
-  and accuracy qualification, with native fallback everywhere
+  precision, workload size, and accuracy qualification, with observable host
+  fallback and guarded native execution inside qualified kernels
 
 ## Test
 

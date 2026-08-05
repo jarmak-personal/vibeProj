@@ -454,8 +454,10 @@ class Transformer:
         ``"accelerated"`` independently. Compilation has no concrete workload
         size, so ``"auto"`` selects an otherwise-qualified implementation
         without applying runtime crossover thresholds. This front-loads kernel
-        compilation only; first-use stream scratch and chunk staging workspaces
-        are still allocated lazily. No-op if CuPy is unavailable.
+        compilation for every distinct projection/direction/implementation
+        triple reachable in either transform direction; first-use stream
+        scratch and chunk staging workspaces are still allocated lazily. No-op
+        if CuPy is unavailable.
         """
         from vibeproj.transcendentals import (
             normalize_compute_precision,
@@ -469,46 +471,39 @@ class Transformer:
         except ImportError:
             return
 
-        pipeline = self._pipeline
-        tmerc_domain = None
-        if pipeline.mode == "forward" and pipeline.projection.name == "tmerc":
-            tmerc_domain = "utm" if pipeline.computed.get("is_utm", False) else "global"
-        elif pipeline.mode == "proj_to_proj" and pipeline.dst_projection.name == "tmerc":
-            tmerc_domain = "utm" if pipeline.dst_computed.get("is_utm", False) else "global"
-        from vibeproj.transcendentals import (
-            NATIVE_LIBDEVICE,
-            TranscendentalOperation,
-            detect_device_capability,
-            resolve_transcendental_strategy,
-        )
+        from vibeproj.transcendentals import detect_device_capability
 
         device = detect_device_capability()
-        tmerc_impl = NATIVE_LIBDEVICE
-        if tmerc_domain is not None:
-            tmerc_impl = resolve_transcendental_strategy(
-                TranscendentalOperation.TMERC_FORWARD,
-                transcendentals,
+        contexts = tuple(
+            self._pipeline_for_direction(direction).build_execution_context(
+                precision=precision,
+                transcendentals=transcendentals,
                 device=device,
-                domain=tmerc_domain,
-                precision=precision,
-            ).implementation_id
-        if pipeline.mode in ("forward", "inverse"):
-            compile_kernels(
-                [pipeline.projection.name],
-                precision=precision,
-                transcendental_impl=tmerc_impl,
+                workload_size=None,
+                _normalized=True,
             )
-        elif pipeline.mode == "proj_to_proj":
-            names = [pipeline.src_projection.name, pipeline.dst_projection.name]
-            compile_kernels(names, precision=precision, transcendental_impl=tmerc_impl)
+            for direction in ("FORWARD", "INVERSE")
+        )
+        projection_variants: set[tuple[str, str, str]] = set()
+        for context in contexts:
+            for implementation in context.projection_implementations:
+                projection_variants.add(
+                    (
+                        implementation.projection,
+                        implementation.direction,
+                        implementation.implementation_id,
+                    )
+                )
+
+        if projection_variants:
+            compile_kernels(
+                precision=precision,
+                projection_variants=tuple(sorted(projection_variants)),
+            )
         if self._helmert is not None:
             from vibeproj.fused_kernels import compile_helmert_kernel
 
-            helmert_impl = resolve_transcendental_strategy(
-                TranscendentalOperation.HELMERT,
-                transcendentals,
-                device=device,
-            ).implementation_id
+            helmert_impl = contexts[0].helmert_implementation
             compile_helmert_kernel(transcendental_impl=helmert_impl)
         if self._svd_correction is not None:
             from vibeproj.fused_kernels import compile_svd_kernel

@@ -74,7 +74,9 @@ def warm_up(
     -----
     This compiles fused projection kernels. Per-Transformer correction scratch,
     pinned staging buffers, device buffers, and persistent chunk streams remain
-    lazily allocated on first use or growth.
+    lazily allocated on first use or growth. Module warm-up has no CRS domain;
+    qualified ``tmerc`` warm-up therefore includes both generic-TM native and
+    forward-UTM accelerated variants.
 
     Examples
     --------
@@ -83,7 +85,6 @@ def warm_up(
     >>> vibeproj.warm_up()                       # all projections
     """
     from vibeproj.transcendentals import (
-        NATIVE_LIBDEVICE,
         TranscendentalOperation,
         detect_device_capability,
         normalize_compute_precision,
@@ -93,22 +94,41 @@ def warm_up(
 
     precision = normalize_compute_precision(precision)
     transcendentals = normalize_transcendental_policy(transcendentals)
-    from vibeproj.fused_kernels import compile_kernels
+    from vibeproj.fused_kernels import _SUPPORTED, compile_kernels
 
-    transcendental_impl = NATIVE_LIBDEVICE
-    if projections is None or "tmerc" in projections:
-        transcendental_impl = resolve_transcendental_strategy(
-            TranscendentalOperation.TMERC_FORWARD,
-            transcendentals,
-            device=detect_device_capability(),
-            domain="utm",
-            precision=precision,
-        ).implementation_id
-    compile_kernels(
-        projections,
-        precision=precision,
-        transcendental_impl=transcendental_impl,
+    targets = sorted(
+        _SUPPORTED
+        if projections is None
+        else {
+            (projection, direction)
+            for projection in projections
+            for direction in ("forward", "inverse")
+            if (projection, direction) in _SUPPORTED
+        }
     )
+    device = detect_device_capability()
+    projection_variants: set[tuple[str, str, str]] = set()
+    for projection, direction in targets:
+        if (projection, direction) == ("tmerc", "forward"):
+            operation = TranscendentalOperation.TMERC_FORWARD
+            domains = ("global", "utm")
+        else:
+            operation = TranscendentalOperation.PROJECTION
+            domains = (f"{projection}.{direction}",)
+        for domain in domains:
+            implementation_id = resolve_transcendental_strategy(
+                operation,
+                transcendentals,
+                device=device,
+                domain=domain,
+                precision=precision,
+            ).implementation_id
+            projection_variants.add((projection, direction, implementation_id))
+    if projection_variants:
+        compile_kernels(
+            precision=precision,
+            projection_variants=tuple(sorted(projection_variants)),
+        )
 
 
 __all__ = [

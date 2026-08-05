@@ -17,6 +17,10 @@ from vibeproj.transcendentals import (
     HELMERT_FIXED_Q62,
     HELMERT_FIXED_Q62_MIN_ELEMENTS,
     NATIVE_LIBDEVICE,
+    ORTHO_FORWARD_FIXED_Q62,
+    ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+    SINU_FORWARD_FIXED_Q62,
+    SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
     TMERC_FIXED_Q62,
     TMERC_FIXED_Q62_MIN_ELEMENTS,
     TranscendentalOperation,
@@ -40,6 +44,25 @@ HOPPER = DeviceCapability(
     device_id=0,
 )
 CPU = DeviceCapability(backend="cpu", name="CPU")
+WEAK_ADA = dataclasses.replace(ADA, fp32_to_fp64_ratio=8, name="mock strong-fp64 Ada")
+
+SPHERICAL_LONG_LAT = "+proj=longlat +R=6378137 +type=crs"
+PROJECTION_CRS = {
+    "sinu": "+proj=sinu +lon_0=0 +R=6378137 +units=m +type=crs",
+    "ortho": "+proj=ortho +lat_0=45 +lon_0=0 +R=6378137 +units=m +type=crs",
+}
+GLOBAL_TM_0 = "+proj=tmerc +lat_0=0 +lon_0=0 +k=1 +x_0=0 +y_0=0 +datum=WGS84 +units=m +type=crs"
+GLOBAL_TM_9 = "+proj=tmerc +lat_0=0 +lon_0=9 +k=1 +x_0=0 +y_0=0 +datum=WGS84 +units=m +type=crs"
+UTM_TM_31 = "+proj=utm +zone=31 +datum=WGS84 +units=m +type=crs"
+UTM_TM_32 = "+proj=utm +zone=32 +datum=WGS84 +units=m +type=crs"
+
+
+def _projection_transformer(projection: str) -> Transformer:
+    return Transformer.from_crs(
+        SPHERICAL_LONG_LAT,
+        PROJECTION_CRS[projection],
+        always_xy=True,
+    )
 
 
 @pytest.mark.parametrize("policy", ["auto", "native", "accelerated"])
@@ -84,10 +107,220 @@ def test_registry_is_immutable_and_contains_stable_ids():
     assert {entry.implementation_id for entry in registry} == {
         NATIVE_LIBDEVICE,
         HELMERT_FIXED_Q62,
+        ORTHO_FORWARD_FIXED_Q62,
+        SINU_FORWARD_FIXED_Q62,
         TMERC_FIXED_Q62,
     }
     with pytest.raises(dataclasses.FrozenInstanceError):
         registry[0].family = "changed"  # type: ignore[misc]
+
+
+def test_resolver_selects_an_exact_domain_candidate_from_registry(monkeypatch):
+    import vibeproj.transcendentals as transcendental_module
+
+    template = next(
+        entry
+        for entry in list_transcendental_strategies()
+        if entry.implementation_id == TMERC_FIXED_Q62
+    )
+    synthetic = dataclasses.replace(
+        template,
+        implementation_id="synthetic.forward.fixed_q62",
+        operation=TranscendentalOperation.PROJECTION,
+        domains=("synthetic.forward",),
+        min_elements=17,
+    )
+    monkeypatch.setattr(
+        transcendental_module,
+        "_REGISTRY",
+        (*list_transcendental_strategies(), synthetic),
+    )
+    _resolve_transcendental_strategy_cached.cache_clear()
+    try:
+        below = resolve_transcendental_strategy(
+            TranscendentalOperation.PROJECTION,
+            "auto",
+            device=ADA,
+            domain="synthetic.forward",
+            workload_size=16,
+        )
+        automatic = resolve_transcendental_strategy(
+            TranscendentalOperation.PROJECTION,
+            "auto",
+            device=ADA,
+            domain="synthetic.forward",
+            workload_size=17,
+        )
+        explicit = resolve_transcendental_strategy(
+            TranscendentalOperation.PROJECTION,
+            "accelerated",
+            device=ADA,
+            domain="synthetic.forward",
+            workload_size=1,
+        )
+    finally:
+        _resolve_transcendental_strategy_cached.cache_clear()
+
+    assert below.implementation_id == NATIVE_LIBDEVICE
+    assert automatic.implementation_id == synthetic.implementation_id
+    assert explicit.implementation_id == synthetic.implementation_id
+
+
+def test_resolver_rejects_ambiguous_exact_domain_candidates(monkeypatch):
+    import vibeproj.transcendentals as transcendental_module
+
+    template = next(
+        entry
+        for entry in list_transcendental_strategies()
+        if entry.implementation_id == TMERC_FIXED_Q62
+    )
+    candidates = tuple(
+        dataclasses.replace(
+            template,
+            implementation_id=f"synthetic.forward.variant_{index}",
+            operation=TranscendentalOperation.PROJECTION,
+            domains=("synthetic.forward",),
+        )
+        for index in range(2)
+    )
+    monkeypatch.setattr(
+        transcendental_module,
+        "_REGISTRY",
+        (*list_transcendental_strategies(), *candidates),
+    )
+    _resolve_transcendental_strategy_cached.cache_clear()
+    try:
+        native = resolve_transcendental_strategy(
+            TranscendentalOperation.PROJECTION,
+            "native",
+            device=ADA,
+            domain="synthetic.forward",
+        )
+        assert native.implementation_id == NATIVE_LIBDEVICE
+        with pytest.raises(RuntimeError, match="Ambiguous.*synthetic.forward"):
+            resolve_transcendental_strategy(
+                TranscendentalOperation.PROJECTION,
+                "accelerated",
+                device=ADA,
+                domain="synthetic.forward",
+            )
+    finally:
+        _resolve_transcendental_strategy_cached.cache_clear()
+
+
+def test_resolver_filters_disjoint_hardware_candidates_before_ambiguity(monkeypatch):
+    import vibeproj.transcendentals as transcendental_module
+
+    template = next(
+        entry
+        for entry in list_transcendental_strategies()
+        if entry.implementation_id == SINU_FORWARD_FIXED_Q62
+    )
+    ada_variant = dataclasses.replace(
+        template,
+        implementation_id="synthetic.ada",
+        domains=("synthetic.forward",),
+        min_elements=17,
+    )
+    hopper_variant = dataclasses.replace(
+        template,
+        implementation_id="synthetic.hopper",
+        domains=("synthetic.forward",),
+        supported_compute_capabilities=((9, 0),),
+        min_fp32_to_fp64_ratio=None,
+        min_elements=31,
+    )
+    monkeypatch.setattr(
+        transcendental_module,
+        "_REGISTRY",
+        (*list_transcendental_strategies(), ada_variant, hopper_variant),
+    )
+    _resolve_transcendental_strategy_cached.cache_clear()
+    try:
+        for device, variant in ((ADA, ada_variant), (HOPPER, hopper_variant)):
+            below = resolve_transcendental_strategy(
+                TranscendentalOperation.PROJECTION,
+                "auto",
+                device=device,
+                domain="synthetic.forward",
+                workload_size=variant.min_elements - 1,
+            )
+            at = resolve_transcendental_strategy(
+                TranscendentalOperation.PROJECTION,
+                "auto",
+                device=device,
+                domain="synthetic.forward",
+                workload_size=variant.min_elements,
+            )
+            assert below.implementation_id == NATIVE_LIBDEVICE
+            assert str(variant.min_elements) in below.reason
+            assert at.implementation_id == variant.implementation_id
+    finally:
+        _resolve_transcendental_strategy_cached.cache_clear()
+
+
+def test_resolver_uses_priority_then_rejects_equal_priority_overlap(monkeypatch):
+    import vibeproj.transcendentals as transcendental_module
+
+    base_registry = list_transcendental_strategies()
+    template = next(
+        entry for entry in base_registry if entry.implementation_id == SINU_FORWARD_FIXED_Q62
+    )
+    lower = dataclasses.replace(
+        template,
+        implementation_id="synthetic.lower",
+        domains=("synthetic.forward",),
+        priority=10,
+        min_elements=11,
+    )
+    preferred = dataclasses.replace(
+        template,
+        implementation_id="synthetic.preferred",
+        domains=("synthetic.forward",),
+        priority=20,
+        min_elements=23,
+    )
+    monkeypatch.setattr(
+        transcendental_module,
+        "_REGISTRY",
+        (*base_registry, lower, preferred),
+    )
+    _resolve_transcendental_strategy_cached.cache_clear()
+    try:
+        below = resolve_transcendental_strategy(
+            TranscendentalOperation.PROJECTION,
+            "auto",
+            device=ADA,
+            domain="synthetic.forward",
+            workload_size=22,
+        )
+        selected = resolve_transcendental_strategy(
+            TranscendentalOperation.PROJECTION,
+            "auto",
+            device=ADA,
+            domain="synthetic.forward",
+            workload_size=23,
+        )
+        assert below.implementation_id == NATIVE_LIBDEVICE
+        assert "crossover 23" in below.reason
+        assert selected.implementation_id == preferred.implementation_id
+
+        tied = dataclasses.replace(preferred, priority=lower.priority)
+        monkeypatch.setattr(
+            transcendental_module,
+            "_REGISTRY",
+            (*base_registry, lower, tied),
+        )
+        _resolve_transcendental_strategy_cached.cache_clear()
+        with pytest.raises(RuntimeError, match="Ambiguous.*priority 10"):
+            resolve_transcendental_strategy(
+                TranscendentalOperation.PROJECTION,
+                "accelerated",
+                device=ADA,
+                domain="synthetic.forward",
+            )
+    finally:
+        _resolve_transcendental_strategy_cached.cache_clear()
 
 
 @pytest.mark.parametrize(
@@ -104,6 +337,18 @@ def test_registry_is_immutable_and_contains_stable_ids():
             "global",
             HELMERT_FIXED_Q62_MIN_ELEMENTS,
             HELMERT_FIXED_Q62,
+        ),
+        (
+            TranscendentalOperation.PROJECTION,
+            "sinu.forward",
+            SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+            SINU_FORWARD_FIXED_Q62,
+        ),
+        (
+            TranscendentalOperation.PROJECTION,
+            "ortho.forward",
+            ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+            ORTHO_FORWARD_FIXED_Q62,
         ),
     ],
 )
@@ -150,12 +395,85 @@ def test_auto_strategy_uses_exact_workload_crossover(operation, domain, threshol
     [
         (TranscendentalOperation.HELMERT, "global", HELMERT_FIXED_Q62),
         (TranscendentalOperation.TMERC_FORWARD, "utm", TMERC_FIXED_Q62),
+        (TranscendentalOperation.PROJECTION, "sinu.forward", SINU_FORWARD_FIXED_Q62),
+        (TranscendentalOperation.PROJECTION, "ortho.forward", ORTHO_FORWARD_FIXED_Q62),
     ],
 )
 def test_ada_auto_selects_qualified_implementations(operation, domain, expected):
     decision = resolve_transcendental_strategy(operation, device=ADA, domain=domain)
     assert decision.implementation_id == expected
     assert decision.fallback is False
+
+
+@pytest.mark.parametrize(
+    ("projection", "accelerated_id", "min_elements"),
+    [
+        ("sinu", SINU_FORWARD_FIXED_Q62, SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS),
+        ("ortho", ORTHO_FORWARD_FIXED_Q62, ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS),
+    ],
+)
+@pytest.mark.parametrize(
+    ("policy", "precision", "size_offset", "accelerated"),
+    [
+        ("native", "fp64", 0, False),
+        ("auto", "auto", 0, True),
+        ("auto", "fp64", -1, False),
+        ("auto", "fp64", 0, True),
+        ("accelerated", "fp64", None, True),
+        ("accelerated", "fp32", 0, False),
+        ("accelerated", "ds", 0, False),
+    ],
+)
+def test_wave1_public_policy_precision_and_size_matrix(
+    projection,
+    accelerated_id,
+    min_elements,
+    policy,
+    precision,
+    size_offset,
+    accelerated,
+):
+    workload_size = 1 if size_offset is None else min_elements + size_offset
+    explanation = _projection_transformer(projection).explain_strategy(
+        transcendentals=policy,
+        precision=precision,
+        workload_size=workload_size,
+        device=ADA,
+    )
+    assert explanation.workload_size == workload_size
+    assert len(explanation.decisions) == 1
+    decision = explanation.decisions[0]
+    assert decision.domain == f"{projection}.forward"
+    assert decision.implementation_id == (accelerated_id if accelerated else NATIVE_LIBDEVICE)
+    assert decision.fallback is (policy == "accelerated" and not accelerated)
+    assert decision.accuracy.max_horizontal_error_m <= 1e-8
+
+
+@pytest.mark.parametrize(
+    ("domain", "device", "precision", "reason"),
+    [
+        ("sinu.inverse", ADA, "fp64", "domain 'sinu.inverse' is not accuracy-qualified"),
+        ("ortho.inverse", ADA, "fp64", "domain 'ortho.inverse' is not accuracy-qualified"),
+        ("sinu.forward", CPU, "fp64", "cpu backend"),
+        ("ortho.forward", HOPPER, "fp64", "compute capability"),
+        ("sinu.forward", WEAK_ADA, "fp64", "fp32:fp64 ratio"),
+        ("ortho.forward", ADA, "fp32", "compute precision 'fp32'"),
+        ("ortho.forward", ADA, "ds", "compute precision 'ds'"),
+    ],
+)
+def test_wave1_explicit_fallback_explains_exact_failed_qualification(
+    domain, device, precision, reason
+):
+    decision = resolve_transcendental_strategy(
+        TranscendentalOperation.PROJECTION,
+        "accelerated",
+        device=device,
+        domain=domain,
+        precision=precision,
+    )
+    assert decision.implementation_id == NATIVE_LIBDEVICE
+    assert decision.fallback is True
+    assert reason in decision.reason
 
 
 @pytest.mark.parametrize("policy", ["auto", "native"])
@@ -213,7 +531,7 @@ def test_non_tmerc_accelerated_request_is_observable_native_fallback():
     assert decision.domain == "webmerc.forward"
     assert decision.implementation_id == NATIVE_LIBDEVICE
     assert decision.fallback is True
-    assert "no accuracy-qualified" in decision.reason
+    assert "domain 'webmerc.forward' is not accuracy-qualified" in decision.reason
 
 
 def test_utm_explanation_resolves_by_policy_without_array_materialization():
@@ -264,12 +582,181 @@ def test_compile_resolves_exact_tmerc_cache_variant(monkeypatch, precision, poli
     observed = []
 
     def capture(*args, **kwargs):
-        observed.append(kwargs["transcendental_impl"])
+        variants = kwargs["projection_variants"]
+        observed.append(variants)
+        with pytest.raises(TypeError):
+            variants[0] = ("tmerc", "forward", "changed")
 
     monkeypatch.setattr("vibeproj.transcendentals.detect_device_capability", lambda: ADA)
     monkeypatch.setattr("vibeproj.fused_kernels.compile_kernels", capture)
     transformer.compile(precision=precision, transcendentals=policy)
+    assert observed == [
+        (
+            ("tmerc", "forward", expected),
+            ("tmerc", "inverse", NATIVE_LIBDEVICE),
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("source", "target"),
+    [(GLOBAL_TM_0, UTM_TM_31), (UTM_TM_31, GLOBAL_TM_0)],
+)
+def test_compile_mixed_global_and_utm_tmerc_keeps_both_forward_variants(
+    monkeypatch, source, target
+):
+    observed = []
+    monkeypatch.setattr("vibeproj.transcendentals.detect_device_capability", lambda: ADA)
+    monkeypatch.setattr(
+        "vibeproj.fused_kernels.compile_kernels",
+        lambda *args, **kwargs: observed.append(kwargs["projection_variants"]),
+    )
+
+    Transformer.from_crs(source, target).compile(precision="fp64", transcendentals="auto")
+
+    assert observed == [
+        (
+            ("tmerc", "forward", NATIVE_LIBDEVICE),
+            ("tmerc", "forward", TMERC_FIXED_Q62),
+            ("tmerc", "inverse", NATIVE_LIBDEVICE),
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("source", "target", "expected"),
+    [
+        (
+            UTM_TM_31,
+            UTM_TM_32,
+            (
+                ("tmerc", "forward", TMERC_FIXED_Q62),
+                ("tmerc", "inverse", NATIVE_LIBDEVICE),
+            ),
+        ),
+        (
+            GLOBAL_TM_0,
+            GLOBAL_TM_9,
+            (
+                ("tmerc", "forward", NATIVE_LIBDEVICE),
+                ("tmerc", "inverse", NATIVE_LIBDEVICE),
+            ),
+        ),
+    ],
+)
+def test_compile_deduplicates_matching_tmerc_domains(monkeypatch, source, target, expected):
+    observed = []
+    monkeypatch.setattr("vibeproj.transcendentals.detect_device_capability", lambda: ADA)
+    monkeypatch.setattr(
+        "vibeproj.fused_kernels.compile_kernels",
+        lambda *args, **kwargs: observed.append(kwargs["projection_variants"]),
+    )
+
+    Transformer.from_crs(source, target).compile(precision="fp64", transcendentals="auto")
+
     assert observed == [expected]
+
+
+@pytest.mark.parametrize(
+    ("precision", "policy"),
+    [("fp32", "accelerated"), ("ds", "accelerated"), ("fp64", "native")],
+)
+def test_compile_unqualified_modes_collapse_mixed_tmerc_to_native(monkeypatch, precision, policy):
+    observed = []
+    monkeypatch.setattr("vibeproj.transcendentals.detect_device_capability", lambda: ADA)
+    monkeypatch.setattr(
+        "vibeproj.fused_kernels.compile_kernels",
+        lambda *args, **kwargs: observed.append(kwargs["projection_variants"]),
+    )
+
+    Transformer.from_crs(GLOBAL_TM_0, UTM_TM_31).compile(
+        precision=precision,
+        transcendentals=policy,
+    )
+
+    assert observed == [
+        (
+            ("tmerc", "forward", NATIVE_LIBDEVICE),
+            ("tmerc", "inverse", NATIVE_LIBDEVICE),
+        )
+    ]
+
+
+def test_compile_kernels_deduplicates_exact_variant_cache_keys(monkeypatch):
+    import vibeproj.fused_kernels as fused_module
+
+    observed = []
+
+    class CompileSpy:
+        def compile(self):
+            return None
+
+    def fake_get_kernel(projection, direction, compute_dtype, **kwargs):
+        observed.append((projection, direction, compute_dtype, kwargs["transcendental_impl"]))
+        return CompileSpy()
+
+    monkeypatch.setitem(sys.modules, "cupy", SimpleNamespace())
+    monkeypatch.setattr(fused_module, "_get_kernel", fake_get_kernel)
+    variants = (
+        ("tmerc", "forward", NATIVE_LIBDEVICE),
+        ("tmerc", "forward", TMERC_FIXED_Q62),
+        ("tmerc", "forward", TMERC_FIXED_Q62),
+        ("tmerc", "inverse", NATIVE_LIBDEVICE),
+    )
+
+    fused_module.compile_kernels(precision="fp64", projection_variants=variants)
+
+    assert observed == [
+        ("tmerc", "forward", "float64", NATIVE_LIBDEVICE),
+        ("tmerc", "forward", "float64", TMERC_FIXED_Q62),
+        ("tmerc", "inverse", "float64", NATIVE_LIBDEVICE),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("projection", "accelerated_id"),
+    [
+        ("sinu", SINU_FORWARD_FIXED_Q62),
+        ("ortho", ORTHO_FORWARD_FIXED_Q62),
+    ],
+)
+@pytest.mark.parametrize(
+    ("precision", "policy", "uses_accelerated"),
+    [
+        ("auto", "auto", True),
+        ("fp64", "accelerated", True),
+        ("fp32", "accelerated", False),
+        ("ds", "accelerated", False),
+        ("fp64", "native", False),
+    ],
+)
+def test_wave1_compile_matrix_keeps_companion_inverse_native(
+    monkeypatch,
+    projection,
+    accelerated_id,
+    precision,
+    policy,
+    uses_accelerated,
+):
+    observed = []
+    monkeypatch.setattr("vibeproj.transcendentals.detect_device_capability", lambda: ADA)
+    monkeypatch.setattr(
+        "vibeproj.fused_kernels.compile_kernels",
+        lambda *args, **kwargs: observed.append(kwargs["projection_variants"]),
+    )
+
+    _projection_transformer(projection).compile(
+        precision=precision,
+        transcendentals=policy,
+    )
+
+    expected_forward = accelerated_id if uses_accelerated else NATIVE_LIBDEVICE
+    assert observed == [
+        (
+            (projection, "forward", expected_forward),
+            (projection, "inverse", NATIVE_LIBDEVICE),
+        )
+    ]
 
 
 def test_compile_resolves_helmert_and_non_utm_fallback_independently(monkeypatch):
@@ -279,15 +766,109 @@ def test_compile_resolves_helmert_and_non_utm_fallback_independently(monkeypatch
     monkeypatch.setattr("vibeproj.transcendentals.detect_device_capability", lambda: ADA)
     monkeypatch.setattr(
         "vibeproj.fused_kernels.compile_kernels",
-        lambda *args, **kwargs: projection_impl.append(kwargs["transcendental_impl"]),
+        lambda *args, **kwargs: projection_impl.append(kwargs["projection_variants"]),
     )
     monkeypatch.setattr(
         "vibeproj.fused_kernels.compile_helmert_kernel",
         lambda **kwargs: helmert_impl.append(kwargs["transcendental_impl"]),
     )
     transformer.compile(transcendentals="accelerated")
-    assert projection_impl == [NATIVE_LIBDEVICE]
+    assert projection_impl == [
+        (
+            ("tmerc", "forward", NATIVE_LIBDEVICE),
+            ("tmerc", "inverse", NATIVE_LIBDEVICE),
+        )
+    ]
     assert helmert_impl == [HELMERT_FIXED_Q62]
+
+
+def test_warm_up_resolves_every_requested_projection_direction(monkeypatch):
+    observed = []
+
+    def capture(*args, **kwargs):
+        variants = kwargs["projection_variants"]
+        observed.append(variants)
+        with pytest.raises(TypeError):
+            variants[0] = ("webmerc", "forward", "changed")
+
+    monkeypatch.setattr("vibeproj.transcendentals.detect_device_capability", lambda: ADA)
+    monkeypatch.setattr("vibeproj.fused_kernels.compile_kernels", capture)
+    vibeproj.warm_up(
+        ["tmerc", "webmerc"],
+        precision="fp64",
+        transcendentals="accelerated",
+    )
+
+    assert observed == [
+        (
+            ("tmerc", "forward", NATIVE_LIBDEVICE),
+            ("tmerc", "forward", TMERC_FIXED_Q62),
+            ("tmerc", "inverse", NATIVE_LIBDEVICE),
+            ("webmerc", "forward", NATIVE_LIBDEVICE),
+            ("webmerc", "inverse", NATIVE_LIBDEVICE),
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("precision", "policy", "expected_sinu", "expected_ortho"),
+    [
+        ("auto", "auto", SINU_FORWARD_FIXED_Q62, ORTHO_FORWARD_FIXED_Q62),
+        ("fp64", "accelerated", SINU_FORWARD_FIXED_Q62, ORTHO_FORWARD_FIXED_Q62),
+        ("fp32", "accelerated", NATIVE_LIBDEVICE, NATIVE_LIBDEVICE),
+        ("ds", "accelerated", NATIVE_LIBDEVICE, NATIVE_LIBDEVICE),
+        ("fp64", "native", NATIVE_LIBDEVICE, NATIVE_LIBDEVICE),
+    ],
+)
+def test_wave1_warm_up_matrix_keeps_companion_inverses_native(
+    monkeypatch,
+    precision,
+    policy,
+    expected_sinu,
+    expected_ortho,
+):
+    observed = []
+    monkeypatch.setattr("vibeproj.transcendentals.detect_device_capability", lambda: ADA)
+    monkeypatch.setattr(
+        "vibeproj.fused_kernels.compile_kernels",
+        lambda *args, **kwargs: observed.append(kwargs["projection_variants"]),
+    )
+
+    vibeproj.warm_up(
+        ["sinu", "ortho"],
+        precision=precision,
+        transcendentals=policy,
+    )
+
+    assert observed == [
+        (
+            ("ortho", "forward", expected_ortho),
+            ("ortho", "inverse", NATIVE_LIBDEVICE),
+            ("sinu", "forward", expected_sinu),
+            ("sinu", "inverse", NATIVE_LIBDEVICE),
+        )
+    ]
+
+
+def test_compile_collects_both_directions_of_projected_pipeline(monkeypatch):
+    transformer = Transformer.from_crs("EPSG:32631", "EPSG:3857")
+    observed = []
+    monkeypatch.setattr("vibeproj.transcendentals.detect_device_capability", lambda: ADA)
+    monkeypatch.setattr(
+        "vibeproj.fused_kernels.compile_kernels",
+        lambda *args, **kwargs: observed.append(kwargs["projection_variants"]),
+    )
+
+    transformer.compile(precision="fp64", transcendentals="accelerated")
+
+    assert observed == [
+        (
+            ("tmerc", "forward", TMERC_FIXED_Q62),
+            ("tmerc", "inverse", NATIVE_LIBDEVICE),
+            ("webmerc", "forward", NATIVE_LIBDEVICE),
+            ("webmerc", "inverse", NATIVE_LIBDEVICE),
+        )
+    ]
 
 
 def test_transform_propagates_precision_and_policy_independently(monkeypatch):
@@ -463,7 +1044,7 @@ def test_strategy_decisions_are_cached_by_full_context(monkeypatch):
         precision="fp64",
     )
     assert second is first
-    assert len(calls) == 2  # native + accelerated, built only on the first call
+    assert len(calls) == 1  # native lookup occurs only on the first full-context call
 
     resolve_transcendental_strategy(
         TranscendentalOperation.TMERC_FORWARD,
@@ -472,7 +1053,7 @@ def test_strategy_decisions_are_cached_by_full_context(monkeypatch):
         domain="utm",
         precision="fp64",
     )
-    assert len(calls) == 4
+    assert len(calls) == 2
 
 
 class _FakeDeviceContext:
