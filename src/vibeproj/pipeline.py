@@ -59,6 +59,19 @@ def _lat_lon_outputs(out_x, out_y, north_first: bool):
     return (out_x, out_y) if north_first else (out_y, out_x)
 
 
+def _setup_projection(projection, params):
+    """Set up projection math and attach canonical strategy metadata once."""
+    from vibeproj.transcendentals import attach_projection_strategy_metadata
+
+    computed = projection.setup(params)
+    return attach_projection_strategy_metadata(
+        computed,
+        operation_method=params.operation_method,
+        eccentricity_squared=params.ellipsoid.es,
+        latitude_origin_degrees=params.lat_0,
+    )
+
+
 def _get_cupy():
     global _cupy_module
     if _cupy_module is None:
@@ -104,10 +117,9 @@ def _try_fused(
         return None
     if not can_fuse(projection_name, direction):
         return None
-    if projection_name == "tmerc" and direction == "forward":
-        domain = "utm" if computed.get("is_utm", False) else "global"
-    else:
-        domain = f"{projection_name}.{direction}"
+    from vibeproj.transcendentals import projection_strategy_domain
+
+    domain = projection_strategy_domain(projection_name, direction, computed)
     if execution_context is None:
         # Compatibility for direct private-helper callers. Public entry points
         # construct one immutable plan and pass it through every stage.
@@ -157,7 +169,10 @@ def _try_fused(
 
 def _wrap_to_pi(angle, xp):
     """Wrap angle to [-pi, pi]."""
-    return angle - 2.0 * math.pi * xp.round(angle / (2.0 * math.pi))
+    finite = xp.isfinite(angle)
+    safe_angle = xp.where(finite, angle, 0.0)
+    wrapped = safe_angle - 2.0 * math.pi * xp.round(safe_angle / (2.0 * math.pi))
+    return xp.where(finite, wrapped, angle)
 
 
 def _apply_datum_shift(
@@ -330,6 +345,7 @@ class TransformPipeline:
             TranscendentalOperation,
             normalize_compute_precision,
             normalize_transcendental_policy,
+            projection_strategy_domain,
             resolve_transcendental_strategy,
         )
 
@@ -342,11 +358,10 @@ class TransformPipeline:
         stages: list[tuple[str, str, str, TranscendentalOperation]] = []
 
         def add_projection(name: str, direction: str, computed: dict) -> None:
+            domain = projection_strategy_domain(name, direction, computed)
             if name == "tmerc" and direction == "forward":
-                domain = "utm" if computed.get("is_utm", False) else "global"
                 operation = TranscendentalOperation.TMERC_FORWARD
             else:
-                domain = f"{name}.{direction}"
                 operation = TranscendentalOperation.PROJECTION
             stages.append((name, direction, domain, operation))
 
@@ -438,14 +453,14 @@ class TransformPipeline:
             self.mode = "proj_to_proj"
             self.src_projection = get_projection(src_params.projection_name)
             self.dst_projection = get_projection(dst_params.projection_name)
-            self.src_computed = self.src_projection.setup(src_params)
-            self.dst_computed = self.dst_projection.setup(dst_params)
+            self.src_computed = _setup_projection(self.src_projection, src_params)
+            self.dst_computed = _setup_projection(self.dst_projection, dst_params)
         else:
             # Geographic -> Geographic (possibly different datums)
             self.mode = "longlat_to_longlat"
 
         if self.mode in ("forward", "inverse"):
-            self.computed = self.projection.setup(self.proj_params)
+            self.computed = _setup_projection(self.projection, self.proj_params)
             self.computed.setdefault("x_unit_to_m", self.proj_params.x_unit_to_m)
             self.computed.setdefault("y_unit_to_m", self.proj_params.y_unit_to_m)
         elif self.mode == "proj_to_proj":

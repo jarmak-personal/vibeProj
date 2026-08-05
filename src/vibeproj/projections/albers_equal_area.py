@@ -12,32 +12,17 @@ import math
 from typing import TYPE_CHECKING
 
 from vibeproj.projections import register
-from vibeproj.projections.base import EPS_ANGLE, EPS_CONV, EPS_DENOM, Projection
+from vibeproj.projections._equal_area import (
+    authalic_q,
+    authalic_q_scalar,
+    geodetic_latitude_from_authalic_q,
+    snap_authalic_q_to_pole,
+)
+from vibeproj.projections.base import EPS_ANGLE, Projection
 
 if TYPE_CHECKING:
     from vibeproj.crs import ProjectionParams
 _HALF_PI = math.pi / 2.0
-
-
-def _qsfn(sin_phi, e):
-    """Compute q-function for Albers (scalar)."""
-    if e < EPS_ANGLE:
-        return 2.0 * sin_phi
-    e_sin = e * sin_phi
-    return (1.0 - e * e) * (
-        sin_phi / (1.0 - e_sin * e_sin)
-        - (1.0 / (2.0 * e)) * math.log((1.0 - e_sin) / (1.0 + e_sin))
-    )
-
-
-def _qsfn_array(sin_phi, e, xp):
-    """Vectorized q-function."""
-    if e < EPS_ANGLE:
-        return 2.0 * sin_phi
-    e_sin = e * sin_phi
-    return (1.0 - e * e) * (
-        sin_phi / (1.0 - e_sin * e_sin) - (1.0 / (2.0 * e)) * xp.log((1.0 - e_sin) / (1.0 + e_sin))
-    )
 
 
 class AlbersEqualArea(Projection):
@@ -57,7 +42,7 @@ class AlbersEqualArea(Projection):
         sin_phi1 = math.sin(phi1)
         cos_phi1 = math.cos(phi1)
         m1 = cos_phi1 / math.sqrt(1.0 - es * sin_phi1 * sin_phi1)
-        q1 = _qsfn(sin_phi1, ec)
+        q1 = authalic_q_scalar(sin_phi1, ec)
 
         if abs(phi1 - phi2) < EPS_ANGLE:
             n = sin_phi1
@@ -65,11 +50,12 @@ class AlbersEqualArea(Projection):
             sin_phi2 = math.sin(phi2)
             cos_phi2 = math.cos(phi2)
             m2 = cos_phi2 / math.sqrt(1.0 - es * sin_phi2 * sin_phi2)
-            q2 = _qsfn(sin_phi2, ec)
+            q2 = authalic_q_scalar(sin_phi2, ec)
             n = (m1 * m1 - m2 * m2) / (q2 - q1)
 
         C = m1 * m1 + n * q1
-        q0 = _qsfn(math.sin(phi0), ec)
+        q0 = authalic_q_scalar(math.sin(phi0), ec)
+        qp = authalic_q_scalar(1.0, ec)
         # Normalized (without a) — pipeline multiplies by a
         rho0 = math.sqrt(C - n * q0) / n
 
@@ -77,6 +63,7 @@ class AlbersEqualArea(Projection):
             "n": n,
             "C": C,
             "rho0": rho0,
+            "qp": qp,
             "e": ec,
             "es": es,
             "a": e.a,
@@ -91,7 +78,7 @@ class AlbersEqualArea(Projection):
         rho0 = computed["rho0"]
         e = computed["e"]
 
-        q = _qsfn_array(xp.sin(phi), e, xp)
+        q = authalic_q(xp.sin(phi), e, xp)
         rho = xp.sqrt(xp.maximum(C - n * q, 0.0)) / n
 
         theta = n * lam
@@ -105,6 +92,7 @@ class AlbersEqualArea(Projection):
         rho0 = computed["rho0"]
         e = computed["e"]
         es = computed["es"]
+        qp = computed["qp"]
 
         dy = rho0 - y
         rho = xp.sqrt(x * x + dy * dy)
@@ -116,25 +104,10 @@ class AlbersEqualArea(Projection):
         lam = xp.arctan2(x, dy) / n
         q = (C - (rho * n) ** 2) / n
 
-        # Iterative inverse for phi from q
-        phi = xp.arcsin(xp.clip(q / 2.0, -1.0, 1.0))
-        for _ in range(15):
-            sin_phi = xp.sin(phi)
-            e_sin = e * sin_phi
-            one_minus_es_sin2 = 1.0 - e_sin * e_sin
-            cos_phi = xp.cos(phi)
-            cos_phi = xp.where(xp.abs(cos_phi) < EPS_DENOM, EPS_DENOM, cos_phi)
-            dphi = (one_minus_es_sin2 * one_minus_es_sin2 / (2.0 * cos_phi)) * (
-                q / (1.0 - es)
-                - sin_phi / one_minus_es_sin2
-                + (1.0 / (2.0 * e)) * xp.log((1.0 - e_sin) / (1.0 + e_sin))
-            )
-            phi = phi + dphi
-            if hasattr(dphi, "__len__"):
-                if xp.all(xp.abs(dphi) < EPS_CONV):
-                    break
-            elif abs(float(dphi)) < EPS_CONV:
-                break
+        q = snap_authalic_q_to_pole(q, qp, xp)
+        invalid_q = xp.isfinite(q) & (xp.abs(q) > qp)
+        phi = geodetic_latitude_from_authalic_q(q, qp, e, es, xp)
+        lam = xp.where(invalid_q, xp.inf, lam)
 
         return lam, phi
 

@@ -42,12 +42,18 @@ All 24 projections run in under 3 ms at 1M coordinates. See full benchmark in th
 | Robinson | `robin` | — |
 | Winkel Tripel | `wintri` | — |
 | Natural Earth | `natearth` | — |
-| Azimuthal Equidistant | `aeqd` | — |
+| Azimuthal Equidistant (spherical `+R`) | `aeqd` | — |
 | Geostationary Satellite | `geos` | — |
 | Oblique Mercator (Hotine) | `omerc` | 3375 |
 | Krovak | `krovak` | 5514 |
 | Eckert IV | `eck4` | — |
 | Eckert VI | `eck6` | — |
+
+Azimuthal Equidistant support is spherical only. Ellipsoidal, Modified, and
+Guam methods raise `UnsupportedProjectionError` instead of silently using the
+spherical equations. Geostationary CRS definitions preserve Sweep X/Y and
+satellite height; points beyond the visible limb or inverse Earth-intersection
+disk return non-finite sentinels.
 
 ## Install
 

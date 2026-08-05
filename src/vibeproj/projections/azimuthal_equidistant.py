@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from vibeproj.projections import register
 from vibeproj.projections.base import EPS_ANGLE, EPS_DENOM, Projection
+from vibeproj.exceptions import UnsupportedProjectionError
 
 if TYPE_CHECKING:
     from vibeproj.crs import ProjectionParams
@@ -22,6 +23,20 @@ class AzimuthalEquidistant(Projection):
     name = "aeqd"
 
     def setup(self, params: ProjectionParams) -> dict:
+        if params.operation_method == "Guam Projection":
+            raise UnsupportedProjectionError(
+                "Guam Projection is not implemented; the available AEQD formulas are spherical only"
+            )
+        if params.operation_method == "Modified Azimuthal Equidistant":
+            raise UnsupportedProjectionError(
+                "Modified Azimuthal Equidistant is not implemented; "
+                "the available AEQD formulas are spherical only"
+            )
+        if params.ellipsoid.es != 0.0:
+            raise UnsupportedProjectionError(
+                "Ellipsoidal Azimuthal Equidistant is not implemented; "
+                "use an explicit spherical CRS (+R) for spherical AEQD semantics"
+            )
         phi0 = math.radians(params.lat_0)
         return {
             "a": params.ellipsoid.a,
@@ -43,7 +58,9 @@ class AzimuthalEquidistant(Projection):
         cos_c = sin_phi0 * sin_phi + cos_phi0 * cos_phi * cos_lam
         cos_c = xp.clip(cos_c, -1.0, 1.0)
         c = xp.arccos(cos_c)
-        k = xp.where(xp.abs(c) < EPS_ANGLE, 1.0, c / xp.sin(c))
+        center = xp.abs(c) < EPS_ANGLE
+        safe_sin_c = xp.where(center, 1.0, xp.sin(c))
+        k = xp.where(center, 1.0, c / safe_sin_c)
 
         x = k * cos_phi * sin_lam
         y = k * (cos_phi0 * sin_phi - sin_phi0 * cos_phi * cos_lam)

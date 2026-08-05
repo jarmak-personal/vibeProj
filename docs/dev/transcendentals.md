@@ -49,14 +49,14 @@ shared native pairing helper (or the equivalent double-single helper).
 | `lcc` | inverse | `sqrt`, `atan2`, `pow`, iterative `atan`/`sin`/`pow` | projected radius and iteration arguments: unknown | none | `native.libdevice` | native only | T3 |
 | `stere` | forward | `sin`, `tan`, `pow`, output `sin`/`cos` | adjusted `phi`: unknown; `lambda` finite wrapped | pair `lambda` | `native.libdevice` | paired native only | T3 |
 | `stere` | inverse | `sqrt`, `atan2`, iterative `atan`/`sin`/`pow` | projected radius and iteration arguments: unknown | none | `native.libdevice` | native only | T3 |
-| `aea` | forward | `sin`, `log`, `sqrt`, output `sin`/`cos` | `phi`: unknown; negative radicand is clamped to zero; `theta=n*lambda` depends on CRS | pair `theta` | `native.libdevice` | paired native only | T3 |
-| `aea` | inverse | `sqrt`, `atan2`, clamped `asin`, iterative `sin`/`cos`/`log` | projected radius: unknown; `asin` argument clamped | iterative pair `phi` | `native.libdevice` | paired native only | T3 |
-| `laea` | forward | `sin`, `log`, clamped `asin`, `sqrt`, `sin`/`cos` | authalic `asin` input clamped; other derived denominators depend on mode/domain | pair authalic latitude; pair `lambda` | `native.libdevice` | paired native only | T3 |
-| `laea` | inverse | `sqrt`, clamped `asin`, `sin`/`cos`, `atan2`, iterative `sin`/`cos`/`log` | central-angle `asin` input clamped; projected radius otherwise unknown | pair central angle; iterative pair `phi` | `native.libdevice` | paired native only | T3 |
-| `eqearth` | forward | `sin`, `log`, two clamped `asin`, `cos`, `sqrt` | inverse-trig inputs clamped; `phi` otherwise unknown | none | `native.libdevice` | native only | T3 |
-| `eqearth` | inverse | iterative polynomial, `sin`/`cos`, clamped `asin`, iterative `sin`/`cos`/`log` | authalic inverse input clamped; projected coordinates otherwise unknown | pair `theta`; iterative pair `phi` | `native.libdevice` | paired native only | T3 |
-| `cea` | forward | `sin`, `log` | `phi`: unknown | none | `native.libdevice` | native only | T3 |
-| `cea` | inverse | clamped `asin`, iterative `sin`/`cos`/`log` | initial `asin` argument clamped; projected northing otherwise unknown | iterative pair `phi` | `native.libdevice` | paired native only | T3 |
+| `aea` | forward | `sin`, `atanh`, `sqrt`, output `sin`/`cos` | `phi`: unknown; negative radicand is clamped to zero; `theta=n*lambda` depends on CRS | pair `theta` | `native.libdevice` | paired native only | T3 |
+| `aea` | inverse | `sqrt`, `atan2`, iterative `atanh`, `asin` | projected radius unknown; exact authalic poles accepted within the shared `1e-10` representational band; material `|q|>qp` is atomically invalid | none | `native.libdevice` | native only | T3 |
+| `laea` | forward | `sin`, `atanh`, clamped `asin`, `sqrt`, `sin`/`cos` | finite latitude restricted to `[-pi/2,pi/2]`; antipode is atomically invalid; authalic input clamped | pair authalic latitude; pair `lambda` | `native.libdevice` | paired native only | T3 |
+| `laea` | inverse | `sqrt`, clamped `asin`, `sin`/`cos`, `atan2`, iterative `atanh` | exact normalized disk enforced for oblique/equatorial and polar modes; center and poles explicit | pair central angle | `native.libdevice` | paired native only | T3 |
+| `eqearth` | forward | `sin`, `atanh`, two clamped `asin`, `cos`, `sqrt` | kernel-boundary `phi`: unknown; inverse-trig inputs clamped; spherical `e=0` uses exact `q=2sin(phi)` | none | `native.libdevice` | native only | T3 |
+| `eqearth` | inverse | iterative polynomial, `sin`/`cos`, clamped `asin`, iterative `atanh` | authalic inverse input clamped; spherical and ellipsoidal q inversion share the same helper; component-wise non-finite behavior matches fused execution | pair `theta` | `native.libdevice` | paired native only | T3 |
+| `cea` | forward | `sin`, `atanh` | `phi`: unknown; spherical `e=0` uses exact `q=2sin(phi)` | none | `native.libdevice` | native only | T3 |
+| `cea` | inverse | iterative `atanh`, `asin` | exact authalic poles accepted within the shared `1e-10` representational band; material `|q|>qp` is atomically invalid | none | `native.libdevice` | native only | T3 |
 | `ortho` | forward | `sin`/`cos` of `phi` and `lambda` | kernel-boundary `phi`: unknown; accelerated atomic guard requires finite `|phi| <= pi/2`, wrapped `|lambda| <= pi`, and `0 < scale <= 6,400,000 m` | pair `phi`; pair `lambda` | `native.libdevice`, or `ortho.forward.fixed_q62` | qualified guarded implementation; native otherwise | T2 |
 | `ortho` | inverse | `sqrt`, clamped `asin`, `sin`/`cos`, `atan2` | central-angle `asin` input clamped; projected radius otherwise unknown | pair central angle | `native.libdevice` | paired native only | T3 |
 | `gnom` | forward | `sin`/`cos` of `phi` and `lambda` | `phi`: unknown; horizon denominator can approach zero | pair `phi`; pair `lambda` | `native.libdevice` | paired native only | T3 |
@@ -73,17 +73,23 @@ shared native pairing helper (or the equivalent double-single helper).
 | `eck6` | inverse | `sin`/`cos`, clamped `asin` | `asin` argument clamped; projected `theta` otherwise unknown | pair `theta` | `native.libdevice` | paired native only | T3 |
 | `sterea` | forward | `sin`, `pow`, `asin`, paired `sin`/`cos` | conformal `asin` ratio is algebraically in `(-1,1)` for finite positive `w`; kernel does not guard invalid `w` | pair conformal latitude; pair scaled longitude | `native.libdevice` | paired native only | T3 |
 | `sterea` | inverse | `sqrt`, `atan`, `sin`/`cos`, clamped `asin`, `atan2`, `log`, `exp`, `tan`, `pow` | one `asin` input clamped; projected and iterative arguments otherwise unknown | pair central angle; iterative pair `phi` | `native.libdevice` | paired native only | T3 |
-| `geos` | forward | `tan`, `atan`, `sin`/`cos`, `sqrt`, `atan2`, clamped `asin` | output `asin` input clamped; visibility and `phi` bounds not enforced here | pair geocentric latitude; pair `lambda` | `native.libdevice` | paired native only | T3 |
-| `geos` | inverse | paired `sin`/`cos`, `sqrt`, `atan2`, `atan` | scan angles/projected coordinates unknown; discriminant clamped non-negative | pair x scan angle; pair y scan angle | `native.libdevice` | paired native only | T3 |
+| `geos` | forward | `tan`, `atan`, `sin`/`cos`, `sqrt`, `atan2`, clamped `asin` | Sweep X/Y explicit; finite latitude bounded; ellipsoid-limb visibility predicate enforced with named zero tolerance | pair geocentric latitude; pair `lambda` | `native.libdevice` | paired native only | T3 |
+| `geos` | inverse | paired `sin`/`cos`, `sqrt`, `atan2`, `atan` | principal scan angles enforced; CPU uses a strict zero discriminant tolerance, while CUDA admits only the measured dtype-specific tangent bin (`4e-8` fp32, `2e-15` fp64); Sweep X/Y rays explicit | pair x scan angle; pair y scan angle | `native.libdevice` | paired native only | T3 |
 | `robin` | forward | none (table polynomial) | n/a | none | arithmetic/table only | none | T0 |
 | `robin` | inverse | none (table polynomial/Newton) | n/a | none | arithmetic/table only | none | T0 |
 | `wintri` | forward | `sin`/`cos`, clamped `acos`, `sin` | `acos` input clamped; `phi` otherwise unknown; `lambda` finite wrapped | pair `phi`; pair `lambda/2` | `native.libdevice` | paired native only | T3 |
 | `wintri` | inverse | iterative `sin`/`cos`, clamped `acos`, `sin` | projected initial values and iteration domain unknown; `acos` input clamped | pair `phi`; pair `lambda/2` | `native.libdevice` | paired native only | T3 |
 | `natearth` | forward | none (polynomial) | n/a | none | arithmetic only | none | T0 |
 | `natearth` | inverse | none (polynomial/Newton) | n/a | none | arithmetic only | none | T0 |
-| `aeqd` | forward | paired `sin`/`cos`, clamped `acos`, `sin` | `acos` input clamped; antipode is singular | pair `phi`; pair `lambda` | `native.libdevice` | paired native only | T3 |
-| `aeqd` | inverse | `sqrt`, `sin`/`cos`, clamped `asin`, `atan2` | projected radius unknown; `asin` input clamped | pair central distance | `native.libdevice` | paired native only | T3 |
+| `aeqd` | forward | paired `sin`/`cos`, clamped `acos`, `sin` | explicit spherical CRS only; antipode is singular; ellipsoidal, Modified, and Guam methods are rejected before dispatch | pair `phi`; pair `lambda` | `native.libdevice` | paired native only | T3 |
+| `aeqd` | inverse | `sqrt`, `sin`/`cos`, clamped `asin`, `atan2` | explicit spherical CRS only; projected radius unknown; ellipsoidal, Modified, and Guam methods are rejected before dispatch | pair central distance | `native.libdevice` | paired native only | T3 |
 | `helmert` | datum shift (forward or inverse pipeline) | paired `sin`/`cos` for source latitude/longitude, `sqrt`, `atan2`, iterative `sin`, optional final paired `sin`/`cos` | Q1.62 guard `|angle| <= pi`; non-finite/outside use native; angles within `0.02 rad` of a pole use native for height conditioning | pair source latitude; pair source longitude; pair final latitude with height | native paired `sincos`/libdevice, or `helmert.fixed_q62` for bounded trig only | qualified guarded implementation; native otherwise | T2 |
+
+AEA, LAEA, Equal Earth, and CEA use one neutral CPU/xp authalic helper for
+`q`, pole snapping, and `q` inversion. Its spherical branch is exact, its
+ellipsoidal branch uses the stable `atanh(e sin(phi))/e` form, and only NumPy
+may terminate Newton iteration early. Other array namespaces execute a fixed
+iteration count without reading a device scalar or synchronizing to the host.
 
 ## Coverage matrix
 

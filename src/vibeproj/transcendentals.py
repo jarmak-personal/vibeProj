@@ -7,6 +7,7 @@ lazy so importing :mod:`vibeproj` never imports CuPy or queries a device.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import Enum
 from functools import lru_cache
@@ -26,6 +27,89 @@ TMERC_FIXED_Q62_MIN_ELEMENTS = 256
 HELMERT_FIXED_Q62_MIN_ELEMENTS = 131_072
 SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS = 524_288
 ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS = 262_144
+
+_EXACT_DOMAIN_FAMILIES = frozenset({"aeqd", "geos", "laea", "ortho", "stere", "sterea"})
+
+
+def attach_projection_strategy_metadata(
+    computed: dict,
+    *,
+    operation_method: str | None,
+    eccentricity_squared: float,
+    latitude_origin_degrees: float,
+) -> dict:
+    """Attach stable CRS/setup facts used by exact strategy-domain planning."""
+    computed["_strategy_geometry"] = "spherical" if eccentricity_squared == 0.0 else "ellipsoidal"
+    computed["_strategy_operation_method"] = operation_method
+    computed["_strategy_latitude_origin"] = latitude_origin_degrees
+    return computed
+
+
+def _origin_mode(computed: dict) -> str:
+    latitude = float(computed.get("_strategy_latitude_origin", 0.0))
+    if math.isclose(latitude, 90.0, rel_tol=0.0, abs_tol=1e-10):
+        return "north_pole"
+    if math.isclose(latitude, -90.0, rel_tol=0.0, abs_tol=1e-10):
+        return "south_pole"
+    if math.isclose(latitude, 0.0, rel_tol=0.0, abs_tol=1e-10):
+        return "equatorial"
+    return "oblique"
+
+
+def projection_strategy_domain(projection: str, direction: str, computed: dict) -> str:
+    """Return the canonical dispatch domain for one concrete projection stage."""
+    if direction not in ("forward", "inverse"):
+        raise ValueError(f"Invalid projection strategy direction: {direction!r}")
+    if projection == "tmerc" and direction == "forward":
+        return "utm" if computed.get("is_utm", False) else "global"
+    if projection not in _EXACT_DOMAIN_FAMILIES:
+        return f"{projection}.{direction}"
+
+    geometry = str(computed.get("_strategy_geometry", "unspecified"))
+    method = computed.get("_strategy_operation_method")
+    if projection == "laea":
+        mode = str(computed.get("mode", _origin_mode(computed)))
+        return f"laea.{direction}.{geometry}.{mode}"
+    if projection == "ortho":
+        return f"ortho.{direction}.{geometry}.{_origin_mode(computed)}"
+    if projection == "aeqd":
+        if method == "Guam Projection":
+            semantics = "guam"
+        elif method == "Modified Azimuthal Equidistant":
+            semantics = "modified"
+        elif method == "Azimuthal Equidistant (Spherical)" or geometry == "spherical":
+            semantics = "spherical"
+        else:
+            semantics = "ellipsoidal"
+        return f"aeqd.{direction}.{semantics}.{_origin_mode(computed)}"
+    if projection == "stere":
+        variants = {
+            "Polar Stereographic (variant A)": "variant_a",
+            "Polar Stereographic (variant B)": "variant_b",
+            "Polar Stereographic (variant C)": "variant_c",
+        }
+        variant = variants.get(method, "custom")
+        hemisphere = "south" if computed.get("is_south", False) else "north"
+        return f"stere.{direction}.{geometry}.{variant}.{hemisphere}"
+    if projection == "sterea":
+        return f"sterea.{direction}.{geometry}.oblique"
+    sweep_axis = str(computed.get("sweep_axis", "unknown"))
+    return f"geos.{direction}.{geometry}.sweep_{sweep_axis}"
+
+
+def projection_strategy_domains(projection: str, direction: str) -> tuple[str, ...]:
+    """Return registry domains module-level warm-up must resolve for a target."""
+    if projection == "tmerc" and direction == "forward":
+        return ("global", "utm")
+    prefix = f"{projection}.{direction}"
+    registered = {
+        domain
+        for implementation in _REGISTRY
+        if implementation.operation is TranscendentalOperation.PROJECTION
+        for domain in implementation.domains
+        if domain == prefix or domain.startswith(f"{prefix}.")
+    }
+    return tuple(sorted(registered or {prefix}))
 
 
 class TranscendentalOperation(str, Enum):
@@ -212,7 +296,7 @@ _REGISTRY = (
         min_fp32_to_fp64_ratio=16,
         supported_compute_precisions=("auto", "fp64"),
         min_elements=ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
-        domains=("ortho.forward",),
+        domains=("ortho.forward.spherical.oblique",),
         accuracy=AccuracyContract(
             reference=NATIVE_LIBDEVICE,
             max_horizontal_error_m=1e-8,
@@ -653,5 +737,7 @@ __all__ = [
     "list_transcendental_strategies",
     "normalize_compute_precision",
     "normalize_transcendental_policy",
+    "projection_strategy_domain",
+    "projection_strategy_domains",
     "resolve_transcendental_strategy",
 ]

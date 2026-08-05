@@ -130,7 +130,7 @@ QUALIFICATION_SPECS = {
     "ortho-forward": QualificationSpec(
         implementation_id=ORTHO_FORWARD_FIXED_Q62,
         operation="projection",
-        domain="ortho.forward",
+        domain="ortho.forward.spherical.oblique",
         direction="forward",
         min_elements=ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
         coordinate_contract_m=1e-8,

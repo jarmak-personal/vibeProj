@@ -42,6 +42,9 @@ class ProjectionParams:
     north_first: bool = False
     # Extra params for specific projections
     extra: dict[str, Any] = field(default_factory=dict)
+    # Exact coordinate-operation method retained for strategy-domain planning.
+    # Appended to preserve the public positional construction order above.
+    operation_method: str | None = None
 
 
 @dataclass(frozen=True)
@@ -127,6 +130,7 @@ _METHOD_MAP = {
     "Polar Stereographic (variant B)": "stere",
     "Polar Stereographic (variant C)": "stere",
     "Lambert Azimuthal Equal Area": "laea",
+    "Lambert Azimuthal Equal Area (Spherical)": "laea",
     "Equidistant Cylindrical": "eqc",
     "Equidistant Cylindrical (Spherical)": "eqc",
     "Sinusoidal": "sinu",
@@ -142,7 +146,6 @@ _METHOD_MAP = {
     "Robinson": "robin",
     "Winkel Tripel": "wintri",
     "Natural Earth": "natearth",
-    "Modified Azimuthal Equidistant": "aeqd",
     "Azimuthal Equidistant": "aeqd",
     "Azimuthal Equidistant (Spherical)": "aeqd",
     "Hotine Oblique Mercator (variant A)": "omerc",
@@ -152,6 +155,14 @@ _METHOD_MAP = {
     "Eckert IV": "eck4",
     "Eckert VI": "eck6",
 }
+
+# Recognized so callers receive a stable typed error instead of a generic
+# unknown-method failure. These methods are intentionally absent from the
+# supported/public method map above.
+_RECOGNIZED_UNSUPPORTED_METHODS = frozenset({"Modified Azimuthal Equidistant", "Guam Projection"})
+_NONPUBLIC_PROJECTION_METHODS = frozenset(
+    {"Azimuthal Equidistant", *_RECOGNIZED_UNSUPPORTED_METHODS}
+)
 
 
 def _get_ellipsoid(crs: CRS) -> Ellipsoid:
@@ -251,15 +262,29 @@ def resolve_projection_params(crs: CRS) -> ProjectionParams:
         raise CRSResolutionError(f"Cannot extract projection from CRS: {crs}")
 
     method_name = cf.method_name
+    if method_name in _RECOGNIZED_UNSUPPORTED_METHODS:
+        raise UnsupportedProjectionError(
+            f"Projection method '{method_name}' is recognized but not implemented. "
+            "vibeProj supports spherical Azimuthal Equidistant only; use an explicit "
+            "spherical CRS (+R) when those semantics are intended."
+        )
     proj_name = _METHOD_MAP.get(method_name)
 
     if proj_name is None:
+        public_methods = sorted(
+            method for method in _METHOD_MAP if method not in _NONPUBLIC_PROJECTION_METHODS
+        )
         raise UnsupportedProjectionError(
-            f"Unsupported projection method: '{method_name}'. "
-            f"Supported methods: {sorted(_METHOD_MAP.keys())}"
+            f"Unsupported projection method: '{method_name}'. Supported methods: {public_methods}"
         )
 
     ellipsoid = _get_ellipsoid(crs)
+    if proj_name == "aeqd" and ellipsoid.es != 0.0:
+        raise UnsupportedProjectionError(
+            f"Ellipsoidal projection method '{method_name}' is not implemented. "
+            "vibeProj supports spherical Azimuthal Equidistant only; use an explicit "
+            "spherical CRS (+R) when those semantics are intended."
+        )
 
     # Check for Web Mercator specifically (EPSG:3857)
     epsg = crs.to_epsg()
@@ -343,7 +368,19 @@ def resolve_projection_params(crs: CRS) -> ProjectionParams:
         x_unit_to_m=x_unit_to_m,
         y_unit_to_m=y_unit_to_m,
         north_first=first_is_north,
+        operation_method=method_name,
     )
+
+    if proj_name == "geos":
+        height = _get_linear_param(pl, "Satellite Height", 35_785_831.0)
+        if not math.isfinite(height) or height <= 0.0:
+            raise CRSResolutionError(
+                f"Geostationary satellite height must be finite and positive, got {height!r}"
+            )
+        params.extra["h"] = height
+        params.extra["sweep_axis"] = (
+            "x" if method_name == "Geostationary Satellite (Sweep X)" else "y"
+        )
 
     # Oblique Mercator extra params
     if proj_name == "omerc":

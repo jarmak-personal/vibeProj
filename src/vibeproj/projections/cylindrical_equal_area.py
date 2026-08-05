@@ -10,7 +10,13 @@ import math
 from typing import TYPE_CHECKING
 
 from vibeproj.projections import register
-from vibeproj.projections.base import EPS_ANGLE, EPS_CONV, EPS_DENOM, Projection
+from vibeproj.projections._equal_area import (
+    authalic_q,
+    authalic_q_scalar,
+    geodetic_latitude_from_authalic_q,
+    snap_authalic_q_to_pole,
+)
+from vibeproj.projections.base import Projection
 
 if TYPE_CHECKING:
     from vibeproj.crs import ProjectionParams
@@ -25,13 +31,7 @@ class CylindricalEqualArea(Projection):
         lat_ts = math.radians(params.lat_1) if params.lat_1 != 0 else 0.0
         e = params.ellipsoid
         k0 = math.cos(lat_ts) / math.sqrt(1.0 - e.es * math.sin(lat_ts) ** 2)
-        # qp = q at the pole
-        if e.e > EPS_ANGLE:
-            qp = (1 - e.es) * (
-                1.0 / (1.0 - e.es) - (1.0 / (2.0 * e.e)) * math.log((1.0 - e.e) / (1.0 + e.e))
-            )
-        else:
-            qp = 2.0
+        qp = authalic_q_scalar(1.0, e.e)
         return {
             "a": e.a,
             "e": e.e,
@@ -47,44 +47,20 @@ class CylindricalEqualArea(Projection):
         k0 = computed["k0"]
         e = computed["e"]
         x = lam * k0
-        if e < EPS_ANGLE:
-            y = xp.sin(phi) / k0
-        else:
-            sin_phi = xp.sin(phi)
-            e_sin = e * sin_phi
-            q = (1 - e * e) * (
-                sin_phi / (1 - e_sin * e_sin) - (0.5 / e) * xp.log((1 - e_sin) / (1 + e_sin))
-            )
-            y = 0.5 * q / k0
+        y = 0.5 * authalic_q(xp.sin(phi), e, xp) / k0
         return x, y
 
     def inverse(self, x, y, params, computed, xp):
         k0 = computed["k0"]
         e = computed["e"]
         es = computed["es"]
+        qp = computed["qp"]
         lam = x / k0
-        if e < EPS_ANGLE:
-            phi = xp.arcsin(xp.clip(y * k0, -1.0, 1.0))
-        else:
-            q = 2.0 * y * k0
-            phi = xp.arcsin(xp.clip(q / 2.0, -1.0, 1.0))
-            for _ in range(15):
-                sin_phi = xp.sin(phi)
-                e_sin = e * sin_phi
-                one_minus = 1.0 - e_sin * e_sin
-                cos_phi = xp.cos(phi)
-                cos_phi = xp.where(xp.abs(cos_phi) < EPS_DENOM, EPS_DENOM, cos_phi)
-                dphi = (one_minus * one_minus / (2.0 * cos_phi)) * (
-                    q / (1.0 - es)
-                    - sin_phi / one_minus
-                    + (0.5 / e) * xp.log((1.0 - e_sin) / (1.0 + e_sin))
-                )
-                phi = phi + dphi
-                if hasattr(dphi, "__len__"):
-                    if xp.all(xp.abs(dphi) < EPS_CONV):
-                        break
-                elif abs(float(dphi)) < EPS_CONV:
-                    break
+        q = 2.0 * y * k0
+        q = snap_authalic_q_to_pole(q, qp, xp)
+        invalid_q = xp.isfinite(q) & (xp.abs(q) > qp)
+        phi = geodetic_latitude_from_authalic_q(q, qp, e, es, xp)
+        lam = xp.where(invalid_q, xp.inf, lam)
         return lam, phi
 
 

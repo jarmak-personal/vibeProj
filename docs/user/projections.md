@@ -17,7 +17,7 @@ element-wise implementation and a fused NVRTC GPU kernel.
 | Oblique Stereographic | `sterea` | 28992 | Double projection via conformal sphere |
 | Plate Carree | `eqc` | 4087 | Equidistant cylindrical |
 | Sinusoidal | `sinu` | -- | Pseudocylindrical equal-area |
-| Equal Earth | `eqearth` | 8857 | Polynomial pseudocylindrical |
+| Equal Earth | `eqearth` | 8857 | Spherical or ellipsoidal authalic form |
 | Cylindrical Equal Area | `cea` | 6933 | EASE-Grid 2.0 |
 | Orthographic | `ortho` | -- | Globe view |
 | Gnomonic | `gnom` | -- | Great circle navigation |
@@ -25,8 +25,8 @@ element-wise implementation and a fused NVRTC GPU kernel.
 | Robinson | `robin` | -- | Compromise world maps |
 | Winkel Tripel | `wintri` | -- | National Geographic standard |
 | Natural Earth | `natearth` | -- | Polynomial pseudocylindrical |
-| Azimuthal Equidistant | `aeqd` | -- | Distance-from-center |
-| Geostationary Satellite | `geos` | -- | Weather satellite view |
+| Azimuthal Equidistant (spherical) | `aeqd` | -- | Requires an explicit spherical CRS (`+R`) |
+| Geostationary Satellite | `geos` | -- | Sweep X/Y and custom satellite height |
 | Oblique Mercator (Hotine) | `omerc` | 3375 | Variants A/B |
 | Krovak | `krovak` | 5514 | North-orientated variant |
 | Eckert IV | `eck4` | -- | Pseudocylindrical equal-area |
@@ -72,6 +72,18 @@ src = ProjectionParams(projection_name="longlat", ellipsoid=WGS84, north_first=T
 pipe = TransformPipeline(src, params)
 x, y = pipe.transform(lat_array, lon_array, np)  # or cp for GPU
 ```
+
+Spherical Azimuthal Equidistant is available with an explicit radius, for
+example `+proj=aeqd +lat_0=45 +lon_0=0 +R=6378137 +type=crs`. Ellipsoidal
+Azimuthal Equidistant, Modified Azimuthal Equidistant, and Guam Projection are
+not implemented. Constructing a Transformer for those methods raises
+`UnsupportedProjectionError`; they never silently execute spherical formulas.
+
+Geostationary CRS definitions retain both `+sweep=x` and `+sweep=y` plus the
+declared satellite height `+h`. Height must be positive and no more than
+`1e10` equatorial radii. Forward points behind the visible ellipsoid limb and
+inverse points outside the Earth-intersection disk or principal scan-angle
+range return non-finite sentinels.
 
 ## Datum shifting
 
@@ -137,18 +149,10 @@ cases.
 
 ## Known limitations
 
-- **Equal Earth** (`eqearth`): Uses the spherical polynomial formula on geodetic
-  latitude rather than converting to authalic latitude first. This means absolute
-  metre values differ from pyproj by ~15%. Roundtrip accuracy is exact
-  (forward and inverse are self-consistent).
-
 - **Oblique Stereographic** (`sterea`): The double-projection through a conformal
   sphere introduces ~130m systematic offset from pyproj's more rigorous method
   in the forward direction. The inverse conformal sphere conversion has a known
   accuracy limitation (~0.2 degrees). Roundtrip accuracy is sub-millimetre.
-
-- **Geostationary** (`geos`): The inverse has limited accuracy for off-nadir
-  points due to a simplified geocentric latitude conversion.
 
 - **Winkel Tripel** (`wintri`): The inverse uses Newton iteration and converges
   to ~0.005 degrees rather than machine precision.

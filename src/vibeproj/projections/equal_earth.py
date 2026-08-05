@@ -16,7 +16,12 @@ import math
 from typing import TYPE_CHECKING
 
 from vibeproj.projections import register
-from vibeproj.projections.base import EPS_ANGLE, EPS_CONV, Projection
+from vibeproj.projections._equal_area import (
+    authalic_q,
+    authalic_q_scalar,
+    geodetic_latitude_from_authalic_q,
+)
+from vibeproj.projections.base import Projection
 
 if TYPE_CHECKING:
     from vibeproj.crs import ProjectionParams
@@ -31,26 +36,6 @@ _A4 = 0.003796
 _M = 2.0 * math.sqrt(3.0) / 3.0
 
 
-def _qsfn_scalar(sin_phi, e):
-    """Scalar q-function for authalic latitude."""
-    if e < EPS_ANGLE:
-        return 2.0 * sin_phi
-    e_sin = e * sin_phi
-    return (1.0 - e * e) * (
-        sin_phi / (1.0 - e_sin * e_sin) - (0.5 / e) * math.log((1.0 - e_sin) / (1.0 + e_sin))
-    )
-
-
-def _qsfn_array(sin_phi, e, xp):
-    """Vectorised q-function."""
-    if e < EPS_ANGLE:
-        return 2.0 * sin_phi
-    e_sin = e * sin_phi
-    return (1.0 - e * e) * (
-        sin_phi / (1.0 - e_sin * e_sin) - (0.5 / e) * xp.log((1.0 - e_sin) / (1.0 + e_sin))
-    )
-
-
 class EqualEarth(Projection):
     """Equal-area pseudocylindrical projection (Savric, Patterson & Jenny, 2018)."""
 
@@ -59,7 +44,7 @@ class EqualEarth(Projection):
     def setup(self, params: ProjectionParams) -> dict:
         ec = params.ellipsoid.e
         es = params.ellipsoid.es
-        qp = _qsfn_scalar(1.0, ec)  # q at the pole
+        qp = authalic_q_scalar(1.0, ec)  # q at the pole
         rqda = math.sqrt(qp / 2.0)  # R_A / a (authalic sphere radius / semi-major)
         return {
             "a": params.ellipsoid.a,
@@ -76,9 +61,14 @@ class EqualEarth(Projection):
         ec = computed["e"]
         qp = computed["qp"]
         rqda = computed["rqda"]
+        numpy_valid = getattr(xp, "__name__", None) == "numpy" and bool(
+            xp.all(xp.isfinite(lam)) and xp.all(xp.isfinite(phi))
+        )
+        finite_lam = lam if numpy_valid else xp.where(xp.isfinite(lam), lam, 0.0)
+        finite_phi = phi if numpy_valid else xp.where(xp.isfinite(phi), phi, 0.0)
 
         # Geodetic → authalic latitude
-        q = _qsfn_array(xp.sin(phi), ec, xp)
+        q = authalic_q(xp.sin(finite_phi), ec, xp)
         beta = xp.arcsin(xp.clip(q / qp, -1.0, 1.0))
 
         # Equal Earth polynomial on authalic latitude
@@ -86,8 +76,13 @@ class EqualEarth(Projection):
         t2 = theta * theta
         t6 = t2 * t2 * t2
         d = _A1 + 3 * _A2 * t2 + t6 * (7 * _A3 + 9 * _A4 * t2)
-        x = rqda * _M * lam * xp.cos(theta) / d
+        x = rqda * _M * finite_lam * xp.cos(theta) / d
         y = rqda * theta * (_A1 + _A2 * t2 + t6 * (_A3 + _A4 * t2))
+        if numpy_valid:
+            return x, y
+        phi_nonfinite = ~xp.isfinite(phi)
+        x = xp.where(phi_nonfinite | xp.isnan(lam), xp.nan, xp.where(xp.isinf(lam), lam, x))
+        y = xp.where(phi_nonfinite, xp.nan, y)
         return x, y
 
     def inverse(self, x, y, params, computed, xp):
@@ -95,10 +90,15 @@ class EqualEarth(Projection):
         es = computed["es"]
         qp = computed["qp"]
         rqda = computed["rqda"]
+        numpy_valid = getattr(xp, "__name__", None) == "numpy" and bool(
+            xp.all(xp.isfinite(x)) and xp.all(xp.isfinite(y))
+        )
+        finite_x = x if numpy_valid else xp.where(xp.isfinite(x), x, 0.0)
+        finite_y = y if numpy_valid else xp.where(xp.isfinite(y), y, 0.0)
 
         # Remove rqda scaling
-        y_s = y / rqda
-        x_s = x / rqda
+        y_s = finite_y / rqda
+        x_s = finite_x / rqda
 
         # Newton iteration to recover theta from y_s
         theta = y_s
@@ -118,22 +118,13 @@ class EqualEarth(Projection):
 
         # Authalic → geodetic latitude via iterative q-inversion
         q = qp * sin_beta
-        phi = xp.arcsin(xp.clip(q / 2.0, -1.0, 1.0))
-        for _ in range(15):
-            sin_phi = xp.sin(phi)
-            e_sin = ec * sin_phi
-            one_minus = 1.0 - e_sin * e_sin
-            dphi = (one_minus * one_minus / (2.0 * xp.cos(phi))) * (
-                q / (1.0 - es)
-                - sin_phi / one_minus
-                + (0.5 / ec) * xp.log((1.0 - e_sin) / (1.0 + e_sin))
-            )
-            phi = phi + dphi
-            if hasattr(dphi, "__len__"):
-                if xp.all(xp.abs(dphi) < EPS_CONV):
-                    break
-            elif abs(float(dphi)) < EPS_CONV:
-                break
+        phi = geodetic_latitude_from_authalic_q(q, qp, ec, es, xp)
+
+        if numpy_valid:
+            return lam, phi
+        y_nonfinite = ~xp.isfinite(y)
+        lam = xp.where(y_nonfinite | xp.isnan(x), xp.nan, xp.where(xp.isinf(x), x, lam))
+        phi = xp.where(y_nonfinite, xp.nan, phi)
 
         return lam, phi
 

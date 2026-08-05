@@ -55,6 +55,7 @@ GLOBAL_TM_0 = "+proj=tmerc +lat_0=0 +lon_0=0 +k=1 +x_0=0 +y_0=0 +datum=WGS84 +un
 GLOBAL_TM_9 = "+proj=tmerc +lat_0=0 +lon_0=9 +k=1 +x_0=0 +y_0=0 +datum=WGS84 +units=m +type=crs"
 UTM_TM_31 = "+proj=utm +zone=31 +datum=WGS84 +units=m +type=crs"
 UTM_TM_32 = "+proj=utm +zone=32 +datum=WGS84 +units=m +type=crs"
+ORTHO_FORWARD_DOMAIN = "ortho.forward.spherical.oblique"
 
 
 def _projection_transformer(projection: str) -> Transformer:
@@ -346,7 +347,7 @@ def test_resolver_uses_priority_then_rejects_equal_priority_overlap(monkeypatch)
         ),
         (
             TranscendentalOperation.PROJECTION,
-            "ortho.forward",
+            ORTHO_FORWARD_DOMAIN,
             ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
             ORTHO_FORWARD_FIXED_Q62,
         ),
@@ -396,7 +397,7 @@ def test_auto_strategy_uses_exact_workload_crossover(operation, domain, threshol
         (TranscendentalOperation.HELMERT, "global", HELMERT_FIXED_Q62),
         (TranscendentalOperation.TMERC_FORWARD, "utm", TMERC_FIXED_Q62),
         (TranscendentalOperation.PROJECTION, "sinu.forward", SINU_FORWARD_FIXED_Q62),
-        (TranscendentalOperation.PROJECTION, "ortho.forward", ORTHO_FORWARD_FIXED_Q62),
+        (TranscendentalOperation.PROJECTION, ORTHO_FORWARD_DOMAIN, ORTHO_FORWARD_FIXED_Q62),
     ],
 )
 def test_ada_auto_selects_qualified_implementations(operation, domain, expected):
@@ -443,7 +444,8 @@ def test_wave1_public_policy_precision_and_size_matrix(
     assert explanation.workload_size == workload_size
     assert len(explanation.decisions) == 1
     decision = explanation.decisions[0]
-    assert decision.domain == f"{projection}.forward"
+    expected_domain = ORTHO_FORWARD_DOMAIN if projection == "ortho" else f"{projection}.forward"
+    assert decision.domain == expected_domain
     assert decision.implementation_id == (accelerated_id if accelerated else NATIVE_LIBDEVICE)
     assert decision.fallback is (policy == "accelerated" and not accelerated)
     assert decision.accuracy.max_horizontal_error_m <= 1e-8
@@ -453,12 +455,17 @@ def test_wave1_public_policy_precision_and_size_matrix(
     ("domain", "device", "precision", "reason"),
     [
         ("sinu.inverse", ADA, "fp64", "domain 'sinu.inverse' is not accuracy-qualified"),
-        ("ortho.inverse", ADA, "fp64", "domain 'ortho.inverse' is not accuracy-qualified"),
+        (
+            "ortho.inverse.spherical.oblique",
+            ADA,
+            "fp64",
+            "domain 'ortho.inverse.spherical.oblique' is not accuracy-qualified",
+        ),
         ("sinu.forward", CPU, "fp64", "cpu backend"),
-        ("ortho.forward", HOPPER, "fp64", "compute capability"),
+        (ORTHO_FORWARD_DOMAIN, HOPPER, "fp64", "compute capability"),
         ("sinu.forward", WEAK_ADA, "fp64", "fp32:fp64 ratio"),
-        ("ortho.forward", ADA, "fp32", "compute precision 'fp32'"),
-        ("ortho.forward", ADA, "ds", "compute precision 'ds'"),
+        (ORTHO_FORWARD_DOMAIN, ADA, "fp32", "compute precision 'fp32'"),
+        (ORTHO_FORWARD_DOMAIN, ADA, "ds", "compute precision 'ds'"),
     ],
 )
 def test_wave1_explicit_fallback_explains_exact_failed_qualification(

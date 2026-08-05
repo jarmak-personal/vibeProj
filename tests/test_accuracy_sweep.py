@@ -20,7 +20,7 @@ from pyproj import Transformer as PyProjTransformer
 from _accuracy_cases import EPSG_SWEEP, WGS84_A, finite_mask, make_lon_lat_grid
 from vibeproj import Transformer
 from vibeproj.crs import ProjectionParams
-from vibeproj.ellipsoid import WGS84
+from vibeproj.ellipsoid import SPHERE
 from vibeproj.pipeline import TransformPipeline
 
 # ---------------------------------------------------------------------------
@@ -73,13 +73,13 @@ def _vp_proj_forward(proj_name, lon, lat, lat_0=0.0, lon_0=0.0):
     """
     params = ProjectionParams(
         projection_name=proj_name,
-        ellipsoid=WGS84,
+        ellipsoid=SPHERE,
         lon_0=lon_0,
         lat_0=lat_0,
         north_first=False,
         extra={},
     )
-    src = ProjectionParams(projection_name="longlat", ellipsoid=WGS84, north_first=True)
+    src = ProjectionParams(projection_name="longlat", ellipsoid=SPHERE, north_first=True)
     pipe = TransformPipeline(src, params)
     # TransformPipeline._forward expects (lat, lon) when src is north_first=True.
     # Our src is north_first=True, so arg1=lat, arg2=lon.
@@ -94,13 +94,13 @@ def _vp_proj_inverse(proj_name, x, y, lat_0=0.0, lon_0=0.0):
     """
     params = ProjectionParams(
         projection_name=proj_name,
-        ellipsoid=WGS84,
+        ellipsoid=SPHERE,
         lon_0=lon_0,
         lat_0=lat_0,
         north_first=False,
         extra={},
     )
-    src = ProjectionParams(projection_name="longlat", ellipsoid=WGS84, north_first=True)
+    src = ProjectionParams(projection_name="longlat", ellipsoid=SPHERE, north_first=True)
     inv_pipe = TransformPipeline(params, src)
     # TransformPipeline._inverse returns (lon, lat) when dst north_first=True,
     # but dst here is src (longlat, north_first=True), so output is (lat, lon).

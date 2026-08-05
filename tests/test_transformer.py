@@ -841,17 +841,17 @@ def test_natearth_roundtrip():
 
 def test_aeqd_roundtrip():
     from vibeproj.crs import ProjectionParams
-    from vibeproj.ellipsoid import WGS84
+    from vibeproj.ellipsoid import SPHERE
     from vibeproj.pipeline import TransformPipeline
 
     params = ProjectionParams(
         projection_name="aeqd",
-        ellipsoid=WGS84,
+        ellipsoid=SPHERE,
         lon_0=0.0,
         lat_0=45.0,
         north_first=False,
     )
-    src = ProjectionParams(projection_name="longlat", ellipsoid=WGS84, north_first=True)
+    src = ProjectionParams(projection_name="longlat", ellipsoid=SPHERE, north_first=True)
     pipe = TransformPipeline(src, params)
     lat = np.array([40.0, 50.0, 45.0])
     lon = np.array([-5.0, 5.0, 0.0])

@@ -104,7 +104,7 @@ EXPECTED_REGISTRY_MATRIX = frozenset(
         (
             ORTHO_FORWARD_FIXED_Q62,
             TranscendentalOperation.PROJECTION,
-            ("ortho.forward",),
+            ("ortho.forward.spherical.oblique",),
             ((8, 9),),
             ("auto", "fp64"),
             ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
@@ -149,11 +149,25 @@ HOPPER_H100 = DeviceCapability(
     name="contract Hopper",
 )
 CPU = DeviceCapability(backend="cpu", name="contract CPU")
+ORTHO_FORWARD_DOMAIN = "ortho.forward.spherical.oblique"
 
 
 def _context(family: str, direction: str) -> tuple[TranscendentalOperation, str]:
     if (family, direction) == ("tmerc", "forward"):
         return TranscendentalOperation.TMERC_FORWARD, "utm"
+    representative = {
+        "aeqd": "spherical.oblique",
+        "geos": "ellipsoidal.sweep_y",
+        "laea": "ellipsoidal.oblique",
+        "ortho": "spherical.oblique",
+        "stere": "ellipsoidal.variant_b.north",
+        "sterea": "ellipsoidal.oblique",
+    }.get(family)
+    if representative is not None:
+        return (
+            TranscendentalOperation.PROJECTION,
+            f"{family}.{direction}.{representative}",
+        )
     return TranscendentalOperation.PROJECTION, f"{family}.{direction}"
 
 
@@ -335,7 +349,7 @@ def test_resolver_reuses_decisions_but_keys_cache_by_complete_device_context():
         ),
         (
             TranscendentalOperation.PROJECTION,
-            "ortho.forward",
+            ORTHO_FORWARD_DOMAIN,
             ORTHO_FORWARD_FIXED_Q62,
             ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
         ),
@@ -495,11 +509,16 @@ def test_ada_qualified_helmert_resolves_accelerated(policy):
         (TranscendentalOperation.TMERC_FORWARD, "global", "fp64", ADA_4090),
         (TranscendentalOperation.TMERC_FORWARD, "utm", "fp32", ADA_4090),
         (TranscendentalOperation.PROJECTION, "sinu.inverse", "fp64", ADA_4090),
-        (TranscendentalOperation.PROJECTION, "ortho.inverse", "fp64", ADA_4090),
+        (
+            TranscendentalOperation.PROJECTION,
+            "ortho.inverse.spherical.oblique",
+            "fp64",
+            ADA_4090,
+        ),
         (TranscendentalOperation.PROJECTION, "sinu.forward", "fp32", ADA_4090),
-        (TranscendentalOperation.PROJECTION, "ortho.forward", "ds", ADA_4090),
+        (TranscendentalOperation.PROJECTION, ORTHO_FORWARD_DOMAIN, "ds", ADA_4090),
         (TranscendentalOperation.PROJECTION, "sinu.forward", "fp64", HOPPER_H100),
-        (TranscendentalOperation.PROJECTION, "ortho.forward", "fp64", CPU),
+        (TranscendentalOperation.PROJECTION, ORTHO_FORWARD_DOMAIN, "fp64", CPU),
     ],
 )
 def test_explicit_accelerated_is_portable_native_fallback(operation, domain, precision, device):
@@ -669,7 +688,10 @@ def test_wave1_benchmark_specs_enforce_complete_public_qualification_surface():
         assert specification.min_elements == min_elements
         assert specification.coordinate_contract_m == 1e-8
         assert specification.operation == TranscendentalOperation.PROJECTION.value
-        assert specification.domain == f"{case_name.removesuffix('-forward')}.forward"
+        expected_domain = {
+            "ortho-forward": ORTHO_FORWARD_DOMAIN,
+        }.get(case_name, f"{case_name.removesuffix('-forward')}.forward")
+        assert specification.domain == expected_domain
         assert specification.direction == "forward"
         assert specification.max_physical_scale_m == PROJECTION_FIXED_Q62_MAX_SCALE_M
         assert specification.expected_kernel_nodes == 1
@@ -718,4 +740,4 @@ def test_every_accelerated_registry_id_has_matching_benchmark_contract():
             assert specification.coordinate_contract_m == entry.accuracy.max_horizontal_error_m
             assert specification.max_physical_scale_m == entry.accuracy.max_physical_scale_m
             if entry.operation is TranscendentalOperation.PROJECTION:
-                assert specification.domain.endswith(f".{specification.direction}")
+                assert specification.domain.split(".")[1] == specification.direction

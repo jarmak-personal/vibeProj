@@ -24,6 +24,18 @@ from vibeproj.transcendentals import (
     TMERC_FIXED_Q62,
 )
 
+GEOS_FP32_DISCRIMINANT_TOLERANCE = 4e-8
+GEOS_FP64_DISCRIMINANT_TOLERANCE = 2e-15
+GEOS_SCAN_ANGLE_LIMIT = np.pi / 2.0
+
+_GEOS_DEVICE_NUMERIC_CONTRACT = (
+    f"#define VP_GEOS_FP32_DISCRIMINANT_TOLERANCE "
+    f"{GEOS_FP32_DISCRIMINANT_TOLERANCE:.17g}f\n"
+    f"#define VP_GEOS_FP64_DISCRIMINANT_TOLERANCE "
+    f"{GEOS_FP64_DISCRIMINANT_TOLERANCE:.17g}\n"
+    f"#define VP_GEOS_SCAN_ANGLE_LIMIT {GEOS_SCAN_ANGLE_LIMIT:.17g}\n"
+)
+
 # Kernel cache: (projection, direction, dtype, implementation_id) -> RawKernel
 # Protected by _kernel_cache_lock for thread-safe compilation.
 _kernel_cache: dict[tuple[str, str, str, str], object] = {}
@@ -217,26 +229,36 @@ __device__ inline {real_t} phi2({real_t} ts, {real_t} e) {{
 
 # -- Equal-area helpers (qsfn, phi_from_q) --
 _EA_DEVICE_FNS = """
+#define VP_EA_Q_POLE_SNAP_D 1e-10
+__device__ inline {real_t} vp_ea_clamp_unit_preserve_nan({real_t} value) {{
+    return isnan(value)
+        ? value
+        : fmin(fmax(value, ({real_t})-1.0), ({real_t})1.0);
+}}
 __device__ inline {real_t} qsfn({real_t} sin_phi, {real_t} e) {{
+    if (e == ({real_t})0.0) return ({real_t})2.0 * sin_phi;
     {real_t} e_sin = e * sin_phi;
     {real_t} one_minus_e2 = ({real_t})1.0 - e * e;
     return one_minus_e2 * (sin_phi / (({real_t})1.0 - e_sin * e_sin)
-           - (({real_t})0.5 / e) * log((({real_t})1.0 - e_sin) / (({real_t})1.0 + e_sin)));
+           + atanh(e_sin) / e);
 }}
-__device__ inline {real_t} phi_from_q({real_t} q, {real_t} e, {real_t} es) {{
-    {real_t} phi = asin(fmin(fmax(q / ({real_t})2.0, ({real_t})-1.0), ({real_t})1.0));
+__device__ inline {real_t} phi_from_q(
+    {real_t} q, {real_t} e, {real_t} es, {real_t} qp
+) {{
+    if (!isfinite(q)) return q;
+    if (q >= qp) return ({real_t})0.5 * {pi};
+    if (q <= -qp) return ({real_t})-0.5 * {pi};
+    // Solve in s=sin(phi), where dq/ds remains finite at both poles.
+    // Newton directly in phi loses convergence as cos(phi) approaches zero.
+    {real_t} s = vp_ea_clamp_unit_preserve_nan(q / qp);
     for (int i = 0; i < 15; i++) {{
-        {real_t} sin_phi, cos_phi;
-        vp_native_sincos(phi, &sin_phi, &cos_phi);
-        {real_t} e_sin = e * sin_phi;
-        {real_t} one_minus = ({real_t})1.0 - e_sin * e_sin;
-        {real_t} dphi = (one_minus * one_minus / (({real_t})2.0 * cos_phi))
-            * (q / (({real_t})1.0 - es) - sin_phi / one_minus
-               + (({real_t})0.5 / e) * log((({real_t})1.0 - e_sin) / (({real_t})1.0 + e_sin)));
-        phi += dphi;
-        if (fabs(dphi) < {tol}) break;
+        {real_t} one_minus = ({real_t})1.0 - es * s * s;
+        {real_t} ds = (qsfn(s, e) - q) * one_minus * one_minus
+            / (({real_t})2.0 * (({real_t})1.0 - es));
+        s = vp_ea_clamp_unit_preserve_nan(s - ds);
+        if (fabs(ds) < {tol}) break;
     }}
-    return phi;
+    return asin(s);
 }}
 """
 
@@ -261,7 +283,7 @@ _FWD_PREAMBLE = """
     {real_t} phi = ({real_t})(d_lat * 0.017453292519943295);
     {real_t} lam = ({real_t})(d_lon * 0.017453292519943295 - (double)lam0);
     const {real_t} TWO_PI = ({real_t})6.283185307179586;
-    lam = lam - TWO_PI * rint(lam / TWO_PI);
+    if (isfinite(lam)) lam = lam - TWO_PI * rint(lam / TWO_PI);
 """
 
 _FWD_POSTAMBLE = """
@@ -285,9 +307,11 @@ _INV_PREAMBLE = """
 """
 
 _INV_POSTAMBLE = """
-    lam = lam + ({real_t})lam0;
-    const {real_t} TWO_PI_i = ({real_t})6.283185307179586;
-    lam = lam - TWO_PI_i * rint(lam / TWO_PI_i);
+    if (isfinite(lam)) {{
+        lam = lam + ({real_t})lam0;
+        const {real_t} TWO_PI_i = ({real_t})6.283185307179586;
+        lam = lam - TWO_PI_i * rint(lam / TWO_PI_i);
+    }}
     double d_lat = (double)phi * 57.29577951308232;
     double d_lon = (double)lam * 57.29577951308232;
     if (dst_north_first) {{ out_x[idx] = d_lat; out_y[idx] = d_lon; }}
@@ -730,21 +754,41 @@ _AEA_FORWARD_SOURCE = (
     _EA_DEVICE_FNS
     + _FWD_SIGNATURE.format(func="aea_forward", real_t="{real_t}")
     + """
-    {real_t} nn, {real_t} C, {real_t} rho0, {real_t} e, {real_t} es,
-    {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
+    double d_nn, double d_C, double d_rho0,
+    {real_t} e, {real_t} es, double d_qp,
+    double lam0, double a, double x0, double y0,
     int src_north_first, int dst_north_first, int n
 ) {{"""
     + _FWD_PREAMBLE
     + """
-    {real_t} q = qsfn(sin(phi), e);
-    {real_t} rho_sq = C - nn * q;
-    if (rho_sq < ({real_t})0.0) rho_sq = ({real_t})0.0;
-    {real_t} rho = sqrt(rho_sq) / nn;
-    {real_t} theta = nn * lam;
-    {real_t} sin_theta, cos_theta;
-    vp_native_sincos(theta, &sin_theta, &cos_theta);
-    double easting  = (double)(rho * sin_theta) * (double)a + (double)x0;
-    double northing = (double)(rho0 - rho * cos_theta) * (double)a + (double)y0;
+    double easting, northing;
+    if (fabs(d_lat) == 90.0 && isfinite(d_lon)) {{
+        // Preserve an exact geographic pole through fp32 forward -> inverse
+        // roundtrips without broadening the inverse q-domain tolerance.
+        double q_pole = copysign(d_qp, d_lat);
+        double rho_pole = sqrt(d_C - d_nn * q_pole) / d_nn;
+        double d_lam_pole = d_lon * 0.017453292519943295 - lam0;
+        const double D_TWO_PI = 6.283185307179586;
+        d_lam_pole -= D_TWO_PI * rint(d_lam_pole / D_TWO_PI);
+        double theta_pole = d_nn * d_lam_pole;
+        double sin_theta_pole, cos_theta_pole;
+        sincos(theta_pole, &sin_theta_pole, &cos_theta_pole);
+        easting = rho_pole * sin_theta_pole * a + x0;
+        northing = (d_rho0 - rho_pole * cos_theta_pole) * a + y0;
+    }} else {{
+        {real_t} nn = ({real_t})d_nn;
+        {real_t} C = ({real_t})d_C;
+        {real_t} rho0 = ({real_t})d_rho0;
+        {real_t} q = qsfn(sin(phi), e);
+        {real_t} rho_sq = C - nn * q;
+        if (rho_sq < ({real_t})0.0) rho_sq = ({real_t})0.0;
+        {real_t} rho = sqrt(rho_sq) / nn;
+        {real_t} theta = nn * lam;
+        {real_t} sin_theta, cos_theta;
+        vp_native_sincos(theta, &sin_theta, &cos_theta);
+        easting = (double)(rho * sin_theta) * a + x0;
+        northing = (double)(rho0 - rho * cos_theta) * a + y0;
+    }}
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -754,18 +798,37 @@ _AEA_INVERSE_SOURCE = (
     _EA_DEVICE_FNS
     + _INV_SIGNATURE.format(func="aea_inverse", real_t="{real_t}")
     + """
-    {real_t} nn, {real_t} C, {real_t} rho0, {real_t} e, {real_t} es,
-    {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
+    double d_nn, double d_C, double d_rho0,
+    {real_t} e, {real_t} es, double d_qp,
+    {real_t} lam0, double a, double x0, double y0,
     int src_north_first, int dst_north_first, int n
 ) {{"""
     + _INV_PREAMBLE
     + """
+    double d_cx_domain = (d_easting - x0) / a;
+    double d_cy_domain = (d_northing - y0) / a;
+    double d_rho_domain = hypot(d_cx_domain, d_rho0 - d_cy_domain);
+    double d_q = (d_C - (d_rho_domain * d_nn) * (d_rho_domain * d_nn)) / d_nn;
+    // Match the CPU EPS_ANGLE pole snap: public scale/unit roundtrips can
+    // reconstruct a valid forward pole a few fp64 ulps beyond +/-qp.
+    if (isfinite(d_q) && fabs(fabs(d_q) - d_qp) <= VP_EA_Q_POLE_SNAP_D) {{
+        d_q = copysign(d_qp, d_q);
+    }}
+    if (isfinite(d_arg1) && isfinite(d_arg2)
+        && (!isfinite(d_q) || fabs(d_q) > d_qp)) {{
+        out_x[idx] = out_y[idx] = 1.0 / 0.0;
+        return;
+    }}
+    {real_t} nn = ({real_t})d_nn;
+    {real_t} C = ({real_t})d_C;
+    {real_t} rho0 = ({real_t})d_rho0;
+    {real_t} qp = ({real_t})d_qp;
     {real_t} dy = rho0 - cy;
     {real_t} rho = sqrt(cx * cx + dy * dy);
     if (nn < ({real_t})0.0) {{ rho = -rho; cx = -cx; dy = -dy; }}
     {real_t} lam = atan2(cx, dy) / nn;
     {real_t} q = (C - (rho * nn) * (rho * nn)) / nn;
-    {real_t} phi = phi_from_q(q, e, es);
+    {real_t} phi = phi_from_q(q, e, es, qp);
 """
     + _INV_POSTAMBLE
     + "}}"
@@ -780,41 +843,71 @@ _LAEA_FORWARD_SOURCE = (
     + _FWD_SIGNATURE.format(func="laea_forward", real_t="{real_t}")
     + """
     int mode, {real_t} Rq, {real_t} D, {real_t} qp,
-    {real_t} sin_beta0, {real_t} cos_beta0, {real_t} e, {real_t} es,
+    {real_t} sin_beta0, {real_t} cos_beta0, {real_t} phi0, {real_t} e, {real_t} es,
     {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
     int src_north_first, int dst_north_first, int n
 ) {{"""
     + _FWD_PREAMBLE
     + """
     {real_t} q = qsfn(sin(phi), e);
-    {real_t} beta = asin(fmin(fmax(q / qp, ({real_t})-1.0), ({real_t})1.0));
+    {real_t} beta = asin(vp_ea_clamp_unit_preserve_nan(q / qp));
     {real_t} sin_beta, cos_beta;
     vp_native_sincos(beta, &sin_beta, &cos_beta);
+    if (fabs(phi) == ({real_t})0.5 * {pi}) {{
+        sin_beta = copysign(({real_t})1.0, phi);
+        cos_beta = ({real_t})0.0;
+    }}
     {real_t} sin_lam, cos_lam;
     vp_native_sincos(lam, &sin_lam, &cos_lam);
     {real_t} ex, ey;
     if (mode == 0) {{ // oblique
         {real_t} b = ({real_t})1.0 + sin_beta0 * sin_beta + cos_beta0 * cos_beta * cos_lam;
-        b = Rq * sqrt(({real_t})2.0 / fmax(b, ({real_t})1e-30));
-        ex = b * D * cos_beta * sin_lam;
-        ey = (b / D) * (cos_beta0 * sin_beta - sin_beta0 * cos_beta * cos_lam);
+        if (isnan(b)) {{
+            ex = ey = ({real_t})nan("");
+        }} else if (b <= ({real_t})1e-10) {{
+            ex = ey = ({real_t})(1.0 / 0.0);
+        }} else {{
+            b = Rq * sqrt(({real_t})2.0 / b);
+            ex = b * D * cos_beta * sin_lam;
+            ey = (b / D) * (cos_beta0 * sin_beta - sin_beta0 * cos_beta * cos_lam);
+        }}
     }} else if (mode == 1) {{ // equatorial
         {real_t} b = ({real_t})1.0 + cos_beta * cos_lam;
-        b = Rq * sqrt(({real_t})2.0 / fmax(b, ({real_t})1e-30));
-        ex = b * D * cos_beta * sin_lam;
-        ey = (b / D) * sin_beta;
+        if (isnan(b)) {{
+            ex = ey = ({real_t})nan("");
+        }} else if (b <= ({real_t})1e-10) {{
+            ex = ey = ({real_t})(1.0 / 0.0);
+        }} else {{
+            b = Rq * sqrt(({real_t})2.0 / b);
+            ex = b * D * cos_beta * sin_lam;
+            ey = (b / D) * sin_beta;
+        }}
     }} else if (mode == 2) {{ // north pole
-        {real_t} q_diff = qp - q;
-        if (q_diff < ({real_t})0.0) q_diff = ({real_t})0.0;
-        {real_t} rho = Rq * sqrt(q_diff);
-        ex = rho * sin_lam;
-        ey = -rho * cos_lam;
+        if (fabs(phi + ({real_t})0.5 * {pi}) <= ({real_t})1e-10) {{
+            ex = ey = ({real_t})(1.0 / 0.0);
+        }} else {{
+            {real_t} q_diff = qp - q;
+            if (q_diff < ({real_t})0.0) q_diff = ({real_t})0.0;
+            {real_t} rho = sqrt(q_diff);
+            ex = rho * sin_lam;
+            ey = -rho * cos_lam;
+        }}
     }} else {{ // south pole
-        {real_t} q_diff = qp + q;
-        if (q_diff < ({real_t})0.0) q_diff = ({real_t})0.0;
-        {real_t} rho = Rq * sqrt(q_diff);
-        ex = rho * sin_lam;
-        ey = rho * cos_lam;
+        if (fabs(phi - ({real_t})0.5 * {pi}) <= ({real_t})1e-10) {{
+            ex = ey = ({real_t})(1.0 / 0.0);
+        }} else {{
+            {real_t} q_diff = qp + q;
+            if (q_diff < ({real_t})0.0) q_diff = ({real_t})0.0;
+            {real_t} rho = sqrt(q_diff);
+            ex = rho * sin_lam;
+            ey = rho * cos_lam;
+        }}
+    }}
+    if (isnan(d_lat) || isnan(d_lon)) {{
+        ex = ey = ({real_t})nan("");
+    }} else if (!isfinite(d_lat) || !isfinite(d_lon)
+               || fabs(phi) > ({real_t})0.5 * {pi}) {{
+        ex = ey = ({real_t})(1.0 / 0.0);
     }}
     double easting  = (double)ex * (double)a + (double)x0;
     double northing = (double)ey * (double)a + (double)y0;
@@ -828,35 +921,63 @@ _LAEA_INVERSE_SOURCE = (
     + _INV_SIGNATURE.format(func="laea_inverse", real_t="{real_t}")
     + """
     int mode, {real_t} Rq, {real_t} D, {real_t} qp,
-    {real_t} sin_beta0, {real_t} cos_beta0, {real_t} e, {real_t} es,
+    {real_t} sin_beta0, {real_t} cos_beta0, {real_t} phi0, {real_t} e, {real_t} es,
     {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
     int src_north_first, int dst_north_first, int n
 ) {{"""
     + _INV_PREAMBLE
     + """
-    {real_t} x_adj = cx / D, y_adj = cy * D;
-    {real_t} rho = sqrt(x_adj * x_adj + y_adj * y_adj);
-    {real_t} sin_beta, lam;
-    if (mode == 0 || mode == 1) {{ // oblique or equatorial
-        {real_t} ce = ({real_t})2.0 * asin(fmin(fmax(rho / (({real_t})2.0 * Rq), ({real_t})-1.0), ({real_t})1.0));
-        {real_t} sin_ce, cos_ce;
-        vp_native_sincos(ce, &sin_ce, &cos_ce);
-        if (mode == 0) {{
-            sin_beta = cos_ce * sin_beta0 + y_adj * sin_ce * cos_beta0 / fmax(rho, ({real_t})1e-30);
-            lam = atan2(x_adj * sin_ce, rho * cos_beta0 * cos_ce - y_adj * sin_beta0 * sin_ce);
+    {real_t} raw_rho = hypot(cx, cy);
+    {real_t} phi, lam;
+    if (isnan(raw_rho)) {{
+        phi = lam = ({real_t})nan("");
+    }} else if (raw_rho == ({real_t})0.0) {{
+        // The projection center is independent of D and avoids 0/0 in the
+        // azimuth formulas (especially for an exact polar origin).
+        phi = phi0;
+        lam = ({real_t})0.0;
+    }} else {{
+        {real_t} sin_beta;
+        if (mode == 0 || mode == 1) {{ // oblique or equatorial
+            {real_t} x_adj = cx / D, y_adj = cy * D;
+            {real_t} rho = hypot(x_adj, y_adj);
+            if (rho > ({real_t})2.0 * Rq) {{
+                double invalid = 1.0 / 0.0;
+                if (dst_north_first) {{ out_x[idx] = invalid; out_y[idx] = invalid; }}
+                else                 {{ out_x[idx] = invalid; out_y[idx] = invalid; }}
+                return;
+            }}
+            {real_t} ce = ({real_t})2.0 * asin(rho / (({real_t})2.0 * Rq));
+            {real_t} sin_ce, cos_ce;
+            vp_native_sincos(ce, &sin_ce, &cos_ce);
+            if (mode == 0) {{
+                sin_beta = cos_ce * sin_beta0 + y_adj * sin_ce * cos_beta0 / rho;
+                lam = atan2(x_adj * sin_ce, rho * cos_beta0 * cos_ce - y_adj * sin_beta0 * sin_ce);
+            }} else {{
+                sin_beta = y_adj * sin_ce / rho;
+                lam = atan2(x_adj * sin_ce, rho * cos_ce);
+            }}
         }} else {{
-            sin_beta = y_adj * sin_ce / fmax(rho, ({real_t})1e-30);
-            lam = atan2(x_adj * sin_ce, rho * cos_ce);
+            // Polar modes use the unadjusted normalized coordinates. Applying
+            // D first corrupts exact +/-90-degree origins when host D is tiny.
+            {real_t} rho = raw_rho;
+            if (rho > sqrt(({real_t})2.0 * qp)) {{
+                double invalid = 1.0 / 0.0;
+                if (dst_north_first) {{ out_x[idx] = invalid; out_y[idx] = invalid; }}
+                else                 {{ out_x[idx] = invalid; out_y[idx] = invalid; }}
+                return;
+            }}
+            if (mode == 2) {{ // north pole
+                sin_beta = ({real_t})1.0 - (rho * rho) / qp;
+                lam = atan2(cx, -cy);
+            }} else {{ // south pole
+                sin_beta = (rho * rho) / qp - ({real_t})1.0;
+                lam = atan2(cx, cy);
+            }}
         }}
-    }} else if (mode == 2) {{ // north pole
-        sin_beta = ({real_t})1.0 - (rho * rho) / (Rq * Rq);
-        lam = atan2(cx, -cy);
-    }} else {{ // south pole
-        sin_beta = (rho * rho) / (Rq * Rq) - ({real_t})1.0;
-        lam = atan2(cx, cy);
+        {real_t} q = qp * vp_ea_clamp_unit_preserve_nan(sin_beta);
+        phi = phi_from_q(q, e, es, qp);
     }}
-    {real_t} q = qp * sin_beta;
-    {real_t} phi = phi_from_q(q, e, es);
 """
     + _INV_POSTAMBLE
     + "}}"
@@ -881,7 +1002,7 @@ _EQEARTH_FORWARD_SOURCE = (
     const {real_t} M = ({real_t})1.1547005383792515;  // 2*sqrt(3)/3
     // Geodetic -> authalic latitude
     {real_t} q = qsfn(sin(phi), e);
-    {real_t} beta = asin(fmin(fmax(q / qp, ({real_t})-1.0), ({real_t})1.0));
+    {real_t} beta = asin(vp_ea_clamp_unit_preserve_nan(q / qp));
     {real_t} theta = asin(SQRT3_2 * sin(beta));
     {real_t} t2 = theta * theta;
     {real_t} t6 = t2 * t2 * t2;
@@ -922,9 +1043,10 @@ _EQEARTH_INVERSE_SOURCE = (
     {real_t} d = A1 + ({real_t})3.0*A2*t2 + t6*(({real_t})7.0*A3 + ({real_t})9.0*A4*t2);
     {real_t} lam = cxs * d / (M * cos(theta));
     // Recover authalic latitude, then convert to geodetic via q-inversion
-    {real_t} sin_beta = fmin(fmax(sin(theta) * ({real_t})2.0 / ({real_t})1.7320508075688772935, ({real_t})-1.0), ({real_t})1.0);
+    {real_t} sin_beta = vp_ea_clamp_unit_preserve_nan(
+        sin(theta) * ({real_t})2.0 / ({real_t})1.7320508075688772935);
     {real_t} q = qp * sin_beta;
-    {real_t} phi = phi_from_q(q, e, es);
+    {real_t} phi = phi_from_q(q, e, es, qp);
 """
     + _INV_POSTAMBLE
     + "}}"
@@ -938,15 +1060,22 @@ _CEA_FORWARD_SOURCE = (
     _EA_DEVICE_FNS
     + _FWD_SIGNATURE.format(func="cea_forward", real_t="{real_t}")
     + """
-    {real_t} e, {real_t} k0, {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
+    {real_t} e, double d_qp, double d_k0,
+    double lam0, double a, double x0, double y0,
     int src_north_first, int dst_north_first, int n
 ) {{"""
     + _FWD_PREAMBLE
     + """
+    {real_t} k0 = ({real_t})d_k0;
     {real_t} sin_phi = sin(phi);
     {real_t} q = qsfn(sin_phi, e);
-    double easting  = (double)(lam * k0) * (double)a + (double)x0;
-    double northing = (double)(({real_t})0.5 * q / k0) * (double)a + (double)y0;
+    double easting = (double)(lam * k0) * a + x0;
+    double northing;
+    if (fabs(d_lat) == 90.0) {{
+        northing = (0.5 * copysign(d_qp, d_lat) / d_k0) * a + y0;
+    }} else {{
+        northing = (double)(({real_t})0.5 * q / k0) * a + y0;
+    }}
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -956,14 +1085,27 @@ _CEA_INVERSE_SOURCE = (
     _EA_DEVICE_FNS
     + _INV_SIGNATURE.format(func="cea_inverse", real_t="{real_t}")
     + """
-    {real_t} e, {real_t} es, {real_t} k0, {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
+    {real_t} e, {real_t} es, double d_qp, double d_k0,
+    {real_t} lam0, double a, double x0, double y0,
     int src_north_first, int dst_north_first, int n
 ) {{"""
     + _INV_PREAMBLE
     + """
+    double d_cy_domain = (d_northing - y0) / a;
+    double d_q = 2.0 * d_cy_domain * d_k0;
+    if (isfinite(d_q) && fabs(fabs(d_q) - d_qp) <= VP_EA_Q_POLE_SNAP_D) {{
+        d_q = copysign(d_qp, d_q);
+    }}
+    if (isfinite(d_arg1) && isfinite(d_arg2)
+        && (!isfinite(d_q) || fabs(d_q) > d_qp)) {{
+        out_x[idx] = out_y[idx] = 1.0 / 0.0;
+        return;
+    }}
+    {real_t} qp = ({real_t})d_qp;
+    {real_t} k0 = ({real_t})d_k0;
     {real_t} lam = cx / k0;
     {real_t} q = ({real_t})2.0 * cy * k0;
-    {real_t} phi = phi_from_q(q, e, es);
+    {real_t} phi = phi_from_q(q, e, es, qp);
 """
     + _INV_POSTAMBLE
     + "}}"
@@ -1474,59 +1616,124 @@ _STEREA_INVERSE_SOURCE = (
 # ===================================================================
 
 _GEOS_FORWARD_SOURCE = (
-    _FWD_SIGNATURE.format(func="geos_forward", real_t="{real_t}")
+    _GEOS_DEVICE_NUMERIC_CONTRACT
+    + _FWD_SIGNATURE.format(func="geos_forward", real_t="{real_t}")
     + """
-    {real_t} H, {real_t} h, {real_t} r_eq2, {real_t} r_pol2,
+    {real_t} H, {real_t} h, {real_t} r_eq2, {real_t} r_pol2, int sweep_x,
     {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
     int src_north_first, int dst_north_first, int n
 ) {{"""
     + _FWD_PREAMBLE
     + """
-    {real_t} phi_gc = atan(r_pol2 / r_eq2 * tan(phi));
-    {real_t} sin_pgc, cos_pgc;
-    vp_native_sincos(phi_gc, &sin_pgc, &cos_pgc);
-    // Geocentric earth radius (CGMS standard)
-    {real_t} r_pol = sqrt(r_pol2);
-    {real_t} r_earth = r_pol / sqrt(({real_t})1.0 - (r_eq2 - r_pol2) / r_eq2 * cos_pgc * cos_pgc);
-    {real_t} sin_l, cos_l;
-    vp_native_sincos(lam, &sin_l, &cos_l);
-    {real_t} Sx = H - r_earth * cos_pgc * cos_l;
-    {real_t} Sy = -r_earth * cos_pgc * sin_l;
-    {real_t} Sz = r_earth * sin_pgc;
-    // Sweep Y (GOES-R PUG): x = atan2(-Sy, Sx), y = asin(Sz/|S|)
-    {real_t} sn = sqrt(Sx*Sx + Sy*Sy + Sz*Sz);
-    double easting  = (double)atan2(-Sy, Sx) * (double)h + (double)x0;
-    double northing = (double)asin(fmin(fmax(Sz / sn, ({real_t})-1.0), ({real_t})1.0)) * (double)h + (double)y0;
+    {real_t} ex, ey;
+    if (isnan(d_lat) || isnan(d_lon)) {{
+        ex = ey = ({real_t})nan("");
+    }} else if (!isfinite(d_lat) || !isfinite(d_lon)
+               || fabs(phi) > ({real_t})VP_GEOS_SCAN_ANGLE_LIMIT) {{
+        ex = ey = ({real_t})(1.0 / 0.0);
+    }} else {{
+        {real_t} phi_gc = atan(r_pol2 / r_eq2 * tan(phi));
+        {real_t} sin_pgc, cos_pgc;
+        vp_native_sincos(phi_gc, &sin_pgc, &cos_pgc);
+        // Geocentric earth radius (CGMS standard).
+        {real_t} r_pol = sqrt(r_pol2);
+        {real_t} r_earth = r_pol / sqrt(({real_t})1.0 - (r_eq2 - r_pol2) / r_eq2 * cos_pgc * cos_pgc);
+        {real_t} sin_l, cos_l;
+        vp_native_sincos(lam, &sin_l, &cos_l);
+        {real_t} Vx = r_earth * cos_pgc * cos_l;
+        {real_t} Vy = r_earth * cos_pgc * sin_l;
+        {real_t} Vz = r_earth * sin_pgc;
+        {real_t} Sx = H - Vx;
+        // Points behind the ellipsoid are outside the satellite view. Keep
+        // PROJ's +inf sentinel instead of projecting them onto the limb.
+        {real_t} visibility = Sx * Vx - Vy * Vy - (r_eq2 / r_pol2) * Vz * Vz;
+        if (isnan(visibility)) {{
+            ex = ey = ({real_t})nan("");
+        }} else if (visibility < ({real_t})0.0) {{
+            ex = ey = ({real_t})(1.0 / 0.0);
+        }} else if (sweep_x) {{
+            ex = atan2(Vy, hypot(Sx, Vz));
+            ey = atan2(Vz, Sx);
+        }} else {{
+            ex = atan2(Vy, Sx);
+            ey = atan2(Vz, hypot(Sx, Vy));
+        }}
+    }}
+    double easting  = (double)ex * (double)h + (double)x0;
+    double northing = (double)ey * (double)h + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
 )
 
 _GEOS_INVERSE_SOURCE = (
-    _INV_SIGNATURE.format(func="geos_inverse", real_t="{real_t}")
+    _GEOS_DEVICE_NUMERIC_CONTRACT
+    + _INV_SIGNATURE.format(func="geos_inverse", real_t="{real_t}")
     + """
-    {real_t} H, {real_t} h, {real_t} r_eq2, {real_t} r_pol2,
+    {real_t} H, {real_t} h, {real_t} r_eq2, {real_t} r_pol2, int sweep_x,
     {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
     int src_north_first, int dst_north_first, int n
 ) {{"""
     + _INV_PREAMBLE
     + """
-    // cx = (easting - x0) / a, but physical coords are h * angle, so angle = cx * a / h
+    if (isnan(d_arg1) || isnan(d_arg2)) {{
+        double invalid = nan("");
+        if (dst_north_first) {{ out_x[idx] = invalid; out_y[idx] = invalid; }}
+        else                 {{ out_x[idx] = invalid; out_y[idx] = invalid; }}
+        return;
+    }}
+    if (!isfinite(d_arg1) || !isfinite(d_arg2)) {{
+        double invalid = 1.0 / 0.0;
+        if (dst_north_first) {{ out_x[idx] = invalid; out_y[idx] = invalid; }}
+        else                 {{ out_x[idx] = invalid; out_y[idx] = invalid; }}
+        return;
+    }}
+    // cx = (easting - x0) / a, but physical coords are h * angle, so angle = cx * a / h.
     {real_t} x_angle = cx * a / h, y_angle = cy * a / h;
+    if (fabs(x_angle) >= ({real_t})VP_GEOS_SCAN_ANGLE_LIMIT
+        || fabs(y_angle) >= ({real_t})VP_GEOS_SCAN_ANGLE_LIMIT) {{
+        double invalid = 1.0 / 0.0;
+        if (dst_north_first) {{ out_x[idx] = invalid; out_y[idx] = invalid; }}
+        else                 {{ out_x[idx] = invalid; out_y[idx] = invalid; }}
+        return;
+    }}
     {real_t} sx, cx2, sy, cy2;
     vp_native_sincos(x_angle, &sx, &cx2);
     vp_native_sincos(y_angle, &sy, &cy2);
-    // Sweep Y ray-ellipsoid intersection
-    {real_t} ac = cy2*cy2 + sy*sy*r_eq2/r_pol2;
-    {real_t} bc = ({real_t})-2.0*H*cy2*cx2;
-    {real_t} cc = H*H - a*a;
-    {real_t} disc = bc*bc - ({real_t})4.0*ac*cc;
-    disc = fmax(disc, ({real_t})0.0);
-    {real_t} rs = (-bc - sqrt(disc)) / (({real_t})2.0*ac);
-    // Reconstruct ground point (sweep Y)
-    {real_t} Px = H - rs*cy2*cx2;
-    {real_t} Py = rs*cy2*sx;
-    {real_t} Pz = rs*sy;
+    {real_t} Vx = cy2 * cx2;
+    {real_t} Vy = sweep_x ? sx : cy2 * sx;
+    {real_t} Vz = sweep_x ? cx2 * sy : sy;
+    {real_t} ac = Vx*Vx + Vy*Vy + Vz*Vz*r_eq2/r_pol2;
+    // Normalize the quadratic by H before forming its discriminant. The
+    // physical form subtracts two ~1e30 terms at the limb and can flip the
+    // sign solely from contraction/rounding. Track both product residuals so
+    // an exact tangent remains on-disk without clamping a real negative D.
+    {real_t} a_over_H = a / H;
+    {real_t} normalized_c = fma(-a_over_H, a_over_H, ({real_t})1.0);
+    {real_t} vx2 = Vx * Vx;
+    {real_t} vx2_error = fma(Vx, Vx, -vx2);
+    {real_t} ac_c = ac * normalized_c;
+    {real_t} ac_c_error = fma(ac, normalized_c, -ac_c);
+    {real_t} disc_hi = vx2 - ac_c;
+    {real_t} disc_lo = ((vx2 - disc_hi) - ac_c) + vx2_error - ac_c_error;
+    {real_t} disc = disc_hi + disc_lo;
+    // Native fp32 sincos/FMA leaves about -1.9e-8 at the quantized tangent;
+    // the next resolved outside bin is below -4.3e-7. This threshold accepts
+    // only that representational tangent bin, not a broad off-disk band.
+    const {real_t} discriminant_tolerance = sizeof({real_t}) == sizeof(float)
+        ? ({real_t})VP_GEOS_FP32_DISCRIMINANT_TOLERANCE
+        : ({real_t})VP_GEOS_FP64_DISCRIMINANT_TOLERANCE;
+    if (disc < -discriminant_tolerance || isnan(disc)) {{
+        double invalid = 1.0 / 0.0;
+        if (dst_north_first) {{ out_x[idx] = invalid; out_y[idx] = invalid; }}
+        else                 {{ out_x[idx] = invalid; out_y[idx] = invalid; }}
+        return;
+    }}
+    if (disc < ({real_t})0.0) disc = ({real_t})0.0;
+    {real_t} rs = H * (Vx - sqrt(disc)) / ac;
+    {real_t} Px = H - rs*Vx;
+    {real_t} Py = rs*Vy;
+    {real_t} Pz = rs*Vz;
     {real_t} lam = atan2(Py, Px);
     {real_t} phi = atan(Pz * r_eq2 / (sqrt(Px*Px+Py*Py) * r_pol2));
 """
@@ -2489,17 +2696,32 @@ def fused_transform(
             )
 
         elif projection_name == "aea":
-            args = _with_units(
-                real_t(computed["n"]),
-                real_t(computed["C"]),
-                real_t(computed["rho0"]),
-                real_t(computed["e"]),
-                real_t(computed["es"]),
-                real_t(computed["lam0"]),
-                real_t(computed["a"]),
-                real_t(computed["x0"]),
-                real_t(computed["y0"]),
-            )
+            if direction == "forward":
+                args = _with_units(
+                    np.float64(computed["n"]),
+                    np.float64(computed["C"]),
+                    np.float64(computed["rho0"]),
+                    real_t(computed["e"]),
+                    real_t(computed["es"]),
+                    np.float64(computed["qp"]),
+                    np.float64(computed["lam0"]),
+                    np.float64(computed["a"]),
+                    np.float64(computed["x0"]),
+                    np.float64(computed["y0"]),
+                )
+            else:
+                args = _with_units(
+                    np.float64(computed["n"]),
+                    np.float64(computed["C"]),
+                    np.float64(computed["rho0"]),
+                    real_t(computed["e"]),
+                    real_t(computed["es"]),
+                    np.float64(computed["qp"]),
+                    real_t(computed["lam0"]),
+                    np.float64(computed["a"]),
+                    np.float64(computed["x0"]),
+                    np.float64(computed["y0"]),
+                )
 
         elif projection_name == "laea":
             mode_map = {"oblique": 0, "equatorial": 1, "north_pole": 2, "south_pole": 3}
@@ -2510,6 +2732,7 @@ def fused_transform(
                 real_t(computed["qp"]),
                 real_t(computed["sin_beta0"]),
                 real_t(computed["cos_beta0"]),
+                real_t(computed["phi0"]),
                 real_t(computed["e"]),
                 real_t(computed["es"]),
                 real_t(computed["lam0"]),
@@ -2586,21 +2809,23 @@ def fused_transform(
             if direction == "forward":
                 args = _with_units(
                     real_t(computed["e"]),
-                    real_t(computed["k0"]),
-                    real_t(computed["lam0"]),
-                    real_t(computed["a"]),
-                    real_t(computed["x0"]),
-                    real_t(computed["y0"]),
+                    np.float64(computed["qp"]),
+                    np.float64(computed["k0"]),
+                    np.float64(computed["lam0"]),
+                    np.float64(computed["a"]),
+                    np.float64(computed["x0"]),
+                    np.float64(computed["y0"]),
                 )
             else:
                 args = _with_units(
                     real_t(computed["e"]),
                     real_t(computed["es"]),
-                    real_t(computed["k0"]),
+                    np.float64(computed["qp"]),
+                    np.float64(computed["k0"]),
                     real_t(computed["lam0"]),
-                    real_t(computed["a"]),
-                    real_t(computed["x0"]),
-                    real_t(computed["y0"]),
+                    np.float64(computed["a"]),
+                    np.float64(computed["x0"]),
+                    np.float64(computed["y0"]),
                 )
 
         elif projection_name in ("ortho", "gnom", "aeqd"):
@@ -2634,6 +2859,7 @@ def fused_transform(
                 real_t(computed["h"]),
                 real_t(computed["r_eq2"]),
                 real_t(computed["r_pol2"]),
+                np.int32(computed["sweep_axis"] == "x"),
                 real_t(computed["lam0"]),
                 real_t(computed["a"]),
                 real_t(computed["x0"]),

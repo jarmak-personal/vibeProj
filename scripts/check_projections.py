@@ -29,7 +29,8 @@ _PROJECTIONS_DIR = REPO_ROOT / "src" / "vibeproj" / "projections"
 _INIT_PY = _PROJECTIONS_DIR / "__init__.py"
 _FUSED_KERNELS = REPO_ROOT / "src" / "vibeproj" / "fused_kernels.py"
 
-# Files to skip when scanning projection modules
+# Public non-projection modules to skip when scanning projection modules.
+# Private helpers are excluded generically by their leading underscore.
 _SKIP_STEMS = {"__init__", "base"}
 
 
@@ -50,11 +51,11 @@ def _parse_module(path: Path) -> ast.AST:
 
 
 def _iter_projection_modules() -> list[Path]:
-    """Return all projection .py files (excluding __init__.py, base.py)."""
+    """Return public projection modules, excluding base and private helpers."""
     return sorted(
         p
         for p in _PROJECTIONS_DIR.glob("*.py")
-        if p.stem not in _SKIP_STEMS and "__pycache__" not in p.parts
+        if not p.stem.startswith("_") and p.stem not in _SKIP_STEMS and "__pycache__" not in p.parts
     )
 
 

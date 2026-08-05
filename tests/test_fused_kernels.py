@@ -755,15 +755,17 @@ def test_sterea_fused_roundtrip():
 # ---------------------------------------------------------------------------
 
 
-def _custom_roundtrip(proj_name, lat, lon, lat_0=0.0, atol=1e-6):
+def _custom_roundtrip(proj_name, lat, lon, lat_0=0.0, atol=1e-6, ellipsoid=None):
     from vibeproj.crs import ProjectionParams
     from vibeproj.ellipsoid import WGS84
     from vibeproj.pipeline import TransformPipeline
 
+    if ellipsoid is None:
+        ellipsoid = WGS84
     params = ProjectionParams(
-        projection_name=proj_name, ellipsoid=WGS84, lon_0=0.0, lat_0=lat_0, north_first=False
+        projection_name=proj_name, ellipsoid=ellipsoid, lon_0=0.0, lat_0=lat_0, north_first=False
     )
-    src = ProjectionParams(projection_name="longlat", ellipsoid=WGS84, north_first=True)
+    src = ProjectionParams(projection_name="longlat", ellipsoid=ellipsoid, north_first=True)
     x, y = TransformPipeline(src, params).transform(lat, lon, cp)
     lat2, lon2 = TransformPipeline(params, src).transform(x, y, cp)
     assert_allclose(cp.asnumpy(lat2), cp.asnumpy(lat), atol=atol)
@@ -798,12 +800,15 @@ def test_natearth_fused_roundtrip():
 
 
 def test_aeqd_fused_roundtrip():
+    from vibeproj.ellipsoid import SPHERE
+
     _custom_roundtrip(
         "aeqd",
         cp.array([40.0, 50.0, 45.0], dtype=cp.float64),
         cp.array([-5.0, 5.0, 0.0], dtype=cp.float64),
         lat_0=45.0,
         atol=1e-7,
+        ellipsoid=SPHERE,
     )
 
 

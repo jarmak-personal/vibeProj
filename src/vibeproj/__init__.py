@@ -32,12 +32,14 @@ def list_projections() -> dict[str, dict]:
         - "methods": list of pyproj method names that map to this projection
         - "fused": True if a GPU-accelerated fused kernel is available
     """
-    from vibeproj.crs import _METHOD_MAP
+    from vibeproj.crs import _METHOD_MAP, _NONPUBLIC_PROJECTION_METHODS
     from vibeproj.fused_kernels import _SUPPORTED
     from vibeproj.projections import PROJECTION_REGISTRY
 
     inverse_map: dict[str, list[str]] = {}
     for method, name in _METHOD_MAP.items():
+        if method in _NONPUBLIC_PROJECTION_METHODS:
+            continue
         inverse_map.setdefault(name, []).append(method)
 
     result = {}
@@ -89,6 +91,7 @@ def warm_up(
         detect_device_capability,
         normalize_compute_precision,
         normalize_transcendental_policy,
+        projection_strategy_domains,
         resolve_transcendental_strategy,
     )
 
@@ -111,11 +114,9 @@ def warm_up(
     for projection, direction in targets:
         if (projection, direction) == ("tmerc", "forward"):
             operation = TranscendentalOperation.TMERC_FORWARD
-            domains = ("global", "utm")
         else:
             operation = TranscendentalOperation.PROJECTION
-            domains = (f"{projection}.{direction}",)
-        for domain in domains:
+        for domain in projection_strategy_domains(projection, direction):
             implementation_id = resolve_transcendental_strategy(
                 operation,
                 transcendentals,

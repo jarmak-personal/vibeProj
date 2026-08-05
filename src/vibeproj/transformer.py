@@ -341,6 +341,7 @@ class Transformer:
             detect_device_capability,
             normalize_compute_precision,
             normalize_transcendental_policy,
+            projection_strategy_domain,
             resolve_transcendental_strategy,
         )
 
@@ -366,11 +367,11 @@ class Transformer:
         contexts: list[tuple[Any, str]] = []
 
         def add_projection(name: str, stage_direction: str, computed: dict) -> None:
+            domain = projection_strategy_domain(name, stage_direction, computed)
             if name == "tmerc" and stage_direction == "forward":
-                domain = "utm" if computed.get("is_utm", False) else "global"
                 contexts.append((TranscendentalOperation.TMERC_FORWARD, domain))
             else:
-                contexts.append((TranscendentalOperation.PROJECTION, f"{name}.{stage_direction}"))
+                contexts.append((TranscendentalOperation.PROJECTION, domain))
 
         helmert_context = (TranscendentalOperation.HELMERT, "global")
         if pipeline.mode == "forward":

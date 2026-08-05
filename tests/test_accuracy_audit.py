@@ -12,7 +12,7 @@ from pyproj import Transformer as PyProjTransformer
 
 from vibeproj import Transformer
 from vibeproj.crs import ProjectionParams
-from vibeproj.ellipsoid import WGS84
+from vibeproj.ellipsoid import SPHERE, WGS84
 from vibeproj.pipeline import TransformPipeline
 
 
@@ -288,30 +288,32 @@ class TestEPSGProjections:
 
 def _vibeproj_forward(proj_name, lat, lon, lat_0=0.0, lon_0=0.0, extra=None):
     """Run a vibeProj forward transform via TransformPipeline."""
+    ellipsoid = SPHERE if proj_name == "aeqd" else WGS84
     params = ProjectionParams(
         projection_name=proj_name,
-        ellipsoid=WGS84,
+        ellipsoid=ellipsoid,
         lon_0=lon_0,
         lat_0=lat_0,
         north_first=False,
         extra=extra or {},
     )
-    src = ProjectionParams(projection_name="longlat", ellipsoid=WGS84, north_first=True)
+    src = ProjectionParams(projection_name="longlat", ellipsoid=ellipsoid, north_first=True)
     pipe = TransformPipeline(src, params)
     return pipe.transform(lat, lon, np)
 
 
 def _vibeproj_inverse(proj_name, x, y, lat_0=0.0, lon_0=0.0, extra=None):
     """Run a vibeProj inverse transform via TransformPipeline."""
+    ellipsoid = SPHERE if proj_name == "aeqd" else WGS84
     params = ProjectionParams(
         projection_name=proj_name,
-        ellipsoid=WGS84,
+        ellipsoid=ellipsoid,
         lon_0=lon_0,
         lat_0=lat_0,
         north_first=False,
         extra=extra or {},
     )
-    src = ProjectionParams(projection_name="longlat", ellipsoid=WGS84, north_first=True)
+    src = ProjectionParams(projection_name="longlat", ellipsoid=ellipsoid, north_first=True)
     inv_pipe = TransformPipeline(params, src)
     return inv_pipe.transform(x, y, np)
 
