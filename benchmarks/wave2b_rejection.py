@@ -270,9 +270,7 @@ def reproduce_wave2b_rejection(n: int = DEFAULT_COORDINATES) -> dict[str, object
         "speedup_gate": SPEEDUP_GATE,
         "profiles": profiles,
         "research_results": results,
-        "reproduce_command": (
-            "uv run python benchmarks/wave2b_rejection.py --json /tmp/wave2b-rejection-summary.json"
-        ),
+        "reproduce_command": "uv run python benchmarks/wave2b_rejection.py",
         "rejected_implementations_retained": False,
     }
 
