@@ -102,8 +102,10 @@ print(t.explain_strategy(transcendentals="accelerated"))
 `transcendentals="accelerated"` uses an accuracy-qualified implementation when
 the transform and GPU are supported, and explicitly falls back to native math
 otherwise. Automatic acceleration currently covers bounded Helmert, forward
-UTM, sinusoidal-forward, and orthographic-forward operations on validated Ada
-`sm_89` consumer GPUs above their measured workload-size crossovers; Hopper and
+UTM, sinusoidal-forward, orthographic-forward, and spherical-equatorial
+orthographic-inverse operations on validated Ada `sm_89` consumer GPUs above
+their measured workload-size crossovers. Orthographic inverse starts at 524,288
+coordinates; the canonical policy matrix lists every threshold. Hopper and
 unmeasured devices remain native. A selected accelerated kernel may still take
 its guarded native branch for individual out-of-domain coordinates or a
 uniformly unsupported physical scale. See the

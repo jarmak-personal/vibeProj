@@ -58,7 +58,7 @@ shared native pairing helper (or the equivalent double-single helper).
 | `cea` | forward | `sin`, `atanh` | `phi`: unknown; spherical `e=0` uses exact `q=2sin(phi)` | none | `native.libdevice` | native only | T3 |
 | `cea` | inverse | iterative `atanh`, `asin` | exact authalic poles accepted within the shared `1e-10` representational band; material `|q|>qp` is atomically invalid | none | `native.libdevice` | native only | T3 |
 | `ortho` | forward | `sin`/`cos` of `phi` and `lambda` | kernel-boundary `phi`: unknown; accelerated atomic guard requires finite `|phi| <= pi/2`, wrapped `|lambda| <= pi`, and `0 < scale <= 6,400,000 m` | pair `phi`; pair `lambda` | `native.libdevice`, or `ortho.forward.fixed_q62` | qualified guarded implementation; native otherwise | T2 |
-| `ortho` | inverse | `sqrt`, clamped `asin`, `sin`/`cos`, `atan2` | central-angle `asin` input clamped; projected radius otherwise unknown | pair central angle | `native.libdevice` | paired native only | T3 |
+| `ortho` | inverse | `sqrt`, clamped `asin`, paired `sin`/`cos`, `atan2` | exact spherical-equatorial domain after CRS setup canonicalization; accelerated reframe requires finite non-axis `1e-16 < rho^2 <= 0.99`, `|phi_argument| <= 0.95`, and `0 < scale <= 6,400,000 m`; projected radius is otherwise unknown | algebraic `q=sqrt(1-rho^2)` removes the radial `asin` and paired trig | `native.libdevice`, or `ortho.inverse.guarded_reframe` | qualified only when canonical setup yields the equatorial origin scalar; center/near-center and other guard failures use exact native cold fallback | T2 |
 | `gnom` | forward | `sin`/`cos` of `phi` and `lambda` | `phi`: unknown; horizon denominator can approach zero | pair `phi`; pair `lambda` | `native.libdevice` | paired native only | T3 |
 | `gnom` | inverse | `sqrt`, `atan`, `sin`/`cos`, `asin`, `atan2` | projected radius unbounded; derived `asin` input not explicitly clamped | pair central angle | `native.libdevice` | paired native only | T3 |
 | `moll` | forward | `sin`; iterative `sin`/`cos`; output `sin`/`cos` | `phi`: unknown; converged `theta` bound not enforced in kernel | pair `2theta`; pair output `theta` | `native.libdevice` | paired native only | T3 |
@@ -102,6 +102,7 @@ The user-facing coverage matrix is intentionally narrower than the inventory:
 | `tmerc.forward.fixed_q62` | `tmerc` | forward UTM | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 256 | paired `sin`/`cos`, TM `atan2` correction, `asinh`; per-operation guards above |
 | `sinu.forward.fixed_q62` | `sinu` | forward | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 524,288 | Q1.62 `cos(phi)`; valid latitude/wrapped longitude and `0 < scale <= 6,400,000 m`, native otherwise |
 | `ortho.forward.fixed_q62` | `ortho` | forward | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 262,144 | Q1.62 paired `sin`/`cos`; atomic argument guard and `0 < scale <= 6,400,000 m`, native otherwise |
+| `ortho.inverse.guarded_reframe` | `ortho` | inverse, spherical equatorial only | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 524,288 | guarded algebraic reframe for normalized `1e-16 < rho^2 <= 0.99`; center/near-center, axes, horizon/outside, non-finite, scale, and conditioning failures call the exact native expression |
 
 `tests/test_transcendental_coverage.py` binds these IDs and capabilities to
 the public registry and resolver. Adding a documented accelerated row without
@@ -292,6 +293,37 @@ dense proof measured 3.725290298 nm maximum error for sinusoidal and
 2.832507030 nm across orthographic origins `{-90, -45, 0, 45, 90}`. The exact
 ceiling and its nextafter-below value retain Q1.62; nextafter-above, `1e12`,
 zero, negative, infinity, and NaN scales execute bitwise-native uniformly.
+
+### Wave 2A Orthographic inverse qualification evidence
+
+The spherical-equatorial inverse reframe passed on the RTX 4090 over a
+three-repeat synchronized public-call and CUDA-event full-valid-disk grid from
+1 through 5,000,000 coordinates. At 5,000,000 coordinates, public repeat
+speedups were 1.1344x, 1.1349x, and 1.1341x, with a 1.1341x median kernel
+speedup. The maximum and p99 native-relative errors were 6.328 nm and 1.584 nm.
+The candidate uses
+36 registers, 56 bytes local memory, zero shared memory, and retained 100%
+calculated thread occupancy at 256 threads/block (native: 35 registers and
+40 bytes local).
+
+The conservative automatic threshold is 524,288, the first tested size whose
+three actual-public repeats all reached the 1.05x gate (1.0626x, 1.0570x, and
+1.0600x); every larger tested size also passed. The final confirmation run
+measured 1.0581x, 1.0608x, and 1.0588x at that boundary. Smaller and mid-sized inputs
+failed that per-repeat gate, so `auto` stays native below 524,288. Scale sweeps through the exact
+6,400,000 m ceiling preserve the 10 nm contract; nextafter-above and larger
+scales, plus center, axes/signed zero, horizon/outside-disk, and non-finite
+inputs, are bitwise-native. Production-shaped AEQD forward/inverse and bounded
+rational Orthographic alternatives were slower (and both AEQD forward forms
+also exceeded 10 nm), so their CUDA paths were removed and only their no-go
+measurements remain in the benchmark artifact.
+
+A warp-uniform vote prevents sparse invalid lanes from serializing the fast and
+native bodies. Random-lane fallback sweeps at 0%, 0.1%, 1%, 10%, 50%, and 100%
+measured synchronized speedups of 1.496x, 1.446x, 1.236x, 0.925x, 0.918x, and
+0.912x, respectively, with every fallback lane bitwise-native. These adversarial
+mixtures are retained as observability evidence; normal qualified interior data
+drives the public crossover.
 
 ### Go/no-go gates
 

@@ -22,6 +22,8 @@ from vibeproj.transcendentals import (
     NATIVE_LIBDEVICE,
     ORTHO_FORWARD_FIXED_Q62,
     ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+    ORTHO_INVERSE_GUARDED_REFRAME,
+    ORTHO_INVERSE_GUARDED_REFRAME_MIN_ELEMENTS,
     PROJECTION_FIXED_Q62_MAX_SCALE_M,
     SINU_FORWARD_FIXED_Q62,
     SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
@@ -108,6 +110,14 @@ EXPECTED_REGISTRY_MATRIX = frozenset(
             ((8, 9),),
             ("auto", "fp64"),
             ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+        ),
+        (
+            ORTHO_INVERSE_GUARDED_REFRAME,
+            TranscendentalOperation.PROJECTION,
+            ("ortho.inverse.spherical.equatorial",),
+            ((8, 9),),
+            ("auto", "fp64"),
+            ORTHO_INVERSE_GUARDED_REFRAME_MIN_ELEMENTS,
         ),
         (
             HELMERT_FIXED_Q62,
@@ -352,6 +362,12 @@ def test_resolver_reuses_decisions_but_keys_cache_by_complete_device_context():
             ORTHO_FORWARD_DOMAIN,
             ORTHO_FORWARD_FIXED_Q62,
             ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+        ),
+        (
+            TranscendentalOperation.PROJECTION,
+            "ortho.inverse.spherical.equatorial",
+            ORTHO_INVERSE_GUARDED_REFRAME,
+            ORTHO_INVERSE_GUARDED_REFRAME_MIN_ELEMENTS,
         ),
     ],
 )
@@ -654,6 +670,7 @@ def test_documented_auto_thresholds_match_registry_exactly():
     expected = {
         HELMERT_FIXED_Q62: HELMERT_FIXED_Q62_MIN_ELEMENTS,
         ORTHO_FORWARD_FIXED_Q62: ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+        ORTHO_INVERSE_GUARDED_REFRAME: ORTHO_INVERSE_GUARDED_REFRAME_MIN_ELEMENTS,
         SINU_FORWARD_FIXED_Q62: SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
         TMERC_FIXED_Q62: TMERC_FIXED_Q62_MIN_ELEMENTS,
     }
@@ -670,6 +687,28 @@ def test_documented_auto_thresholds_match_registry_exactly():
                 if line.startswith(f"| `{implementation_id}` |")
             )
             assert f"| {min_elements:,} |" in row
+
+
+def test_benchmark_enforced_grid_error_reports_current_default_bounds(monkeypatch, capsys):
+    benchmark_module = _load_policy_benchmark_module()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "bench_transcendental_policy.py",
+            "--case",
+            "ortho-inverse",
+            "--enforce-gates",
+            "--workload-sizes",
+            "32,5000000",
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="2"):
+        benchmark_module.main()
+
+    message = capsys.readouterr().err
+    assert "every default workload size from 1 to 5000000" in message
 
 
 def test_wave1_benchmark_specs_enforce_complete_public_qualification_surface():

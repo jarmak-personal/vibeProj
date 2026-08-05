@@ -19,6 +19,8 @@ from vibeproj.transcendentals import (
     NATIVE_LIBDEVICE,
     ORTHO_FORWARD_FIXED_Q62,
     ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+    ORTHO_INVERSE_GUARDED_REFRAME,
+    ORTHO_INVERSE_GUARDED_REFRAME_MIN_ELEMENTS,
     SINU_FORWARD_FIXED_Q62,
     SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
     TMERC_FIXED_Q62,
@@ -109,6 +111,7 @@ def test_registry_is_immutable_and_contains_stable_ids():
         NATIVE_LIBDEVICE,
         HELMERT_FIXED_Q62,
         ORTHO_FORWARD_FIXED_Q62,
+        ORTHO_INVERSE_GUARDED_REFRAME,
         SINU_FORWARD_FIXED_Q62,
         TMERC_FIXED_Q62,
     }
@@ -818,13 +821,25 @@ def test_warm_up_resolves_every_requested_projection_direction(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("precision", "policy", "expected_sinu", "expected_ortho"),
+    ("precision", "policy", "expected_sinu", "expected_ortho", "expected_ortho_inverse"),
     [
-        ("auto", "auto", SINU_FORWARD_FIXED_Q62, ORTHO_FORWARD_FIXED_Q62),
-        ("fp64", "accelerated", SINU_FORWARD_FIXED_Q62, ORTHO_FORWARD_FIXED_Q62),
-        ("fp32", "accelerated", NATIVE_LIBDEVICE, NATIVE_LIBDEVICE),
-        ("ds", "accelerated", NATIVE_LIBDEVICE, NATIVE_LIBDEVICE),
-        ("fp64", "native", NATIVE_LIBDEVICE, NATIVE_LIBDEVICE),
+        (
+            "auto",
+            "auto",
+            SINU_FORWARD_FIXED_Q62,
+            ORTHO_FORWARD_FIXED_Q62,
+            ORTHO_INVERSE_GUARDED_REFRAME,
+        ),
+        (
+            "fp64",
+            "accelerated",
+            SINU_FORWARD_FIXED_Q62,
+            ORTHO_FORWARD_FIXED_Q62,
+            ORTHO_INVERSE_GUARDED_REFRAME,
+        ),
+        ("fp32", "accelerated", NATIVE_LIBDEVICE, NATIVE_LIBDEVICE, NATIVE_LIBDEVICE),
+        ("ds", "accelerated", NATIVE_LIBDEVICE, NATIVE_LIBDEVICE, NATIVE_LIBDEVICE),
+        ("fp64", "native", NATIVE_LIBDEVICE, NATIVE_LIBDEVICE, NATIVE_LIBDEVICE),
     ],
 )
 def test_wave1_warm_up_matrix_keeps_companion_inverses_native(
@@ -833,6 +848,7 @@ def test_wave1_warm_up_matrix_keeps_companion_inverses_native(
     policy,
     expected_sinu,
     expected_ortho,
+    expected_ortho_inverse,
 ):
     observed = []
     monkeypatch.setattr("vibeproj.transcendentals.detect_device_capability", lambda: ADA)
@@ -850,11 +866,42 @@ def test_wave1_warm_up_matrix_keeps_companion_inverses_native(
     assert observed == [
         (
             ("ortho", "forward", expected_ortho),
-            ("ortho", "inverse", NATIVE_LIBDEVICE),
+            ("ortho", "inverse", expected_ortho_inverse),
             ("sinu", "forward", expected_sinu),
             ("sinu", "inverse", NATIVE_LIBDEVICE),
         )
     ]
+
+
+@pytest.mark.parametrize(
+    ("requested_lat_0", "canonical_lat_0", "expected_implementation"),
+    [
+        (0.0, 0.0, ORTHO_INVERSE_GUARDED_REFRAME),
+        (1e-9, 0.0, ORTHO_INVERSE_GUARDED_REFRAME),
+        (-1e-9, 0.0, ORTHO_INVERSE_GUARDED_REFRAME),
+        (1e-8, 1e-8, NATIVE_LIBDEVICE),
+        (-1e-8, -1e-8, NATIVE_LIBDEVICE),
+    ],
+)
+def test_ortho_inverse_canonicalized_origin_controls_public_selection(
+    requested_lat_0,
+    canonical_lat_0,
+    expected_implementation,
+):
+    target = f"+proj=ortho +lat_0={requested_lat_0:.17g} +lon_0=0 +R=6378137 +units=m +type=crs"
+    transformer = Transformer.from_crs(target, "+proj=longlat +R=6378137 +type=crs")
+    pipeline = transformer._pipeline_for_direction("FORWARD")
+
+    explanation = transformer.explain_strategy(
+        transcendentals="auto",
+        precision="fp64",
+        workload_size=ORTHO_INVERSE_GUARDED_REFRAME_MIN_ELEMENTS,
+        device=ADA,
+    )
+
+    assert pipeline.proj_params.lat_0 == canonical_lat_0
+    assert pipeline.computed["_strategy_latitude_origin"] == canonical_lat_0
+    assert explanation.decisions[0].implementation_id == expected_implementation
 
 
 def test_compile_collects_both_directions_of_projected_pipeline(monkeypatch):

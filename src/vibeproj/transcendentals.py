@@ -22,11 +22,13 @@ HELMERT_FIXED_Q62 = "helmert.fixed_q62"
 TMERC_FIXED_Q62 = "tmerc.forward.fixed_q62"
 SINU_FORWARD_FIXED_Q62 = "sinu.forward.fixed_q62"
 ORTHO_FORWARD_FIXED_Q62 = "ortho.forward.fixed_q62"
+ORTHO_INVERSE_GUARDED_REFRAME = "ortho.inverse.guarded_reframe"
 PROJECTION_FIXED_Q62_MAX_SCALE_M = 6_400_000.0
 TMERC_FIXED_Q62_MIN_ELEMENTS = 256
 HELMERT_FIXED_Q62_MIN_ELEMENTS = 131_072
 SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS = 524_288
 ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS = 262_144
+ORTHO_INVERSE_GUARDED_REFRAME_MIN_ELEMENTS = 524_288
 
 _EXACT_DOMAIN_FAMILIES = frozenset({"aeqd", "geos", "laea", "ortho", "stere", "sterea"})
 
@@ -307,6 +309,33 @@ _REGISTRY = (
                 "fallback outside the guarded domain or above 6,400,000 m physical "
                 "scale. Final public WGS84 maximum/p99 horizontal error: "
                 "2.033106/1.396984 nm."
+            ),
+        ),
+        native_fallback=True,
+    ),
+    StrategyImplementation(
+        implementation_id=ORTHO_INVERSE_GUARDED_REFRAME,
+        operation=TranscendentalOperation.PROJECTION,
+        family="qualified_ortho_inverse_reframe",
+        supported_policies=("auto", "accelerated"),
+        supported_backends=("cuda",),
+        supported_compute_capabilities=((8, 9),),
+        min_fp32_to_fp64_ratio=16,
+        supported_compute_precisions=("auto", "fp64"),
+        min_elements=ORTHO_INVERSE_GUARDED_REFRAME_MIN_ELEMENTS,
+        domains=("ortho.inverse.spherical.equatorial",),
+        accuracy=AccuracyContract(
+            reference=NATIVE_LIBDEVICE,
+            max_horizontal_error_m=1e-8,
+            max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+            notes=(
+                "Qualified spherical equatorial orthographic inverse algebraic "
+                "reframe for finite non-axis points with normalized "
+                "1e-16 < rho^2 <= 0.99. Center and the rho^2 <= 1e-16 near-center "
+                "band, axes, horizon/outside-disk, non-finite, larger-scale, and "
+                "ill-conditioned output-latitude inputs use exact native fallback. "
+                "Final RTX 4090 full-valid-disk maximum/p99 horizontal error: "
+                "6.328/1.584 nm."
             ),
         ),
         native_fallback=True,
@@ -722,6 +751,8 @@ __all__ = [
     "NATIVE_LIBDEVICE",
     "ORTHO_FORWARD_FIXED_Q62",
     "ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS",
+    "ORTHO_INVERSE_GUARDED_REFRAME",
+    "ORTHO_INVERSE_GUARDED_REFRAME_MIN_ELEMENTS",
     "PROJECTION_FIXED_Q62_MAX_SCALE_M",
     "ProjectionImplementation",
     "SINU_FORWARD_FIXED_Q62",

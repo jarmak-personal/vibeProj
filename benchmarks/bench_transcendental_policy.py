@@ -39,6 +39,8 @@ from vibeproj.transcendentals import (
     NATIVE_LIBDEVICE,
     ORTHO_FORWARD_FIXED_Q62,
     ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+    ORTHO_INVERSE_GUARDED_REFRAME,
+    ORTHO_INVERSE_GUARDED_REFRAME_MIN_ELEMENTS,
     PROJECTION_FIXED_Q62_MAX_SCALE_M,
     SINU_FORWARD_FIXED_Q62,
     SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
@@ -50,6 +52,8 @@ from vibeproj.transcendentals import (
 POLICIES = ("native", "accelerated", "auto")
 EARTH_RADIUS_M = 6_378_137.0
 DEFAULT_WORKLOAD_SIZES = (
+    1,
+    8,
     32,
     64,
     128,
@@ -136,6 +140,15 @@ QUALIFICATION_SPECS = {
         coordinate_contract_m=1e-8,
         max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
     ),
+    "ortho-inverse": QualificationSpec(
+        implementation_id=ORTHO_INVERSE_GUARDED_REFRAME,
+        operation="projection",
+        domain="ortho.inverse.spherical.equatorial",
+        direction="inverse",
+        min_elements=ORTHO_INVERSE_GUARDED_REFRAME_MIN_ELEMENTS,
+        coordinate_contract_m=1e-8,
+        max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+    ),
 }
 CASES = tuple(QUALIFICATION_SPECS)
 WORKLOAD_GRID_CASES = tuple(
@@ -143,6 +156,36 @@ WORKLOAD_GRID_CASES = tuple(
     for name, qualification in QUALIFICATION_SPECS.items()
     if qualification.implementation_id != NATIVE_LIBDEVICE
 )
+
+# Retained no-go evidence from the Wave 2A production-shaped candidates. The
+# corresponding private CUDA paths were removed after measurement; none can be
+# selected by the registry. Times are 1M-coordinate fused medians on RTX 4090.
+WAVE2A_REJECTED_CANDIDATES = {
+    "aeqd.forward.bounded_acos": {
+        "native_ms": [0.288, 0.292],
+        "candidate_ms": [0.390, 0.394],
+        "max_error_m": [1.67e-6, 2.73e-6],
+        "reason": "slower and exceeds the 1e-8 m native-relative contract",
+    },
+    "aeqd.forward.reduced_half_angle_scale": {
+        "native_ms": [0.288, 0.292],
+        "candidate_ms": [0.318, 0.322],
+        "max_error_m": [2.77e-8, 3.00e-8],
+        "reason": "slower and exceeds the 1e-8 m native-relative contract",
+    },
+    "aeqd.inverse.bounded_asin_q62_sincos": {
+        "native_ms": [0.302, 0.305],
+        "candidate_ms": [0.628, 0.695],
+        "max_error_m": [3.8e-9, 6.4e-9],
+        "reason": "accuracy passes but synchronized kernel execution is substantially slower",
+    },
+    "ortho.inverse.bounded_rational": {
+        "native_ms": 0.3843,
+        "candidate_ms": 0.6042,
+        "max_error_m": 6.77e-9,
+        "reason": "accuracy passes but mixed guarded execution is slower",
+    },
+}
 
 
 def _qualification_workload_sizes(
@@ -497,6 +540,67 @@ def _prepare_ortho_forward(cp: Any, n: int, rng: np.random.Generator) -> Benchma
     )
 
 
+def _prepare_ortho_inverse(cp: Any, n: int, rng: np.random.Generator) -> BenchmarkCase:
+    """Prepare the proved spherical-equatorial interior disk and guard edges."""
+    from vibeproj import Transformer
+
+    radius = EARTH_RADIUS_M
+    target_crs = "+proj=ortho +lat_0=0 +lon_0=0 +R=6378137 +units=m +type=crs"
+    rho = np.sqrt(rng.uniform(1e-16, np.nextafter(1.0, 0.0), n)) * radius
+    azimuth = rng.uniform(-math.pi, math.pi, n)
+    easting = (rho * np.cos(azimuth)).astype(np.float64)
+    northing = (rho * np.sin(azimuth)).astype(np.float64)
+    guard_radius = math.sqrt(0.99) * radius
+    edge_easting = np.asarray(
+        [
+            0.0,
+            -0.0,
+            0.5 * radius,
+            -0.5 * radius,
+            0.0,
+            guard_radius,
+            np.nextafter(guard_radius, math.inf),
+            radius,
+            np.nextafter(radius, math.inf),
+            1.1 * radius,
+            math.inf,
+            -math.inf,
+            math.nan,
+        ],
+        dtype=np.float64,
+    )
+    edge_northing = np.asarray(
+        [0.0, -0.0, 0.0, 0.0, 0.5 * radius] + [0.0] * 8,
+        dtype=np.float64,
+    )
+    return BenchmarkCase(
+        name="ortho-inverse",
+        family="ortho",
+        direction="FORWARD",
+        transformer=Transformer.from_crs(target_crs, _SPHERICAL_LONG_LAT_CRS, always_xy=True),
+        input_x=cp.asarray(easting),
+        input_y=cp.asarray(northing),
+        host_x=easting,
+        host_y=northing,
+        edge_host_x=edge_easting,
+        edge_host_y=edge_northing,
+        domain={
+            "crs": f"{target_crs} -> {_SPHERICAL_LONG_LAT_CRS}",
+            "normalized_rho_squared_sampling_interval": "[1e-16, 1.0)",
+            "accelerated_guard": "1e-16 < rho_squared <= 0.99; non-axis finite points",
+            "origin_mode": "equatorial",
+        },
+        edges={
+            "easting_m": _json_edge_values(edge_easting),
+            "northing_m": _json_edge_values(edge_northing),
+        },
+        output_is_geographic=True,
+        oracle_from_crs=target_crs,
+        oracle_to_crs=_SPHERICAL_LONG_LAT_CRS,
+        qualification=QUALIFICATION_SPECS["ortho-inverse"],
+    )
+
+
 def _prepare_case(cp: Any, name: str, n: int, seed: int) -> BenchmarkCase:
     rng = np.random.default_rng(seed)
     if name == "tmerc-forward":
@@ -511,6 +615,8 @@ def _prepare_case(cp: Any, name: str, n: int, seed: int) -> BenchmarkCase:
         return _prepare_sinu_forward(cp, n, rng)
     if name == "ortho-forward":
         return _prepare_ortho_forward(cp, n, rng)
+    if name == "ortho-inverse":
+        return _prepare_ortho_inverse(cp, n, rng)
     raise ValueError(f"Unknown benchmark case: {name}")
 
 
@@ -772,6 +878,124 @@ def _capture_cuda_graph(
     }
 
 
+def _kernel_resources(cp: Any, case: BenchmarkCase) -> dict[str, Any]:
+    """Report compiled resource usage and block occupancy for exact variants."""
+    from vibeproj.fused_kernels import _get_helmert_kernel, _get_kernel
+
+    device_properties = cp.cuda.runtime.getDeviceProperties(int(cp.cuda.Device().id))
+    threads_per_sm = int(device_properties["maxThreadsPerMultiProcessor"])
+    result = {}
+    for label, implementation_id in (
+        ("native", NATIVE_LIBDEVICE),
+        ("accelerated", case.qualification.implementation_id),
+    ):
+        if case.family == "helmert":
+            kernel = _get_helmert_kernel(implementation_id)
+        else:
+            kernel = _get_kernel(
+                case.family,
+                case.qualification.direction,
+                "float64",
+                transcendental_impl=implementation_id,
+            )
+        kernel.compile()
+        active_blocks = int(
+            cp.cuda.driver.occupancyMaxActiveBlocksPerMultiprocessor(kernel.kernel.ptr, 256, 0)
+        )
+        result[label] = {
+            "attributes": {key: int(value) for key, value in kernel.attributes.items()},
+            "active_blocks_per_sm_at_256_threads": active_blocks,
+            "thread_occupancy_fraction": min(1.0, active_blocks * 256 / threads_per_sm),
+        }
+    return result
+
+
+def _ortho_inverse_fallback_sweep(
+    cp: Any,
+    case: BenchmarkCase,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    """Measure deliberately mixed per-lane native fallback percentages."""
+    if case.name != "ortho-inverse":
+        return {"required": False, "rows": []}
+
+    n = min(args.n, 1_000_000)
+    rng = np.random.default_rng(args.seed + 50_000)
+    azimuth = rng.uniform(-math.pi, math.pi, n)
+    safe_radius = np.sqrt(rng.uniform(0.05, 0.88, n)) * EARTH_RADIUS_M
+    safe_x = safe_radius * np.cos(azimuth)
+    safe_y = safe_radius * np.sin(azimuth)
+    fallback_radius = (
+        np.sqrt(rng.uniform(np.nextafter(0.99, math.inf), np.nextafter(1.0, 0.0), n))
+        * EARTH_RADIUS_M
+    )
+    fallback_x = fallback_radius * np.cos(azimuth)
+    fallback_y = fallback_radius * np.sin(azimuth)
+    rows = []
+    for fallback_fraction in (0.0, 0.001, 0.01, 0.10, 0.50, 1.0):
+        fallback_count = round(fallback_fraction * n)
+        mask = np.zeros(n, dtype=bool)
+        if fallback_count:
+            mask[rng.choice(n, size=fallback_count, replace=False)] = True
+        input_x = cp.asarray(np.where(mask, fallback_x, safe_x))
+        input_y = cp.asarray(np.where(mask, fallback_y, safe_y))
+        outputs = {
+            policy: (cp.empty(n, dtype=cp.float64), cp.empty(n, dtype=cp.float64))
+            for policy in ("native", "accelerated")
+        }
+
+        def invoke(policy: str) -> None:
+            case.transformer.transform_buffers(
+                input_x,
+                input_y,
+                direction=case.direction,
+                out_x=outputs[policy][0],
+                out_y=outputs[policy][1],
+                precision=args.precision,
+                transcendentals=policy,
+            )
+
+        timing = _time_synchronized_wall_interleaved(
+            cp,
+            {policy: lambda policy=policy: invoke(policy) for policy in outputs},
+            n=n,
+            warmup=min(args.warmup, 5),
+            iterations=min(args.iterations, 20),
+            repeats=args.repeats,
+        )
+        invoke("native")
+        invoke("accelerated")
+        cp.cuda.get_current_stream().synchronize()
+        native = tuple(cp.asnumpy(value) for value in outputs["native"])
+        accelerated = tuple(cp.asnumpy(value) for value in outputs["accelerated"])
+        fallback_bitwise_native = bool(
+            all(
+                np.array_equal(actual[mask].view(np.uint64), expected[mask].view(np.uint64))
+                for actual, expected in zip(accelerated, native, strict=True)
+            )
+        )
+        rows.append(
+            {
+                "fallback_fraction": fallback_fraction,
+                "fallback_count": fallback_count,
+                "timing": timing,
+                "fallback_lanes_bitwise_native": fallback_bitwise_native,
+            }
+        )
+    return {
+        "required": True,
+        "n": n,
+        "pattern": (
+            "random lane mixture; fallback points are valid outer-disk coordinates "
+            "with 0.99 < normalized rho_squared < 1.0"
+        ),
+        "rows": rows,
+        "all_fallback_lanes_bitwise_native": all(
+            row["fallback_lanes_bitwise_native"] for row in rows
+        ),
+    }
+
+
 def _coordinate_error(
     actual_x: np.ndarray,
     actual_y: np.ndarray,
@@ -872,26 +1096,35 @@ def _scale_guard_behavior(cp: Any, case: BenchmarkCase, precision: str) -> dict[
 
     from vibeproj import Transformer
 
-    longitude_host = np.asarray([-180.0, -120.0, 0.0, 120.0, 180.0, np.inf, np.nan])
-    latitude_host = np.asarray([-90.0, -45.0, 0.0, 45.0, 90.0, 40.0, 40.0])
-    longitude = cp.asarray(longitude_host)
-    latitude = cp.asarray(latitude_host)
     probes = []
     for raw_scale in (np.nextafter(maximum_scale, math.inf), 1e12):
         physical_scale = float(raw_scale)
         source_crs = f"+proj=longlat +R={physical_scale:.17g} +type=crs"
         projection_parameters = f"+proj={case.family} +lon_0=0"
         if case.family == "ortho":
-            projection_parameters += " +lat_0=45"
+            projection_parameters += " +lat_0=0" if case.name == "ortho-inverse" else " +lat_0=45"
         target_crs = f"{projection_parameters} +R={physical_scale:.17g} +units=m +type=crs"
-        transformer = Transformer.from_crs(source_crs, target_crs, always_xy=True)
+        if case.name == "ortho-inverse":
+            transformer = Transformer.from_crs(target_crs, source_crs, always_xy=True)
+            first_host = (
+                np.asarray([0.1, -0.3, 0.7, 0.0, np.inf, np.nan], dtype=np.float64) * physical_scale
+            )
+            second_host = (
+                np.asarray([0.2, 0.4, -0.1, 0.0, 0.0, 0.0], dtype=np.float64) * physical_scale
+            )
+        else:
+            transformer = Transformer.from_crs(source_crs, target_crs, always_xy=True)
+            first_host = np.asarray([-180.0, -120.0, 0.0, 120.0, 180.0, np.inf, np.nan])
+            second_host = np.asarray([-90.0, -45.0, 0.0, 45.0, 90.0, 40.0, 40.0])
+        first = cp.asarray(first_host)
+        second = cp.asarray(second_host)
         outputs = {}
         for policy in ("native", "accelerated"):
-            out_x = cp.empty(longitude.size, dtype=cp.float64)
-            out_y = cp.empty(latitude.size, dtype=cp.float64)
+            out_x = cp.empty(first.size, dtype=cp.float64)
+            out_y = cp.empty(second.size, dtype=cp.float64)
             transformer.transform_buffers(
-                longitude,
-                latitude,
+                first,
+                second,
                 out_x=out_x,
                 out_y=out_y,
                 precision=precision,
@@ -909,7 +1142,7 @@ def _scale_guard_behavior(cp: Any, case: BenchmarkCase, precision: str) -> dict[
             "accelerated",
             "FORWARD",
             precision=precision,
-            workload_size=int(longitude.size),
+            workload_size=int(first.size),
         )
         strategy_remains_selected = strategy["implementation_ids"] == [
             case.qualification.implementation_id
@@ -1026,6 +1259,8 @@ def _run_case(cp: Any, case: BenchmarkCase, args: argparse.Namespace) -> dict[st
     }
     edge_error_vs_native = _edge_accuracy(cp, case, args.precision)
     scale_guard = _scale_guard_behavior(cp, case, args.precision)
+    kernel_resources = _kernel_resources(cp, case)
+    fallback_sweep = _ortho_inverse_fallback_sweep(cp, case, args)
 
     strategies = {
         policy: _resolved_strategy(
@@ -1140,6 +1375,8 @@ def _run_case(cp: Any, case: BenchmarkCase, args: argparse.Namespace) -> dict[st
         "scale_guard": scale_guard,
         "error_vs_pyproj_m": errors_vs_pyproj,
         "instrumentation": instrumentation,
+        "kernel_resources": kernel_resources,
+        "fallback_sweep": fallback_sweep,
         "hot_path": {
             "preallocated_outputs": True,
             "expected_kernel_nodes": qualification.expected_kernel_nodes,
@@ -1475,6 +1712,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "qualification_specs": {
                 name: asdict(specification) for name, specification in QUALIFICATION_SPECS.items()
             },
+            "wave2a_rejected_candidates": WAVE2A_REJECTED_CANDIDATES,
+            "ortho_inverse_threshold_note": (
+                "N=524288 is the first tested size whose three actual-public repeats "
+                "all reached the 1.05 gate in the retained qualification runs; every "
+                "larger tested size also passed, so the conservative auto threshold "
+                "is 524288."
+            ),
             "workload_grid_includes_threshold_boundaries": True,
             "interleaved_cuda_events": True,
             "cuda_event_measurement": "device execution between CUDA events",
@@ -1532,7 +1776,8 @@ def main() -> None:
         )
     if args.enforce_gates and not set(DEFAULT_WORKLOAD_SIZES).issubset(args.workload_sizes):
         parser.error(
-            "--enforce-gates requires every default logarithmic workload size from 32 to 5000000"
+            "--enforce-gates requires every default workload size from "
+            f"{DEFAULT_WORKLOAD_SIZES[0]} to {DEFAULT_WORKLOAD_SIZES[-1]}"
         )
     if args.enforce_gates and args.precision not in ("auto", "fp64"):
         parser.error("--enforce-gates requires fp64-equivalent precision ('auto' or 'fp64')")

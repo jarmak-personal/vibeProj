@@ -75,13 +75,15 @@ The initial accelerated coverage is deliberately small:
 | `tmerc.forward.fixed_q62` | Forward UTM only | Bounded sine/cosine, the TM latitude correction, and bounded `asinh`; remaining math stays fp64 | Ada `sm_89` consumer GPUs | 256 |
 | `sinu.forward.fixed_q62` | Sinusoidal forward only | Guarded Q1.62 cosine; remaining arithmetic stays fp64 | Ada `sm_89` consumer GPUs | 524,288 |
 | `ortho.forward.fixed_q62` | Orthographic forward only | Atomically guarded Q1.62 sine/cosine pairs; remaining arithmetic stays fp64 | Ada `sm_89` consumer GPUs | 262,144 |
+| `ortho.inverse.guarded_reframe` | Spherical equatorial Orthographic inverse only (after CRS setup canonicalization) | Guarded algebraic reframe removes one `asin` and one `sincos`; ill-conditioned inputs use native fp64 | Ada `sm_89` consumer GPUs | 524,288 |
 
 On a qualified RTX 4090, `"auto"` resolves the specialized implementations at
 or above the listed sizes; below them it resolves native. Explicit
 `"accelerated"` can select the specialized implementation at any size. Generic
-Transverse Mercator, inverse UTM, sinusoidal inverse, orthographic inverse, all
-other projection families, unsupported precision combinations, and unknown
-devices resolve or fall back to `native.libdevice`. Guarded input values do not
+Transverse Mercator, inverse UTM, sinusoidal inverse, Orthographic inverse
+outside the exact spherical-equatorial origin domain, all other projection
+families, unsupported precision combinations, and unknown devices resolve or
+fall back to `native.libdevice`. Guarded input values do not
 change the host decision: a selected fixed `StrategyDecision` remains selected
 while its kernel executes the native branch for those values. The two
 projection-specific Q1.62 implementations
@@ -123,6 +125,14 @@ against native policy. The current release gates are:
   use native math. The complete projected result must differ from native by
   `< 1e-8 m`; final WGS84 qualification measured 2.033106/1.396984 nm
   maximum/p99.
+- Spherical equatorial Orthographic inverse: for `0 < scale <= 6,400,000 m`,
+  finite non-axis points with normalized `1e-16 < rho^2 <= 0.99` use the identity
+  `q=sqrt(1-rho^2)`, `phi=asin(y)`, and `lambda=atan2(x,q)`. The center,
+  near-center `rho^2 <= 1e-16` band, axes/signed zero, horizon/outside-disk,
+  non-finite inputs, and the
+  `|phi_argument| > 0.95` conditioning band execute the exact native formula.
+  Final RTX 4090 full-valid-disk qualification measured 6.328/1.584 nm
+  maximum/p99 error.
 - Non-finite, out-of-domain, wide-TM, near-pole, and otherwise unsupported
 coordinates take the native branch per coordinate.
 

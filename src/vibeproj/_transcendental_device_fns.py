@@ -36,16 +36,11 @@ __device__ __forceinline__ void vp_native_sincos(
 """
 
 
-PROJECTION_BOUNDED_Q62_DEVICE_FNS = (
-    FIXED_TRIG_DEVICE_FNS
-    + f"\n#define VP_PROJECTION_FIXED_Q62_MAX_SCALE_M {PROJECTION_FIXED_Q62_MAX_SCALE_M:.1f}\n"
+PROJECTION_SCALE_GUARD_DEVICE_FNS = (
+    f"\n#define VP_PROJECTION_FIXED_Q62_MAX_SCALE_M {PROJECTION_FIXED_Q62_MAX_SCALE_M:.1f}\n"
     + f"#define VP_PROJECTION_FIXED_Q62_MAX_SCALE_BITS 0x{_PROJECTION_FIXED_Q62_MAX_SCALE_BITS:016x}ULL\n"
     + r"""
-// ---- Shared projection-domain Q1.62 primitives ----
-// Callers pass their proved angular bound and launch-uniform physical scale.
-// Negated comparisons send non-finite and out-of-domain inputs through native
-// libdevice. The scale predicate is uniform because one projection scale is a
-// scalar kernel argument shared by every coordinate in the launch.
+// ---- Shared projection physical-scale guard ----
 __device__ __forceinline__ bool vp_projection_fixed_scale_is_qualified(
     double physical_scale
 ) {
@@ -58,6 +53,19 @@ __device__ __forceinline__ bool vp_projection_fixed_scale_is_qualified(
     );
     return bits - 1ULL < VP_PROJECTION_FIXED_Q62_MAX_SCALE_BITS;
 }
+"""
+)
+
+
+PROJECTION_BOUNDED_Q62_DEVICE_FNS = (
+    FIXED_TRIG_DEVICE_FNS
+    + PROJECTION_SCALE_GUARD_DEVICE_FNS
+    + r"""
+// ---- Shared projection-domain Q1.62 primitives ----
+// Callers pass their proved angular bound and launch-uniform physical scale.
+// Negated comparisons send non-finite and out-of-domain inputs through native
+// libdevice. The scale predicate is uniform because one projection scale is a
+// scalar kernel argument shared by every coordinate in the launch.
 
 __device__ __forceinline__ void vp_projection_fixed_sincos(
     double angle,

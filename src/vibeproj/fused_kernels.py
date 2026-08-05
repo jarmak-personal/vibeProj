@@ -20,6 +20,7 @@ from vibeproj.transcendentals import (
     HELMERT_FIXED_Q62,
     NATIVE_LIBDEVICE,
     ORTHO_FORWARD_FIXED_Q62,
+    ORTHO_INVERSE_GUARDED_REFRAME,
     SINU_FORWARD_FIXED_Q62,
     TMERC_FIXED_Q62,
 )
@@ -108,6 +109,7 @@ from vibeproj._transcendental_device_fns import (  # noqa: E402
     HELMERT_FIXED_Q62_DEVICE_FNS as _HELMERT_FIXED_Q62_DEVICE_FNS,
     NATIVE_PAIRED_SINCOS_DEVICE_FNS as _NATIVE_PAIRED_SINCOS_DEVICE_FNS,
     PROJECTION_BOUNDED_Q62_DEVICE_FNS as _PROJECTION_BOUNDED_Q62_DEVICE_FNS,
+    PROJECTION_SCALE_GUARD_DEVICE_FNS as _PROJECTION_SCALE_GUARD_DEVICE_FNS,
     TM_UTM_QUALIFIED_DEVICE_FNS as _TM_UTM_QUALIFIED_DEVICE_FNS,
 )
 
@@ -2227,6 +2229,7 @@ _PROJECTION_IMPLEMENTATION_TARGETS = {
     TMERC_FIXED_Q62: ("tmerc", "forward", "float64"),
     SINU_FORWARD_FIXED_Q62: ("sinu", "forward", "float64"),
     ORTHO_FORWARD_FIXED_Q62: ("ortho", "forward", "float64"),
+    ORTHO_INVERSE_GUARDED_REFRAME: ("ortho", "inverse", "float64"),
 }
 
 _PROJECTION_FIXED_Q62_REWRITES = {
@@ -2253,6 +2256,70 @@ _PROJECTION_FIXED_Q62_REWRITES = {
                 "        phi, 0.5 * VP_PI_D, &sin_phi, &cos_phi,\n"
                 "        lam, VP_PI_D, &sin_lam, &cos_lam, a\n"
                 "    );",
+            ),
+        ),
+    ),
+}
+
+_ORTHO_INVERSE_NATIVE_BODY = """\
+    {real_t} rho = sqrt(cx*cx + cy*cy);
+    {real_t} c = asin(fmin(fmax(rho, ({real_t})-1.0), ({real_t})1.0));
+    {real_t} sin_c, cos_c;
+    vp_native_sincos(c, &sin_c, &cos_c);
+    {real_t} safe_rho = fmax(rho, ({real_t})1e-30);
+    {real_t} phi = asin(cos_c * sin_phi0 + cy * sin_c * cos_phi0 / safe_rho);
+    {real_t} lam = atan2(cx * sin_c, safe_rho * cos_phi0 * cos_c - cy * sin_phi0 * sin_c);"""
+
+_PROJECTION_GUARDED_NATIVE_FALLBACK_HELPERS = r"""
+// Projection-specific native expressions are outlined so an uncommon guarded
+// fallback does not force libdevice call state into the table-free hot path.
+__device__ __noinline__ void vp_ortho_inverse_native_cold(
+    double cx,
+    double cy,
+    double sin_phi0,
+    double cos_phi0,
+    double* phi_out,
+    double* lam_out
+) {
+    const double rho = sqrt(cx*cx + cy*cy);
+    const double c = asin(fmin(fmax(rho, -1.0), 1.0));
+    double sin_c, cos_c;
+    sincos(c, &sin_c, &cos_c);
+    const double safe_rho = fmax(rho, 1e-30);
+    *phi_out = asin(cos_c * sin_phi0 + cy * sin_c * cos_phi0 / safe_rho);
+    *lam_out = atan2(
+        cx * sin_c,
+        safe_rho * cos_phi0 * cos_c - cy * sin_phi0 * sin_c
+    );
+}
+"""
+
+_PROJECTION_GUARDED_REWRITES = {
+    ORTHO_INVERSE_GUARDED_REFRAME: (
+        "ortho_inverse_guarded_reframe",
+        (
+            (
+                _ORTHO_INVERSE_NATIVE_BODY,
+                """\
+    double rho_squared = cx*cx + cy*cy;
+    double phi, lam;
+    const bool candidate = vp_projection_fixed_scale_is_qualified(a)
+        && isfinite(rho_squared) && rho_squared > 1e-16 && rho_squared <= 0.99
+        && cx != 0.0 && cy != 0.0;
+    const double q = sqrt(fmax(0.0, 1.0 - rho_squared));
+    const double phi_argument = q * sin_phi0 + cy * cos_phi0;
+    const bool lane_qualified = candidate && fabs(phi_argument) <= 0.95;
+    // Keep each warp on one implementation. A sparse set of invalid/horizon
+    // inputs would otherwise serialize the complete fast and native paths.
+    const bool warp_uses_native = __any_sync(__activemask(), !lane_qualified);
+    if (!warp_uses_native) {
+        phi = asin(phi_argument);
+        lam = atan2(cx, q * cos_phi0 - cy * sin_phi0);
+    } else {
+        vp_ortho_inverse_native_cold(
+            cx, cy, sin_phi0, cos_phi0, &phi, &lam
+        );
+    }""",
             ),
         ),
     ),
@@ -2286,6 +2353,43 @@ def _build_projection_fixed_q62_source(
             )
         source = source.replace(native_expression, accelerated_expression)
     return _PROJECTION_BOUNDED_Q62_DEVICE_FNS + source, function_name
+
+
+def _build_projection_guarded_source(
+    projection_name: str,
+    direction: str,
+    implementation_id: str,
+) -> tuple[str, str]:
+    """Build one qualified fp64 source from shared guarded primitives."""
+    template, native_func_name = _SOURCE_MAP[(projection_name, direction)]
+    function_name, replacements = _PROJECTION_GUARDED_REWRITES[implementation_id]
+    source = _inject_linear_unit_args(
+        template.format(
+            real_t="double",
+            pi=_PI_LITERALS["float64"],
+            tol=_TOL_LITERALS["float64"],
+        )
+    )
+    if source.count(native_func_name) != 1:
+        raise RuntimeError(
+            f"Expected one {native_func_name!r} kernel while building {implementation_id!r}"
+        )
+    source = source.replace(native_func_name, function_name)
+    for native_expression, accelerated_expression in replacements:
+        native_expression = native_expression.replace("{real_t}", "double")
+        accelerated_expression = accelerated_expression.replace("{real_t}", "double")
+        if source.count(native_expression) != 1:
+            raise RuntimeError(
+                f"Expected one {native_expression!r} site while building {implementation_id!r}"
+            )
+        source = source.replace(native_expression, accelerated_expression)
+    return (
+        _NATIVE_PAIRED_SINCOS_DEVICE_FNS
+        + _PROJECTION_SCALE_GUARD_DEVICE_FNS
+        + _PROJECTION_GUARDED_NATIVE_FALLBACK_HELPERS
+        + source,
+        function_name,
+    )
 
 
 def _resolve_tmerc_forward_mode(mode: str) -> str:
@@ -2356,7 +2460,13 @@ def _get_kernel(
         if key in _kernel_cache:
             return _kernel_cache[key]
 
-        if transcendental_impl in _PROJECTION_FIXED_Q62_REWRITES:
+        if transcendental_impl in _PROJECTION_GUARDED_REWRITES:
+            source, func_name = _build_projection_guarded_source(
+                projection_name,
+                direction,
+                transcendental_impl,
+            )
+        elif transcendental_impl in _PROJECTION_FIXED_Q62_REWRITES:
             source, func_name = _build_projection_fixed_q62_source(
                 projection_name,
                 direction,
