@@ -48,52 +48,44 @@ def select_compute_precision() -> str:
 
 
 def _supports_fixed_int64_trig(major: int, minor: int, fp32_to_fp64_ratio: int) -> bool:
-    """Whether a GPU is validated for automatic fixed-point trig.
+    """Compatibility predicate delegated to the central strategy resolver."""
+    from vibeproj.transcendentals import (
+        HELMERT_FIXED_Q62,
+        DeviceCapability,
+        TranscendentalOperation,
+        resolve_transcendental_strategy,
+    )
 
-    The first production rollout is deliberately limited to Ada sm_89 consumer
-    GPUs, where the implementation has been accuracy- and performance-tested.
-    Explicit internal dispatch can still exercise the kernel elsewhere.
-    """
-    return (major, minor) == (8, 9) and fp32_to_fp64_ratio >= 16
-
-
-@lru_cache(maxsize=None)
-def _select_helmert_trig_mode_for_device(device_id: int) -> str:
-    try:
-        import cupy as cp
-
-        properties = cp.cuda.runtime.getDeviceProperties(device_id)
-        device = cp.cuda.Device(device_id)
-        ratio = int(device.attributes.get("SingleToDoublePrecisionPerfRatio", 0))
-        if _supports_fixed_int64_trig(
-            int(properties.get("major", 0)), int(properties.get("minor", 0)), ratio
-        ):
-            return "int64"
-    except (ImportError, RuntimeError, OSError):
-        pass
-    return "fp64"
+    device = DeviceCapability(
+        backend="cuda",
+        compute_capability=(major, minor),
+        fp32_to_fp64_ratio=fp32_to_fp64_ratio,
+    )
+    decision = resolve_transcendental_strategy(
+        TranscendentalOperation.HELMERT, "auto", device=device
+    )
+    return decision.implementation_id == HELMERT_FIXED_Q62
 
 
 def select_helmert_trig_mode() -> str:
-    """Select the Helmert CUDA trig implementation for the current GPU.
+    """Return the legacy name for the centrally resolved Helmert strategy."""
+    from vibeproj.transcendentals import (
+        HELMERT_FIXED_Q62,
+        TranscendentalOperation,
+        resolve_transcendental_strategy,
+    )
 
-    Returns ``"int64"`` only for validated Ada consumer GPUs. Unknown and
-    datacenter GPUs conservatively use paired native fp64 sine/cosine.
-    """
-    try:
-        import cupy as cp
-
-        device_id = int(cp.cuda.runtime.getDevice())
-    except (ImportError, RuntimeError, OSError):
-        return "fp64"
-    return _select_helmert_trig_mode_for_device(device_id)
+    decision = resolve_transcendental_strategy(TranscendentalOperation.HELMERT)
+    return "int64" if decision.implementation_id == HELMERT_FIXED_Q62 else "fp64"
 
 
 def select_tmerc_forward_mode() -> str:
-    """Select the guarded forward-UTM transcendental implementation.
+    """Return the legacy name for the centrally resolved forward-UTM strategy."""
+    from vibeproj.transcendentals import (
+        TMERC_FIXED_Q62,
+        TranscendentalOperation,
+        resolve_transcendental_strategy,
+    )
 
-    The forward-TM and Helmert fixed-point paths share the same validated GPU
-    gate. H100, unknown, and future architectures remain on native fp64 until
-    they have independent performance and accuracy measurements.
-    """
-    return select_helmert_trig_mode()
+    decision = resolve_transcendental_strategy(TranscendentalOperation.TMERC_FORWARD, domain="utm")
+    return "int64" if decision.implementation_id == TMERC_FIXED_Q62 else "fp64"

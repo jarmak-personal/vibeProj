@@ -1,0 +1,535 @@
+"""Hardware-aware transcendental implementation registry and resolver.
+
+The registry describes CUDA implementation variants; it does not contain CUDA
+source and it does not choose numeric compute precision.  Device discovery is
+lazy so importing :mod:`vibeproj` never imports CuPy or queries a device.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from functools import lru_cache
+from typing import Literal, cast
+
+TranscendentalPolicy = Literal["auto", "native", "accelerated"]
+DeviceBackend = Literal["cpu", "cuda", "unknown"]
+ComputePrecision = Literal["auto", "fp64", "fp32", "ds"]
+
+NATIVE_LIBDEVICE = "native.libdevice"
+HELMERT_FIXED_Q62 = "helmert.fixed_q62"
+TMERC_FIXED_Q62 = "tmerc.forward.fixed_q62"
+TMERC_FIXED_Q62_MIN_ELEMENTS = 256
+HELMERT_FIXED_Q62_MIN_ELEMENTS = 131_072
+
+
+class TranscendentalOperation(str, Enum):
+    """Operations with independently selectable transcendental strategies."""
+
+    HELMERT = "helmert"
+    PROJECTION = "projection"
+    TMERC_FORWARD = "tmerc.forward"
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceCapability:
+    """Device facts used by the strategy resolver."""
+
+    backend: DeviceBackend
+    compute_capability: tuple[int, int] | None = None
+    fp32_to_fp64_ratio: int | None = None
+    name: str | None = None
+    device_id: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AccuracyContract:
+    """Validated error bounds relative to native fp64 execution."""
+
+    reference: str
+    max_horizontal_error_m: float
+    max_vertical_error_m: float | None = None
+    notes: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class StrategyImplementation:
+    """Immutable implementation metadata exposed by registry introspection.
+
+    ``min_elements`` is the runtime crossover used by ``"auto"`` after device,
+    domain, and precision qualification. Explicit ``"accelerated"`` requests
+    do not apply that size threshold.
+    """
+
+    implementation_id: str
+    operation: TranscendentalOperation
+    family: str
+    supported_policies: tuple[TranscendentalPolicy, ...]
+    supported_backends: tuple[DeviceBackend, ...]
+    supported_compute_capabilities: tuple[tuple[int, int], ...]
+    min_fp32_to_fp64_ratio: int | None
+    supported_compute_precisions: tuple[ComputePrecision, ...]
+    min_elements: int
+    domains: tuple[str, ...]
+    accuracy: AccuracyContract
+    native_fallback: bool
+
+
+@dataclass(frozen=True, slots=True)
+class StrategyDecision:
+    """Immutable resolved decision, including fallback reason and workload size."""
+
+    operation: TranscendentalOperation
+    requested_policy: TranscendentalPolicy
+    implementation_id: str
+    family: str
+    reason: str
+    fallback: bool
+    accuracy: AccuracyContract
+    device: DeviceCapability
+    domain: str
+    workload_size: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectionImplementation:
+    """Resolved implementation for one projection stage."""
+
+    projection: str
+    direction: str
+    domain: str
+    implementation_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionContext:
+    """Deeply immutable dispatch plan shared by every stage in one call."""
+
+    precision: ComputePrecision
+    transcendentals: TranscendentalPolicy
+    device: DeviceCapability
+    workload_size: int | None
+    projection_implementations: tuple[ProjectionImplementation, ...]
+    helmert_implementation: str
+    decisions: tuple[StrategyDecision, ...]
+
+    def projection_implementation(self, projection: str, direction: str, domain: str) -> str:
+        for implementation in self.projection_implementations:
+            if (
+                implementation.projection == projection
+                and implementation.direction == direction
+                and implementation.domain == domain
+            ):
+                return implementation.implementation_id
+        return NATIVE_LIBDEVICE
+
+
+@dataclass(frozen=True, slots=True)
+class StrategyExplanation:
+    """Immutable public explanation for every stage in one transform direction."""
+
+    requested_policy: TranscendentalPolicy
+    direction: Literal["FORWARD", "INVERSE"]
+    device: DeviceCapability
+    workload_size: int | None
+    decisions: tuple[StrategyDecision, ...]
+
+
+_NATIVE_ACCURACY = AccuracyContract(
+    reference="native fp64 libdevice",
+    max_horizontal_error_m=0.0,
+    max_vertical_error_m=0.0,
+    notes="Reference CUDA implementation; CPU/xp fallback uses native host functions.",
+)
+
+_REGISTRY = (
+    StrategyImplementation(
+        implementation_id=NATIVE_LIBDEVICE,
+        operation=TranscendentalOperation.PROJECTION,
+        family="native_libdevice",
+        supported_policies=("auto", "native", "accelerated"),
+        supported_backends=("cpu", "cuda", "unknown"),
+        supported_compute_capabilities=(),
+        min_fp32_to_fp64_ratio=None,
+        supported_compute_precisions=("auto", "fp64", "fp32", "ds"),
+        min_elements=0,
+        domains=("*",),
+        accuracy=_NATIVE_ACCURACY,
+        native_fallback=False,
+    ),
+    StrategyImplementation(
+        implementation_id=NATIVE_LIBDEVICE,
+        operation=TranscendentalOperation.HELMERT,
+        family="native_libdevice",
+        supported_policies=("auto", "native", "accelerated"),
+        supported_backends=("cpu", "cuda", "unknown"),
+        supported_compute_capabilities=(),
+        min_fp32_to_fp64_ratio=None,
+        supported_compute_precisions=("auto", "fp64", "fp32", "ds"),
+        min_elements=0,
+        domains=("global",),
+        accuracy=_NATIVE_ACCURACY,
+        native_fallback=False,
+    ),
+    StrategyImplementation(
+        implementation_id=HELMERT_FIXED_Q62,
+        operation=TranscendentalOperation.HELMERT,
+        family="bounded_q1_62",
+        supported_policies=("auto", "accelerated"),
+        supported_backends=("cuda",),
+        supported_compute_capabilities=((8, 9),),
+        min_fp32_to_fp64_ratio=16,
+        supported_compute_precisions=("auto", "fp64", "fp32", "ds"),
+        min_elements=HELMERT_FIXED_Q62_MIN_ELEMENTS,
+        domains=("global",),
+        accuracy=AccuracyContract(
+            reference=NATIVE_LIBDEVICE,
+            max_horizontal_error_m=1e-8,
+            max_vertical_error_m=2e-7,
+            notes=(
+                "Q1.62 paired trig on bounded angles with native fallback for "
+                "unbounded/non-finite inputs and the near-pole height-recovery band."
+            ),
+        ),
+        native_fallback=True,
+    ),
+    StrategyImplementation(
+        implementation_id=NATIVE_LIBDEVICE,
+        operation=TranscendentalOperation.TMERC_FORWARD,
+        family="native_libdevice",
+        supported_policies=("auto", "native", "accelerated"),
+        supported_backends=("cpu", "cuda", "unknown"),
+        supported_compute_capabilities=(),
+        min_fp32_to_fp64_ratio=None,
+        supported_compute_precisions=("auto", "fp64", "fp32", "ds"),
+        min_elements=0,
+        domains=("global", "utm"),
+        accuracy=_NATIVE_ACCURACY,
+        native_fallback=False,
+    ),
+    StrategyImplementation(
+        implementation_id=TMERC_FIXED_Q62,
+        operation=TranscendentalOperation.TMERC_FORWARD,
+        family="qualified_utm_transcendentals",
+        supported_policies=("auto", "accelerated"),
+        supported_backends=("cuda",),
+        supported_compute_capabilities=((8, 9),),
+        min_fp32_to_fp64_ratio=16,
+        supported_compute_precisions=("auto", "fp64"),
+        min_elements=TMERC_FIXED_Q62_MIN_ELEMENTS,
+        domains=("utm",),
+        accuracy=AccuracyContract(
+            reference=NATIVE_LIBDEVICE,
+            max_horizontal_error_m=1e-8,
+            notes=(
+                "Qualified forward-UTM bundle: Q1.62 paired trig, refined reciprocal "
+                "atan2 identity, and degree-11 asinh; native fallback outside |lam| <= 0.06."
+            ),
+        ),
+        native_fallback=True,
+    ),
+)
+
+
+def normalize_transcendental_policy(value: str) -> TranscendentalPolicy:
+    """Validate and normalize a public transcendental policy."""
+    if value not in ("auto", "native", "accelerated"):
+        raise ValueError(
+            f"Invalid transcendentals policy: {value!r}. "
+            "Must be 'auto', 'native', or 'accelerated'."
+        )
+    return cast(TranscendentalPolicy, value)
+
+
+def normalize_compute_precision(value: str) -> ComputePrecision:
+    """Validate numeric compute precision independently of strategy policy."""
+    if value not in ("auto", "fp64", "fp32", "ds"):
+        raise ValueError(f"Invalid precision: {value!r}. Must be 'fp64', 'fp32', 'ds', or 'auto'.")
+    return cast(ComputePrecision, value)
+
+
+def list_transcendental_strategies() -> tuple[StrategyImplementation, ...]:
+    """Return the immutable built-in transcendental strategy registry.
+
+    Entries expose stable IDs, hardware/domain/precision qualifications,
+    ``min_elements`` crossover thresholds, accuracy contracts, and native
+    fallback behavior. Returning a tuple of frozen dataclasses prevents callers
+    from changing global dispatch policy.
+    """
+    return _REGISTRY
+
+
+def detect_device_capability(xp=None, *, device_id: int | None = None) -> DeviceCapability:
+    """Lazily describe the current execution device.
+
+    Passing NumPy (or another host array module) returns a CPU capability
+    without importing CuPy.  With no argument, CuPy is imported lazily and the
+    current CUDA device is queried when available.
+    """
+    if xp is not None and getattr(xp, "__name__", "").split(".", 1)[0] != "cupy":
+        return DeviceCapability(backend="cpu", name="CPU")
+
+    if xp is None:
+        try:
+            import cupy as cp
+        except (ImportError, ModuleNotFoundError):
+            return DeviceCapability(backend="cpu", name="CPU")
+    else:
+        cp = xp
+
+    try:
+        resolved_device_id = (
+            int(cp.cuda.runtime.getDevice()) if device_id is None else int(device_id)
+        )
+        return _detect_cuda_device_capability(cp, resolved_device_id)
+    except (AttributeError, RuntimeError, OSError):
+        return DeviceCapability(backend="unknown")
+
+
+@lru_cache(maxsize=None)
+def _detect_cuda_device_capability(cp, device_id: int) -> DeviceCapability:
+    """Return cached facts for a CuPy module/device pair."""
+    try:
+        properties = cp.cuda.runtime.getDeviceProperties(device_id)
+        device = cp.cuda.Device(device_id)
+        major = int(properties.get("major", properties.get(b"major", 0)))
+        minor = int(properties.get("minor", properties.get(b"minor", 0)))
+        ratio = int(device.attributes.get("SingleToDoublePrecisionPerfRatio", 0))
+        raw_name = properties.get("name", properties.get(b"name"))
+        if isinstance(raw_name, bytes):
+            name = raw_name.decode(errors="replace")
+        else:
+            name = str(raw_name) if raw_name is not None else None
+        return DeviceCapability(
+            backend="cuda",
+            compute_capability=(major, minor),
+            fp32_to_fp64_ratio=ratio or None,
+            name=name,
+            device_id=device_id,
+        )
+    except (AttributeError, RuntimeError, OSError):
+        return DeviceCapability(backend="unknown")
+
+
+def _implementation(
+    operation: TranscendentalOperation, implementation_id: str
+) -> StrategyImplementation:
+    for implementation in _REGISTRY:
+        if (
+            implementation.operation is operation
+            and implementation.implementation_id == implementation_id
+        ):
+            return implementation
+    raise ValueError(
+        f"Unknown transcendental implementation {implementation_id!r} "
+        f"for operation {operation.value!r}."
+    )
+
+
+def _supports(
+    implementation: StrategyImplementation,
+    device: DeviceCapability,
+    domain: str,
+    precision: str,
+) -> bool:
+    if device.backend not in implementation.supported_backends:
+        return False
+    if (
+        implementation.domains
+        and "*" not in implementation.domains
+        and domain not in implementation.domains
+    ):
+        return False
+    if precision not in implementation.supported_compute_precisions:
+        return False
+    if (
+        implementation.supported_compute_capabilities
+        and device.compute_capability not in implementation.supported_compute_capabilities
+    ):
+        return False
+    minimum = implementation.min_fp32_to_fp64_ratio
+    if minimum is not None and (device.fp32_to_fp64_ratio or 0) < minimum:
+        return False
+    return True
+
+
+def resolve_transcendental_strategy(
+    operation: TranscendentalOperation | str,
+    policy: TranscendentalPolicy = "auto",
+    *,
+    device: DeviceCapability | None = None,
+    domain: str = "global",
+    precision: str = "fp64",
+    workload_size: int | None = None,
+    _normalized: bool = False,
+) -> StrategyDecision:
+    """Resolve a public policy to an accuracy-qualified implementation.
+
+    ``precision`` accepts ``"auto"``, ``"fp64"``, ``"fp32"``, or ``"ds"`` and
+    remains independent of ``policy``. For ``policy="auto"``, a concrete
+    ``workload_size`` must meet the selected implementation's ``min_elements``;
+    ``None`` represents compile/explain planning and selects an otherwise
+    qualified implementation. Explicit ``"accelerated"`` ignores the workload
+    threshold but returns an observable native fallback when other
+    qualifications are not met.
+    """
+    if _normalized:
+        requested = cast(TranscendentalPolicy, policy)
+        resolved_precision = cast(ComputePrecision, precision)
+    else:
+        requested = normalize_transcendental_policy(policy)
+        resolved_precision = normalize_compute_precision(precision)
+    try:
+        resolved_operation = TranscendentalOperation(operation)
+    except ValueError as exc:
+        raise ValueError(f"Unknown transcendental operation: {operation!r}.") from exc
+    if device is None:
+        device = detect_device_capability()
+
+    return _resolve_transcendental_strategy_cached(
+        resolved_operation,
+        requested,
+        device,
+        domain,
+        resolved_precision,
+        workload_size,
+    )
+
+
+@lru_cache(maxsize=256)
+def _resolve_transcendental_strategy_cached(
+    resolved_operation: TranscendentalOperation,
+    requested: TranscendentalPolicy,
+    device: DeviceCapability,
+    domain: str,
+    precision: ComputePrecision,
+    workload_size: int | None,
+) -> StrategyDecision:
+    """Build and cache an immutable decision for an exact execution context."""
+
+    native = _implementation(resolved_operation, NATIVE_LIBDEVICE)
+    accelerated_id = {
+        TranscendentalOperation.HELMERT: HELMERT_FIXED_Q62,
+        TranscendentalOperation.TMERC_FORWARD: TMERC_FIXED_Q62,
+    }.get(resolved_operation)
+    accelerated = (
+        _implementation(resolved_operation, accelerated_id) if accelerated_id is not None else None
+    )
+
+    if requested == "native":
+        chosen = native
+        reason = "native policy requested"
+        fallback = False
+    elif (
+        accelerated is not None
+        and _supports(accelerated, device, domain, precision)
+        and (
+            requested == "accelerated"
+            or workload_size is None
+            or workload_size >= accelerated.min_elements
+        )
+    ):
+        chosen = accelerated
+        reason = (
+            "accuracy-qualified accelerated implementation selected for "
+            f"{device.backend} {device.compute_capability} in {domain!r} domain"
+        )
+        fallback = False
+    else:
+        chosen = native
+        fallback = requested == "accelerated"
+        if (
+            accelerated is not None
+            and requested == "auto"
+            and workload_size is not None
+            and workload_size < accelerated.min_elements
+            and _supports(accelerated, device, domain, precision)
+        ):
+            unsupported_reason = (
+                f"workload size {workload_size} is below the accelerated crossover "
+                f"{accelerated.min_elements}"
+            )
+        elif accelerated is None:
+            unsupported_reason = "no accuracy-qualified accelerated implementation is registered"
+        elif device.backend != "cuda":
+            unsupported_reason = f"{device.backend} backend has no CUDA accelerated implementation"
+        elif domain not in accelerated.domains:
+            unsupported_reason = f"domain {domain!r} is not accuracy-qualified"
+        elif precision not in accelerated.supported_compute_precisions:
+            unsupported_reason = f"compute precision {precision!r} is not supported"
+        elif device.compute_capability not in accelerated.supported_compute_capabilities:
+            unsupported_reason = (
+                f"compute capability {device.compute_capability!r} is not accuracy-qualified"
+            )
+        else:
+            unsupported_reason = (
+                f"fp32:fp64 ratio {device.fp32_to_fp64_ratio!r} does not meet "
+                f"the required {accelerated.min_fp32_to_fp64_ratio}"
+            )
+        if requested == "accelerated":
+            reason = f"accelerated policy fell back to native: {unsupported_reason}"
+        else:
+            reason = f"auto policy selected native: {unsupported_reason}"
+
+    return StrategyDecision(
+        operation=resolved_operation,
+        requested_policy=requested,
+        implementation_id=chosen.implementation_id,
+        family=chosen.family,
+        reason=reason,
+        fallback=fallback,
+        accuracy=chosen.accuracy,
+        device=device,
+        domain=domain,
+        workload_size=workload_size,
+    )
+
+
+def _resolve_exact_strategy(
+    operation: TranscendentalOperation | str,
+    implementation_id: str,
+    *,
+    device: DeviceCapability | None = None,
+    domain: str = "global",
+) -> StrategyDecision:
+    """Resolve an exact internal variant for deterministic tests/benchmarks."""
+    resolved_operation = TranscendentalOperation(operation)
+    chosen = _implementation(resolved_operation, implementation_id)
+    if device is None:
+        device = detect_device_capability()
+    return StrategyDecision(
+        operation=resolved_operation,
+        requested_policy="accelerated" if implementation_id != NATIVE_LIBDEVICE else "native",
+        implementation_id=implementation_id,
+        family=chosen.family,
+        reason="exact internal implementation requested",
+        fallback=False,
+        accuracy=chosen.accuracy,
+        device=device,
+        domain=domain,
+        workload_size=None,
+    )
+
+
+__all__ = [
+    "AccuracyContract",
+    "ComputePrecision",
+    "DeviceCapability",
+    "ExecutionContext",
+    "HELMERT_FIXED_Q62",
+    "HELMERT_FIXED_Q62_MIN_ELEMENTS",
+    "NATIVE_LIBDEVICE",
+    "ProjectionImplementation",
+    "StrategyDecision",
+    "StrategyExplanation",
+    "StrategyImplementation",
+    "TMERC_FIXED_Q62",
+    "TMERC_FIXED_Q62_MIN_ELEMENTS",
+    "TranscendentalOperation",
+    "TranscendentalPolicy",
+    "detect_device_capability",
+    "list_transcendental_strategies",
+    "normalize_compute_precision",
+    "normalize_transcendental_policy",
+    "resolve_transcendental_strategy",
+]

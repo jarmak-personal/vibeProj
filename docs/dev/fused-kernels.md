@@ -2,12 +2,12 @@
 
 ## Why fused kernels
 
-The NumPy/CuPy element-wise path executes a transform as ~20 separate
+The NumPy/CuPy element-wise path executes a projection stage as ~20 separate
 operations: axis swap, deg-to-rad, central meridian subtraction, each
 trig call, scale, offset. On the GPU, each operation is a separate kernel
 launch with its own global memory read/write.
 
-A fused kernel runs the entire pipeline in a single kernel launch:
+A fused kernel runs one complete mathematical stage in a single kernel launch:
 one thread per coordinate pair, all stages in registers. This eliminates:
 
 - ~20 kernel launches (each has ~5us overhead)
@@ -91,12 +91,20 @@ Compiled kernels are cached in `_kernel_cache`:
 
 ```python
 _kernel_cache: dict[tuple[str, str, str, str], RawKernel] = {}
-# key: (projection_name, direction, compute_dtype, strategy)
+# key: (projection_name, direction, compute_dtype, implementation_id)
 ```
 
 The first call to a kernel compiles it via NVRTC (~100ms). Subsequent
 calls reuse the cached `RawKernel`. CuPy also caches the compiled PTX
 on disk across Python sessions.
+
+`compile_kernels()` calls `RawKernel.compile()` eagerly for the requested
+projection directions and compute precision; constructing a `RawKernel` alone
+is lazy. Module-level `warm_up()` uses this path for projection kernels.
+`Transformer.compile()` is narrower: it compiles only that transformer's one
+or two projection families plus its selected Helmert and SVD kernels, when
+present. SVD coefficient arrays are data rather than kernel code and remain a
+first-transform, per-device initialization.
 
 ## Argument packing
 
@@ -122,10 +130,12 @@ uses paired CUDA `sincos`; the validated Ada `sm_89` strategy keeps fp64 I/O,
 series evaluation, scale, and offset while accelerating three bounded pieces:
 
 - Table-free Q1.62 paired sine/cosine.
-- `atan2(sin(B), cos(B)cos(L))` reframed as `B + atan(delta)`. For
-  `|L| <= 0.06`, `|delta| < 6.9e-4`, so a degree-5 odd correction reaches
-  fp64 accuracy.
-- A degree-11 odd `asinh` series for `|x| <= 0.06`.
+- `atan2(sin(B), cos(B)cos(L))` reframed as `B + atan(delta)`. Over the
+  complete `|L| <= 0.06` guard, `|delta| <= 9.01e-4` and the degree-5 odd
+  correction's maximum absolute error is `2.3e-16 rad`. Normal UTM's tighter
+  `+/-3 degree` zone has `|delta| < 6.9e-4`.
+- A degree-11 odd `asinh` series for `|x| <= 0.06`, with maximum absolute
+  error `2e-17`.
 
 Every guard is per-coordinate. Wider TM coordinates, non-finite values, and
 unknown devices use paired native fp64 behavior. Automatic selection is
@@ -156,7 +166,8 @@ projections are inherently 2D. For cross-datum transforms, the pipeline
 runs the Helmert kernel first (or after inverse projection), then the
 projection kernel. z passes through the projection kernel unchanged.
 
-Adjacent native fp64 sine/cosine calls use CUDA's paired `sincos`. On
+Every direct same-argument sine/cosine site uses the shared native paired
+`sincos` helper (with an equivalent helper for double-single TM). On
 validated Ada consumer GPUs (`sm_89` with weak native-fp64 throughput),
 automatic dispatch instead uses table-free signed Q1.62 trig for bounded
 Helmert angles. It reduces to `[-pi/4, pi/4]` and evaluates degree-17 sine
@@ -164,9 +175,11 @@ and degree-18 cosine polynomials with full-width INT64 products. Kernel I/O,
 ECEF math, the Helmert matrix, and Bowring iteration remain fp64. Unknown,
 datacenter, out-of-domain, non-finite, and near-pole cases use native fp64.
 
-The two Helmert variants are cached separately under `"fp64"` and `"int64"`
-strategy keys. `fused_helmert_shift(..., trig_mode=...)` exposes an internal
-override for testing; Transformer dispatch uses `"auto"`.
+The two Helmert variants are cached separately under the stable
+`native.libdevice` and `helmert.fixed_q62` implementation IDs.
+`fused_helmert_shift(..., trig_mode=...)` retains the private legacy
+`"fp64"`/`"int64"` override for deterministic tests and research benchmarks;
+public Transformer dispatch passes the resolved implementation ID.
 
 ## SVD datum correction kernel
 
@@ -180,6 +193,23 @@ correction(lat, lon) = sum_k S[k] * lerp(U_k, lat_idx) * lerp(V_k, lon_idx)
 The kernel receives the flattened U, S, V matrices, grid bounds, and grid
 dimensions as arguments. Bilinear interpolation is used for sub-grid positions.
 Applied only when a baked `DatumCorrectionData` exists for the datum pair.
+
+The SVD `RawKernel` has its own process-local cache. Its six coefficient arrays
+are cached separately under `(CUDA device ID, id(DatumCorrectionData))`, with a
+strong reference that prevents object-ID reuse. First use uploads them on the
+caller's stream and records a readiness event; a consumer on another stream
+waits for an incomplete event without a device-wide or host synchronization.
+Once complete, the event is retired atomically so a warmed call—including one
+inside CUDA graph capture—adds no event operation. Warmed transforms reuse the
+arrays and do not allocate or upload them again.
+
+The SVD launch device is the input latitude array's CUDA device. The legacy
+null stream (`device_id == -1`) is normalized inside that device context;
+explicit non-null streams must belong to the same device. Longitude, output
+buffers, cached coefficient arrays, and streams are validated for device
+agreement before launch. First-use coefficient copies, event operations,
+contiguity copies, and the kernel launch all execute under the same explicit
+device-and-stream context.
 
 ## Double-single kernels
 

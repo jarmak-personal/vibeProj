@@ -13,18 +13,24 @@ from __future__ import annotations
 import dataclasses
 import threading
 import warnings
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Literal, overload
 
 import numpy as np
 
 from vibeproj.crs import build_datum_operation_plan, resolve_transform
-from vibeproj.pipeline import TransformPipeline
+from vibeproj.pipeline import TransformPipeline, TransformScratch
 from vibeproj.runtime import get_array_module, to_device
 
 if TYPE_CHECKING:
     from numpy.typing import ArrayLike
 
     from vibeproj.crs import CRSInput
+    from vibeproj.transcendentals import (
+        DeviceCapability,
+        StrategyExplanation,
+        TranscendentalPolicy,
+    )
 
 
 def _resolve_epoch(user_epoch, src_crs):
@@ -43,6 +49,37 @@ def _resolve_epoch(user_epoch, src_crs):
     return None
 
 
+@dataclasses.dataclass(slots=True)
+class _ScratchSlot:
+    """Per-device/per-stream scratch protected during host-side enqueue."""
+
+    lock: threading.RLock = dataclasses.field(default_factory=threading.RLock)
+    capacity: int = 0
+    scratch: TransformScratch | None = None
+    completion_event: Any = None
+    stream: Any = None
+    leases: int = 0
+    last_used: int = 0
+
+
+@dataclasses.dataclass(slots=True)
+class _ChunkWorkspace:
+    """Serialized, persistent double-buffered resources for one CUDA device."""
+
+    lock: threading.RLock = dataclasses.field(default_factory=threading.RLock)
+    streams: tuple[Any, Any] | None = None
+    pinned_mems: list[Any] = dataclasses.field(default_factory=list)
+    pinned_slots: list[dict[str, Any]] | None = None
+    pinned_size: int = 0
+    pinned_has_z: bool = False
+    device_slots: list[dict[str, Any]] | None = None
+    device_size: int = 0
+    device_has_z: bool = False
+
+
+_MAX_SCRATCH_SLOTS_PER_DEVICE = 8
+
+
 class Transformer:
     """GPU-accelerated coordinate transformer.
 
@@ -55,10 +92,11 @@ class Transformer:
 
     Thread Safety
     -------------
-    Transformer instances are safe to share across threads. The internal
-    kernel cache uses an RLock to serialize NVRTC compilation on first use;
-    subsequent calls are lock-free. Call ``compile()`` at startup to
-    front-load compilation if you want deterministic latency.
+    Transformer instances are safe to share across threads. NVRTC compilation
+    is serialized on first use. Device-resident calls lease stream-specific
+    scratch as needed. ``transform_chunked()`` calls sharing one Transformer
+    and CUDA device serialize around that device's persistent staging
+    workspace while retaining two-stream overlap within each call.
     """
 
     def __init__(
@@ -210,6 +248,16 @@ class Transformer:
         # Build the inverse pipeline lazily (protected by lock for thread safety)
         self._inv_pipeline: TransformPipeline | None = None
         self._inv_pipeline_lock = threading.Lock()
+        self._scratch_slots: dict[tuple[int, int], _ScratchSlot] = {}
+        self._scratch_slots_lock = threading.RLock()
+        self._scratch_retired: list[tuple[TransformScratch, Any]] = []
+        self._scratch_clock = 0
+        self._chunk_workspaces: dict[int, _ChunkWorkspace] = {}
+        self._chunk_workspaces_lock = threading.RLock()
+        # Kept as a compatibility view for callers/tests that inspect the
+        # historical per-device device-buffer cache.
+        self._device_buffer_cache: dict[int, dict[str, Any]] = {}
+        self._device_buffer_cache_lock = self._chunk_workspaces_lock
 
     @staticmethod
     def from_crs(
@@ -266,6 +314,100 @@ class Transformer:
             )
         return False
 
+    def explain_strategy(
+        self,
+        *,
+        transcendentals: TranscendentalPolicy = "auto",
+        precision: str = "auto",
+        direction: Literal["FORWARD", "INVERSE"] = "FORWARD",
+        device: DeviceCapability | None = None,
+        workload_size: int | None = None,
+    ) -> StrategyExplanation:
+        """Explain transcendental decisions for one transform direction.
+
+        The result is immutable and contains a decision for every projection
+        stage plus Helmert when active.  Passing *device* makes hardware policy
+        tests deterministic; otherwise the current device is detected lazily.
+        ``precision`` accepts ``"auto"``, ``"fp64"``, ``"fp32"``, or ``"ds"``;
+        ``transcendentals`` accepts ``"auto"``, ``"native"``, or
+        ``"accelerated"``. Pass ``workload_size`` to preview size-aware
+        ``"auto"`` selection. ``None`` represents compilation/planning without
+        a concrete array size and selects an otherwise-qualified accelerated
+        implementation. This method does not materialize coordinate arrays.
+        """
+        from vibeproj.transcendentals import (
+            StrategyExplanation,
+            TranscendentalOperation,
+            detect_device_capability,
+            normalize_compute_precision,
+            normalize_transcendental_policy,
+            resolve_transcendental_strategy,
+        )
+
+        precision = normalize_compute_precision(precision)
+        requested = normalize_transcendental_policy(transcendentals)
+        if direction not in ("FORWARD", "INVERSE"):
+            raise ValueError(f"Invalid direction: {direction}")
+        if device is None:
+            device = detect_device_capability()
+
+        if direction == "FORWARD":
+            pipeline = self._pipeline
+        else:
+            inv_helmert = self._helmert.inverted() if self._helmert else None
+            pipeline = TransformPipeline(
+                self._dst_params,
+                self._src_params,
+                helmert=inv_helmert,
+                svd_correction=self._svd_correction,
+                svd_negate=not self._svd_negate,
+            )
+
+        contexts: list[tuple[Any, str]] = []
+
+        def add_projection(name: str, stage_direction: str, computed: dict) -> None:
+            if name == "tmerc" and stage_direction == "forward":
+                domain = "utm" if computed.get("is_utm", False) else "global"
+                contexts.append((TranscendentalOperation.TMERC_FORWARD, domain))
+            else:
+                contexts.append((TranscendentalOperation.PROJECTION, f"{name}.{stage_direction}"))
+
+        helmert_context = (TranscendentalOperation.HELMERT, "global")
+        if pipeline.mode == "forward":
+            if self._helmert is not None:
+                contexts.append(helmert_context)
+            add_projection(pipeline.projection.name, "forward", pipeline.computed)
+        elif pipeline.mode == "inverse":
+            add_projection(pipeline.projection.name, "inverse", pipeline.computed)
+            if self._helmert is not None:
+                contexts.append(helmert_context)
+        elif pipeline.mode == "proj_to_proj":
+            add_projection(pipeline.src_projection.name, "inverse", pipeline.src_computed)
+            if self._helmert is not None:
+                contexts.append(helmert_context)
+            add_projection(pipeline.dst_projection.name, "forward", pipeline.dst_computed)
+        elif self._helmert is not None:
+            contexts.append(helmert_context)
+
+        decisions = tuple(
+            resolve_transcendental_strategy(
+                operation,
+                requested,
+                device=device,
+                domain=domain,
+                precision=precision,
+                workload_size=workload_size,
+            )
+            for operation, domain in contexts
+        )
+        return StrategyExplanation(
+            requested_policy=requested,
+            direction=direction,
+            device=device,
+            workload_size=workload_size,
+            decisions=decisions,
+        )
+
     @property
     def accuracy(self) -> str:
         """Rough accuracy classification for this transform.
@@ -299,38 +441,75 @@ class Transformer:
             return "sub-meter"
         return "sub-millimeter"
 
-    def compile(self, *, precision: str = "auto") -> None:
+    def compile(
+        self,
+        *,
+        precision: str = "auto",
+        transcendentals: TranscendentalPolicy = "auto",
+    ) -> None:
         """Pre-compile fused NVRTC kernels for this transformer.
 
-        Call this to front-load kernel compilation latency before the
-        first transform. No-op if CuPy is not available.
+        ``precision`` accepts ``"auto"``, ``"fp64"``, ``"fp32"``, or ``"ds"``.
+        ``transcendentals`` accepts ``"auto"``, ``"native"``, or
+        ``"accelerated"`` independently. Compilation has no concrete workload
+        size, so ``"auto"`` selects an otherwise-qualified implementation
+        without applying runtime crossover thresholds. This front-loads kernel
+        compilation only; first-use stream scratch and chunk staging workspaces
+        are still allocated lazily. No-op if CuPy is unavailable.
         """
+        from vibeproj.transcendentals import (
+            normalize_compute_precision,
+            normalize_transcendental_policy,
+        )
+
+        precision = normalize_compute_precision(precision)
+        transcendentals = normalize_transcendental_policy(transcendentals)
         try:
             from vibeproj.fused_kernels import compile_kernels
         except ImportError:
             return
 
         pipeline = self._pipeline
-        tmerc_mode = "auto"
+        tmerc_domain = None
         if pipeline.mode == "forward" and pipeline.projection.name == "tmerc":
-            if not pipeline.computed.get("is_utm", False):
-                tmerc_mode = "fp64"
+            tmerc_domain = "utm" if pipeline.computed.get("is_utm", False) else "global"
         elif pipeline.mode == "proj_to_proj" and pipeline.dst_projection.name == "tmerc":
-            if not pipeline.dst_computed.get("is_utm", False):
-                tmerc_mode = "fp64"
+            tmerc_domain = "utm" if pipeline.dst_computed.get("is_utm", False) else "global"
+        from vibeproj.transcendentals import (
+            NATIVE_LIBDEVICE,
+            TranscendentalOperation,
+            detect_device_capability,
+            resolve_transcendental_strategy,
+        )
+
+        device = detect_device_capability()
+        tmerc_impl = NATIVE_LIBDEVICE
+        if tmerc_domain is not None:
+            tmerc_impl = resolve_transcendental_strategy(
+                TranscendentalOperation.TMERC_FORWARD,
+                transcendentals,
+                device=device,
+                domain=tmerc_domain,
+                precision=precision,
+            ).implementation_id
         if pipeline.mode in ("forward", "inverse"):
             compile_kernels(
                 [pipeline.projection.name],
                 precision=precision,
-                tmerc_mode=tmerc_mode,
+                transcendental_impl=tmerc_impl,
             )
         elif pipeline.mode == "proj_to_proj":
             names = [pipeline.src_projection.name, pipeline.dst_projection.name]
-            compile_kernels(names, precision=precision, tmerc_mode=tmerc_mode)
+            compile_kernels(names, precision=precision, transcendental_impl=tmerc_impl)
         if self._helmert is not None:
             from vibeproj.fused_kernels import compile_helmert_kernel
 
-            compile_helmert_kernel()
+            helmert_impl = resolve_transcendental_strategy(
+                TranscendentalOperation.HELMERT,
+                transcendentals,
+                device=device,
+            ).implementation_id
+            compile_helmert_kernel(transcendental_impl=helmert_impl)
         if self._svd_correction is not None:
             from vibeproj.fused_kernels import compile_svd_kernel
 
@@ -354,6 +533,50 @@ class Transformer:
             epoch=state.get("epoch"),
         )
 
+    def _pipeline_for_direction(self, direction: str) -> TransformPipeline:
+        """Return the direction pipeline, constructing the inverse once."""
+        if direction == "FORWARD":
+            return self._pipeline
+        if self._inv_pipeline is None:
+            with self._inv_pipeline_lock:
+                if self._inv_pipeline is None:
+                    inv_helmert = self._helmert.inverted() if self._helmert else None
+                    self._inv_pipeline = TransformPipeline(
+                        self._dst_params,
+                        self._src_params,
+                        helmert=inv_helmert,
+                        svd_correction=self._svd_correction,
+                        svd_negate=not self._svd_negate,
+                    )
+        return self._inv_pipeline
+
+    @staticmethod
+    def _input_device_capability(x, xp):
+        """Resolve capability from the input array without changing devices."""
+        from vibeproj.transcendentals import detect_device_capability
+
+        is_cupy = getattr(xp, "__name__", "").split(".", 1)[0] == "cupy"
+        device_id = int(x.device.id) if is_cupy else None
+        return detect_device_capability(xp, device_id=device_id)
+
+    def _build_execution_context(
+        self,
+        pipeline: TransformPipeline,
+        x,
+        xp,
+        *,
+        precision: str,
+        transcendentals: str,
+        workload_size: int,
+    ):
+        return pipeline.build_execution_context(
+            precision=precision,
+            transcendentals=transcendentals,
+            device=self._input_device_capability(x, xp),
+            workload_size=workload_size,
+            _normalized=True,
+        )
+
     @overload
     def transform(
         self,
@@ -361,6 +584,9 @@ class Transformer:
         y: ArrayLike,
         z: None = None,
         direction: Literal["FORWARD", "INVERSE"] = "FORWARD",
+        *,
+        precision: str = "auto",
+        transcendentals: TranscendentalPolicy = "auto",
     ) -> tuple[Any, Any]: ...
 
     @overload
@@ -370,6 +596,9 @@ class Transformer:
         y: ArrayLike,
         z: ArrayLike,
         direction: Literal["FORWARD", "INVERSE"] = "FORWARD",
+        *,
+        precision: str = "auto",
+        transcendentals: TranscendentalPolicy = "auto",
     ) -> tuple[Any, Any, Any]: ...
 
     def transform(
@@ -378,6 +607,9 @@ class Transformer:
         y: ArrayLike,
         z: ArrayLike | None = None,
         direction: Literal["FORWARD", "INVERSE"] = "FORWARD",
+        *,
+        precision: str = "auto",
+        transcendentals: TranscendentalPolicy = "auto",
     ) -> tuple[Any, Any] | tuple[Any, Any, Any]:
         """Transform coordinates.
 
@@ -392,12 +624,25 @@ class Transformer:
             When no datum shift is needed, z is passed through unchanged.
         direction : str
             "FORWARD" or "INVERSE".
+        precision : {"auto", "fp64", "fp32", "ds"}
+            Numeric compute precision for fused GPU kernels.
+        transcendentals : {"auto", "native", "accelerated"}
+            Transcendental implementation policy, independent of *precision*.
+            ``"auto"`` uses the concrete input size and device capability when
+            applying qualified acceleration crossover thresholds.
 
         Returns
         -------
         tuple of arrays (or scalars if scalar input)
             Transformed (x, y) or (x, y, z) if z was provided.
         """
+        from vibeproj.transcendentals import (
+            normalize_compute_precision,
+            normalize_transcendental_policy,
+        )
+
+        precision = normalize_compute_precision(precision)
+        transcendentals = normalize_transcendental_policy(transcendentals)
         if direction not in ("FORWARD", "INVERSE"):
             raise ValueError(f"Invalid direction: {direction}")
 
@@ -441,21 +686,37 @@ class Transformer:
             if not xp.issubdtype(z_passthrough.dtype, xp.floating):
                 z_passthrough = z_passthrough.astype(xp.float64)
 
-        if direction == "FORWARD":
-            result = self._pipeline.transform(x, y, xp, z=z_pipeline)
+        pipeline = self._pipeline_for_direction(direction)
+        execution_context = self._build_execution_context(
+            pipeline,
+            x,
+            xp,
+            precision=precision,
+            transcendentals=transcendentals,
+            workload_size=int(x.size),
+        )
+        is_cupy = getattr(xp, "__name__", "").split(".", 1)[0] == "cupy"
+        if is_cupy:
+            with xp.cuda.Device(int(x.device.id)):
+                result = pipeline.transform(
+                    x,
+                    y,
+                    xp,
+                    z=z_pipeline,
+                    precision=precision,
+                    transcendentals=transcendentals,
+                    execution_context=execution_context,
+                )
         else:
-            if self._inv_pipeline is None:
-                with self._inv_pipeline_lock:
-                    if self._inv_pipeline is None:
-                        inv_helmert = self._helmert.inverted() if self._helmert else None
-                        self._inv_pipeline = TransformPipeline(
-                            self._dst_params,
-                            self._src_params,
-                            helmert=inv_helmert,
-                            svd_correction=self._svd_correction,
-                            svd_negate=not self._svd_negate,
-                        )
-            result = self._inv_pipeline.transform(x, y, xp, z=z_pipeline)
+            result = pipeline.transform(
+                x,
+                y,
+                xp,
+                z=z_pipeline,
+                precision=precision,
+                transcendentals=transcendentals,
+                execution_context=execution_context,
+            )
 
         if z_pipeline is not None:
             rx, ry, z_out = result
@@ -466,7 +727,7 @@ class Transformer:
         # Check for non-finite output values.
         # For GPU arrays, skip this check — it forces an implicit D→H sync
         # (xp.any() returns a device scalar whose truthiness triggers .get()).
-        # The transform_buffers() zero-copy path already skips this.
+        # The device-resident transform_buffers() path already skips this.
         # Only check on CPU (NumPy) where there is no sync cost.
         if xp is np and rx.size > 0 and (xp.any(~xp.isfinite(rx)) or xp.any(~xp.isfinite(ry))):
             warnings.warn(
@@ -503,6 +764,7 @@ class Transformer:
         out_y: ArrayLike | None = None,
         out_z: ArrayLike | None = None,
         precision: str = "auto",
+        transcendentals: TranscendentalPolicy = "auto",
         stream: Any = None,
     ) -> tuple[Any, Any]: ...
 
@@ -518,6 +780,7 @@ class Transformer:
         out_y: ArrayLike | None = None,
         out_z: ArrayLike | None = None,
         precision: str = "auto",
+        transcendentals: TranscendentalPolicy = "auto",
         stream: Any = None,
     ) -> tuple[Any, Any, Any]: ...
 
@@ -532,12 +795,16 @@ class Transformer:
         out_y: ArrayLike | None = None,
         out_z: ArrayLike | None = None,
         precision: str = "auto",
+        transcendentals: TranscendentalPolicy = "auto",
         stream: Any = None,
     ) -> tuple[Any, Any] | tuple[Any, Any, Any]:
-        """Zero-overhead transform for device-resident arrays.
+        """Transform device-resident arrays with optional pre-allocated outputs.
 
         Designed for integration with vibeSpatial's OwnedGeometryArray.
-        Skips scalar detection, dtype conversion, and array module inference.
+        It skips scalar detection and dtype conversion. With pre-allocated
+        outputs, repeated same-size GPU calls on a warmed, cached stream avoid
+        output and correction-scratch allocation. First use, cache growth, and
+        kernel compilation can still allocate.
 
         Parameters
         ----------
@@ -545,68 +812,198 @@ class Transformer:
             Coordinate arrays (fp64 storage per ADR-0002).
         z : cupy.ndarray or numpy.ndarray, optional
             Ellipsoidal height array. Transformed through Helmert when a datum
-            shift is active; passed through unchanged otherwise.
+            shift is active; passed through unchanged by projection/SVD-only
+            paths.
         direction : str
             "FORWARD" or "INVERSE".
         out_x, out_y : cupy.ndarray or numpy.ndarray, optional
             Pre-allocated fp64 output arrays. Avoids allocation.
         out_z : cupy.ndarray or numpy.ndarray, optional
-            Pre-allocated fp64 output height array. Only used when z is provided
-            and a Helmert datum shift is active.
-        precision : str
-            "fp64" = full double precision.
-            "fp32" = fp32 compute with fp64 I/O (ADR-0002 mixed precision).
-            "auto" = fp64 (projection math is trig-dominated / SFU-bound).
+            Pre-allocated fp64 output height array. Whenever ``z`` is provided,
+            this buffer is honored and returned for transformed or passthrough
+            height paths.
+        precision : {"auto", "fp64", "fp32", "ds"}
+            Numeric compute precision for fused GPU kernels.
+        transcendentals : {"auto", "native", "accelerated"}
+            Hardware-aware transcendental implementation policy. This is
+            independent of numeric compute *precision*. ``"auto"`` uses the
+            array size when applying qualified acceleration thresholds.
         stream : cupy.cuda.Stream, optional
-            CUDA stream for async kernel execution. Enables overlapping
-            projection compute with data transfers in pipeline workloads.
+            CUDA stream for asynchronous execution. ``None`` uses the current
+            stream on the input array's device; the legacy null stream is
+            supported. Explicit streams from another device are rejected. The
+            caller owns synchronization.
 
         Returns
         -------
         tuple of arrays
-            Transformed (out_x, out_y) or (out_x, out_y, z_out). Same objects if pre-allocated.
+            Transformed ``(out_x, out_y)`` or ``(out_x, out_y, z_out)``.
+            Supplied output buffers are returned identically.
         """
+        from vibeproj.transcendentals import (
+            normalize_compute_precision,
+            normalize_transcendental_policy,
+        )
+
+        precision = normalize_compute_precision(precision)
+        transcendentals = normalize_transcendental_policy(transcendentals)
         xp = get_array_module(x)
+        is_cupy = getattr(xp, "__name__", "").split(".", 1)[0] == "cupy"
+        if is_cupy:
+            stream = self._normalize_cuda_stream(x, xp, stream)
 
         if direction not in ("FORWARD", "INVERSE"):
             raise ValueError(f"Invalid direction: {direction}")
 
-        if direction == "FORWARD":
-            pipeline = self._pipeline
-        else:
-            if self._inv_pipeline is None:
-                inv_helmert = self._helmert.inverted() if self._helmert else None
-                self._inv_pipeline = TransformPipeline(
-                    self._dst_params,
-                    self._src_params,
-                    helmert=inv_helmert,
-                    svd_correction=self._svd_correction,
-                    svd_negate=not self._svd_negate,
-                )
-            pipeline = self._inv_pipeline
-
-        # Route z through pipeline only when Helmert is active
-        z_pipeline = z if (z is not None and self._helmert is not None) else None
-
-        result = pipeline.transform(
+        pipeline = self._pipeline_for_direction(direction)
+        execution_context = self._build_execution_context(
+            pipeline,
             x,
-            y,
             xp,
-            z=z_pipeline,
-            out_x=out_x,
-            out_y=out_y,
-            out_z=out_z,
             precision=precision,
-            stream=stream,
+            transcendentals=transcendentals,
+            workload_size=int(x.size),
         )
-        if z_pipeline is not None:
-            return result  # type: ignore[no-any-return]  # already (rx, ry, z_out)
-        if z is not None:
-            rx, ry = result
-            return rx, ry, z  # type: ignore[return-value]
-        return result  # type: ignore[no-any-return]
 
-    def _get_pinned_buffers(self, buf_size, *, chunk_z=False):
+        with self._transform_scratch_context(x, xp, pipeline, stream) as scratch:
+            kwargs = dict(
+                z=z,
+                out_x=out_x,
+                out_y=out_y,
+                out_z=out_z,
+                precision=precision,
+                transcendentals=transcendentals,
+                scratch=scratch,
+                execution_context=execution_context,
+                stream=stream,
+            )
+            if stream is not None and is_cupy:
+                with xp.cuda.Device(int(x.device.id)), stream:
+                    return pipeline.transform(x, y, xp, **kwargs)
+            return pipeline.transform(x, y, xp, **kwargs)
+
+    @contextmanager
+    def _transform_scratch_context(self, x, xp, pipeline, stream):
+        """Lease bounded, event-safe scratch for one device/stream."""
+        is_cupy = getattr(xp, "__name__", "").split(".", 1)[0] == "cupy"
+        if not is_cupy or not pipeline.needs_scratch:
+            yield None
+            return
+
+        device_id = int(x.device.id)
+        with xp.cuda.Device(device_id):
+            active_stream = stream if stream is not None else xp.cuda.get_current_stream()
+            key = (device_id, int(active_stream.ptr))
+            with self._scratch_slots_lock:
+                self._prune_scratch_retired_locked()
+                slot = self._scratch_slots.get(key)
+                admitted = slot is not None
+                if slot is None:
+                    slot = _ScratchSlot()
+                    device_slots = [
+                        (candidate_key, candidate)
+                        for candidate_key, candidate in self._scratch_slots.items()
+                        if candidate_key[0] == device_id
+                    ]
+                    if len(device_slots) >= _MAX_SCRATCH_SLOTS_PER_DEVICE:
+                        evictable = [item for item in device_slots if item[1].leases == 0]
+                        if evictable:
+                            evict_key, evicted = min(evictable, key=lambda item: item[1].last_used)
+                            del self._scratch_slots[evict_key]
+                            if evicted.scratch is not None:
+                                if self._event_complete(evicted.completion_event):
+                                    evicted.scratch = None
+                                else:
+                                    self._scratch_retired.append(
+                                        (evicted.scratch, evicted.completion_event)
+                                    )
+                    if sum(k[0] == device_id for k in self._scratch_slots) < (
+                        _MAX_SCRATCH_SLOTS_PER_DEVICE
+                    ):
+                        self._scratch_slots[key] = slot
+                        admitted = True
+                self._scratch_clock += 1
+                slot.last_used = self._scratch_clock
+                slot.stream = active_stream
+                slot.leases += 1
+
+            try:
+                with slot.lock:
+                    size = int(x.size)
+                    if slot.scratch is None or slot.capacity < size:
+                        capacity = max(size, max(1, slot.capacity * 2))
+                        if slot.scratch is not None:
+                            if not self._event_complete(slot.completion_event):
+                                with self._scratch_slots_lock:
+                                    self._scratch_retired.append(
+                                        (slot.scratch, slot.completion_event)
+                                    )
+                        slot.scratch = TransformScratch(
+                            xp.empty(capacity, dtype=xp.float64),
+                            xp.empty(capacity, dtype=xp.float64),
+                            xp.empty(capacity, dtype=xp.float64),
+                            xp.empty(capacity, dtype=xp.float64),
+                        )
+                        slot.capacity = capacity
+                        slot.completion_event = None
+                    try:
+                        yield slot.scratch
+                    finally:
+                        event_type = getattr(xp.cuda, "Event", None)
+                        if event_type is not None:
+                            event = event_type(disable_timing=True)
+                            event.record(active_stream)
+                            slot.completion_event = event
+            finally:
+                with self._scratch_slots_lock:
+                    slot.leases -= 1
+                    self._scratch_clock += 1
+                    slot.last_used = self._scratch_clock
+                    if not admitted and slot.scratch is not None:
+                        if not self._event_complete(slot.completion_event):
+                            self._scratch_retired.append((slot.scratch, slot.completion_event))
+                    self._prune_scratch_retired_locked()
+
+    @staticmethod
+    def _event_complete(event) -> bool:
+        if event is None:
+            return True
+        try:
+            query = getattr(event, "query", None)
+            if query is not None:
+                return bool(query())
+            return bool(event.done)
+        except (AttributeError, RuntimeError):
+            return False
+
+    def _prune_scratch_retired_locked(self) -> None:
+        self._scratch_retired[:] = [
+            item for item in self._scratch_retired if not self._event_complete(item[1])
+        ]
+
+    @staticmethod
+    def _normalize_cuda_stream(x, xp, stream):
+        """Bind null/current streams to the input device and reject mismatches."""
+        device_id = int(x.device.id)
+        with xp.cuda.Device(device_id):
+            if stream is None:
+                return xp.cuda.get_current_stream()
+            stream_device = int(getattr(stream, "device_id", -1))
+            if stream_device >= 0 and stream_device != device_id:
+                raise ValueError(
+                    f"CUDA stream device {stream_device} does not match input device {device_id}."
+                )
+            return stream
+
+    def _get_chunk_workspace(self, device_id: int) -> _ChunkWorkspace:
+        with self._chunk_workspaces_lock:
+            workspace = self._chunk_workspaces.get(device_id)
+            if workspace is None:
+                workspace = _ChunkWorkspace()
+                self._chunk_workspaces[device_id] = workspace
+            return workspace
+
+    def _get_pinned_buffers(self, buf_size, *, chunk_z=False, workspace=None):
         """Return pooled pinned-memory staging buffers for 2 stream slots.
 
         Returns a list of 2 dicts (one per stream slot).  Each dict has:
@@ -625,15 +1022,18 @@ class Transformer:
         """
         import cupy as cp
 
+        if workspace is None:
+            device_id = int(cp.cuda.runtime.getDevice())
+            workspace = self._get_chunk_workspace(device_id)
         need_alloc = (
-            not hasattr(self, "_pinned_bufs")
-            or self._pinned_buf_size < buf_size
-            or (chunk_z and not self._pinned_has_z)
+            workspace.pinned_slots is None
+            or workspace.pinned_size < buf_size
+            or (chunk_z and not workspace.pinned_has_z)
         )
         if need_alloc:
             # Grow-only: never shrink size, never drop z capability
-            buf_size = max(buf_size, getattr(self, "_pinned_buf_size", 0))
-            chunk_z = chunk_z or getattr(self, "_pinned_has_z", False)
+            buf_size = max(buf_size, workspace.pinned_size)
+            chunk_z = chunk_z or workspace.pinned_has_z
             nbytes = buf_size * np.dtype(np.float64).itemsize
             # 2 slots x (in_x, in_y, out_x, out_y) = 8 buffers
             # 2 slots x (in_x, in_y, in_z, out_x, out_y, out_z) = 12 buffers
@@ -655,13 +1055,13 @@ class Transformer:
                     slot["out_z"] = arrs[base + 5]
                 slots.append(slot)
             # Keep references to prevent GC of the underlying pinned memory
-            self._pinned_mems = pinned_mems
-            self._pinned_bufs = slots
-            self._pinned_buf_size = buf_size
-            self._pinned_has_z = chunk_z
-        return self._pinned_bufs
+            workspace.pinned_mems = pinned_mems
+            workspace.pinned_slots = slots
+            workspace.pinned_size = buf_size
+            workspace.pinned_has_z = chunk_z
+        return workspace.pinned_slots
 
-    def _get_dev_buffers(self, buf_size, *, chunk_z=False):
+    def _get_dev_buffers(self, buf_size, *, chunk_z=False, workspace=None, device_id=None):
         """Return pooled device buffer pairs for 2 stream slots.
 
         Each slot has: "x", "y", "ox", "oy" (and "z", "oz" when chunk_z).
@@ -669,30 +1069,172 @@ class Transformer:
         """
         import cupy as cp
 
-        need_alloc = (
-            not hasattr(self, "_dev_bufs")
-            or self._dev_buf_size < buf_size
-            or (chunk_z and not self._dev_has_z)
+        if device_id is None:
+            device_id = int(cp.cuda.runtime.getDevice())
+        if workspace is None:
+            workspace = self._get_chunk_workspace(device_id)
+        with self._device_buffer_cache_lock:
+            need_alloc = (
+                workspace.device_slots is None
+                or workspace.device_size < buf_size
+                or (chunk_z and not workspace.device_has_z)
+            )
+            if need_alloc:
+                capacity = max(buf_size, workspace.device_size)
+                has_z = chunk_z or workspace.device_has_z
+                with cp.cuda.Device(device_id):
+                    slots = []
+                    for _ in range(2):
+                        slot = {
+                            "x": cp.empty(capacity, dtype=cp.float64),
+                            "y": cp.empty(capacity, dtype=cp.float64),
+                            "ox": cp.empty(capacity, dtype=cp.float64),
+                            "oy": cp.empty(capacity, dtype=cp.float64),
+                        }
+                        if has_z:
+                            slot["z"] = cp.empty(capacity, dtype=cp.float64)
+                            slot["oz"] = cp.empty(capacity, dtype=cp.float64)
+                        slots.append(slot)
+                workspace.device_slots = slots
+                workspace.device_size = capacity
+                workspace.device_has_z = has_z
+            self._device_buffer_cache[device_id] = {
+                "size": workspace.device_size,
+                "has_z": workspace.device_has_z,
+                "slots": workspace.device_slots,
+            }
+            return workspace.device_slots
+
+    def _transform_chunked_gpu(
+        self,
+        cp,
+        workspace: _ChunkWorkspace,
+        device_id: int,
+        pipeline: TransformPipeline,
+        x: np.ndarray,
+        y: np.ndarray,
+        z_arr: np.ndarray | None,
+        *,
+        chunk_z: bool,
+        chunk_size: int,
+        buf_size: int,
+        precision: str,
+        transcendentals: str,
+    ):
+        """Execute one serialized call using persistent two-stream resources."""
+        from vibeproj.transcendentals import detect_device_capability
+
+        if workspace.streams is None:
+            workspace.streams = (
+                cp.cuda.Stream(non_blocking=True),
+                cp.cuda.Stream(non_blocking=True),
+            )
+        streams = workspace.streams
+        pin_slots = self._get_pinned_buffers(buf_size, chunk_z=chunk_z, workspace=workspace)
+        dev_bufs = self._get_dev_buffers(
+            buf_size,
+            chunk_z=chunk_z,
+            workspace=workspace,
+            device_id=device_id,
         )
-        if need_alloc:
-            buf_size = max(buf_size, getattr(self, "_dev_buf_size", 0))
-            chunk_z = chunk_z or getattr(self, "_dev_has_z", False)
-            slots = []
-            for _ in range(2):
-                slot = {
-                    "x": cp.empty(buf_size, dtype=cp.float64),
-                    "y": cp.empty(buf_size, dtype=cp.float64),
-                    "ox": cp.empty(buf_size, dtype=cp.float64),
-                    "oy": cp.empty(buf_size, dtype=cp.float64),
-                }
+        execution_context = pipeline.build_execution_context(
+            precision=precision,
+            transcendentals=transcendentals,
+            device=detect_device_capability(cp, device_id=device_id),
+            workload_size=buf_size,
+            _normalized=True,
+        )
+
+        n = x.size
+        out_x = np.empty(n, dtype=np.float64)
+        out_y = np.empty(n, dtype=np.float64)
+        out_z = np.empty(n, dtype=np.float64) if chunk_z else None
+        pending: list[tuple[int, int, int] | None] = [None, None]
+        pending_z_ref = [None, None]
+
+        def flush_slot(slot_index: int) -> None:
+            item = pending[slot_index]
+            if item is None:
+                return
+            start, end, size = item
+            pin = pin_slots[slot_index]
+            streams[slot_index].synchronize()
+            out_x[start:end] = pin["out_x"][:size]
+            out_y[start:end] = pin["out_y"][:size]
+            if chunk_z:
+                out_z[start:end] = pin["out_z"][:size]
+            pending[slot_index] = None
+            pending_z_ref[slot_index] = None
+
+        for chunk_index, start in enumerate(range(0, n, chunk_size)):
+            end = min(start + chunk_size, n)
+            size = end - start
+            slot_index = chunk_index % 2
+            stream = streams[slot_index]
+            device = dev_bufs[slot_index]
+            pin = pin_slots[slot_index]
+            flush_slot(slot_index)
+
+            pin["in_x"][:size] = x[start:end]
+            pin["in_y"][:size] = y[start:end]
+            if chunk_z:
+                pin["in_z"][:size] = z_arr[start:end]
+
+            nbytes = size * np.dtype(np.float64).itemsize
+            with stream:
+                cp.cuda.runtime.memcpyAsync(
+                    device["x"].data.ptr, pin["in_x"].ctypes.data, nbytes, 1, stream.ptr
+                )
+                cp.cuda.runtime.memcpyAsync(
+                    device["y"].data.ptr, pin["in_y"].ctypes.data, nbytes, 1, stream.ptr
+                )
                 if chunk_z:
-                    slot["z"] = cp.empty(buf_size, dtype=cp.float64)
-                    slot["oz"] = cp.empty(buf_size, dtype=cp.float64)
-                slots.append(slot)
-            self._dev_bufs = slots
-            self._dev_buf_size = buf_size
-            self._dev_has_z = chunk_z
-        return self._dev_bufs
+                    cp.cuda.runtime.memcpyAsync(
+                        device["z"].data.ptr,
+                        pin["in_z"].ctypes.data,
+                        nbytes,
+                        1,
+                        stream.ptr,
+                    )
+
+                with self._transform_scratch_context(
+                    device["x"][:size], cp, pipeline, stream
+                ) as scratch:
+                    result = pipeline.transform(
+                        device["x"][:size],
+                        device["y"][:size],
+                        cp,
+                        z=device["z"][:size] if chunk_z else None,
+                        out_x=device["ox"][:size],
+                        out_y=device["oy"][:size],
+                        out_z=device["oz"][:size] if chunk_z else None,
+                        precision=precision,
+                        transcendentals=transcendentals,
+                        scratch=scratch,
+                        execution_context=execution_context,
+                        stream=stream,
+                    )
+
+                cp.cuda.runtime.memcpyAsync(
+                    pin["out_x"].ctypes.data, device["ox"].data.ptr, nbytes, 2, stream.ptr
+                )
+                cp.cuda.runtime.memcpyAsync(
+                    pin["out_y"].ctypes.data, device["oy"].data.ptr, nbytes, 2, stream.ptr
+                )
+                if chunk_z:
+                    cp.cuda.runtime.memcpyAsync(
+                        pin["out_z"].ctypes.data, result[2].data.ptr, nbytes, 2, stream.ptr
+                    )
+
+            pending[slot_index] = (start, end, size)
+            if chunk_z:
+                pending_z_ref[slot_index] = result[2]
+
+        flush_slot(0)
+        flush_slot(1)
+        if z_arr is not None:
+            return (out_x, out_y, out_z) if chunk_z else (out_x, out_y, z_arr)
+        return out_x, out_y
 
     @overload
     def transform_chunked(
@@ -703,6 +1245,8 @@ class Transformer:
         *,
         direction: Literal["FORWARD", "INVERSE"] = "FORWARD",
         chunk_size: int = 1_000_000,
+        precision: str = "auto",
+        transcendentals: TranscendentalPolicy = "auto",
     ) -> tuple[np.ndarray, np.ndarray]: ...
 
     @overload
@@ -714,6 +1258,8 @@ class Transformer:
         *,
         direction: Literal["FORWARD", "INVERSE"] = "FORWARD",
         chunk_size: int = 1_000_000,
+        precision: str = "auto",
+        transcendentals: TranscendentalPolicy = "auto",
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]: ...
 
     def transform_chunked(
@@ -724,13 +1270,19 @@ class Transformer:
         *,
         direction: Literal["FORWARD", "INVERSE"] = "FORWARD",
         chunk_size: int = 1_000_000,
+        precision: str = "auto",
+        transcendentals: TranscendentalPolicy = "auto",
     ) -> tuple[np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Transform large host-resident arrays in GPU-sized chunks.
 
-        Uses a double-buffered pipeline with pinned host memory and 2 CUDA
-        streams to overlap H<->D transfers with GPU compute.  Each stream
-        owns a dedicated set of device buffers so chunk N can execute on
-        stream A while chunk N+1 transfers on stream B.
+        Uses a double-buffered pipeline with pinned host memory and two CUDA
+        streams to overlap transfers with GPU compute. Each Transformer keeps
+        a grow-only workspace per CUDA device containing persistent streams,
+        pinned buffers, and device buffers. Calls sharing that Transformer and
+        device serialize around the complete workspace lifecycle; the two
+        streams still overlap work within a call. Workspace and correction
+        scratch allocation occurs on first use or growth and is reused by
+        subsequent same-size calls.
 
         Falls back to CPU ``transform()`` when CuPy is not available.
 
@@ -745,17 +1297,38 @@ class Transformer:
             "FORWARD" or "INVERSE".
         chunk_size : int, default 1_000_000
             Coordinates per GPU chunk. Larger values use more GPU memory
-            but reduce per-chunk overhead.
+            but reduce per-chunk overhead. Size-aware ``"auto"`` dispatch uses
+            the planned buffer size once and reuses that decision for every
+            chunk, including a smaller final chunk.
+        precision : {"auto", "fp64", "fp32", "ds"}
+            Numeric compute precision for fused GPU kernels.
+        transcendentals : {"auto", "native", "accelerated"}
+            Hardware-aware transcendental implementation policy, independent
+            of *precision*.
 
         Returns
         -------
         tuple of numpy.ndarray
             Transformed (x, y) or (x, y, z) on the host.
         """
+        from vibeproj.transcendentals import (
+            normalize_compute_precision,
+            normalize_transcendental_policy,
+        )
+
+        precision = normalize_compute_precision(precision)
+        transcendentals = normalize_transcendental_policy(transcendentals)
         try:
             import cupy as cp
         except ImportError:
-            return self.transform(x, y, z=z, direction=direction)  # type: ignore[arg-type,misc]
+            return self.transform(  # type: ignore[arg-type,misc]
+                x,
+                y,
+                z=z,
+                direction=direction,
+                precision=precision,
+                transcendentals=transcendentals,
+            )
 
         if direction not in ("FORWARD", "INVERSE"):
             raise ValueError(f"Invalid direction: {direction}")
@@ -768,172 +1341,30 @@ class Transformer:
             result = (np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64))
             return (*result, np.asarray(z, dtype=np.float64)) if z is not None else result
 
-        # Resolve pipeline once
-        if direction == "FORWARD":
-            pipeline = self._pipeline
-        else:
-            if self._inv_pipeline is None:
-                with self._inv_pipeline_lock:
-                    if self._inv_pipeline is None:
-                        inv_helmert = self._helmert.inverted() if self._helmert else None
-                        self._inv_pipeline = TransformPipeline(
-                            self._dst_params,
-                            self._src_params,
-                            helmert=inv_helmert,
-                            svd_correction=self._svd_correction,
-                            svd_negate=not self._svd_negate,
-                        )
-            pipeline = self._inv_pipeline
+        pipeline = self._pipeline_for_direction(direction)
 
         # Determine if z needs to be chunked through Helmert
         chunk_z = z is not None and self._helmert is not None
         z_arr = np.asarray(z, dtype=np.float64) if z is not None else None
 
-        # Final host output arrays
-        out_x = np.empty(n, dtype=np.float64)
-        out_y = np.empty(n, dtype=np.float64)
-        out_z = np.empty(n, dtype=np.float64) if chunk_z else None
-
-        # --- Double-buffered stream pipeline setup ---
         buf_size = min(chunk_size, n)
-
-        # Pinned host staging buffers — 2 slots (pooled on the Transformer)
-        pin_slots = self._get_pinned_buffers(buf_size, chunk_z=chunk_z)
-
-        # 2 non-blocking CUDA streams
-        streams = [cp.cuda.Stream(non_blocking=True), cp.cuda.Stream(non_blocking=True)]
-
-        # 2 stream slots of device buffers (pooled on the Transformer)
-        dev_bufs = self._get_dev_buffers(buf_size, chunk_z=chunk_z)
-
-        # Build list of (start, end) for all chunks
-        chunks = []
-        for start in range(0, n, chunk_size):
-            end = min(start + chunk_size, n)
-            chunks.append((start, end))
-
-        # Track which stream slot holds pending D2H output that has not yet
-        # been copied into the final host output arrays.  We defer the sync
-        # and host-side copy so the GPU can run ahead.
-        pending = [None, None]  # pending[slot] = (start, end, size) or None
-        # Keep references to Helmert z output arrays alive until D2H completes.
-        # The pipeline may return a freshly-allocated z array (from Helmert) that
-        # would be freed when `result` is reassigned, while the D2H memcpyAsync
-        # is still in-flight on the stream.
-        pending_z_ref = [None, None]
-
-        def _flush_slot(slot_idx):
-            """Sync stream and copy pinned output into final host arrays."""
-            if pending[slot_idx] is None:
-                return
-            p_start, p_end, p_size = pending[slot_idx]
-            ps = pin_slots[slot_idx]
-            streams[slot_idx].synchronize()
-            out_x[p_start:p_end] = ps["out_x"][:p_size]
-            out_y[p_start:p_end] = ps["out_y"][:p_size]
-            if chunk_z:
-                out_z[p_start:p_end] = ps["out_z"][:p_size]
-            pending[slot_idx] = None
-            pending_z_ref[slot_idx] = None
-
-        for chunk_idx, (start, end) in enumerate(chunks):
-            size = end - start
-            slot = chunk_idx % 2
-            stream = streams[slot]
-            db = dev_bufs[slot]
-            ps = pin_slots[slot]
-
-            # Before reusing this slot's pinned buffers, flush any
-            # pending D2H data from the previous iteration on this slot.
-            _flush_slot(slot)
-
-            # Stage input: CPU memcpy into pinned buffers (fast, no GPU involved)
-            ps["in_x"][:size] = x[start:end]
-            ps["in_y"][:size] = y[start:end]
-            if chunk_z:
-                ps["in_z"][:size] = z_arr[start:end]  # type: ignore[index]
-
-            # --- All GPU work for this chunk on its dedicated stream ---
-            nbytes = size * 8  # fp64 = 8 bytes per element
-            with stream:
-                # H2D async: pinned host -> device (stream-ordered).
-                # Use memcpyAsync (kind=1 = cudaMemcpyHostToDevice) for
-                # truly non-blocking transfers. CuPy's .set() can
-                # synchronize the host thread even with pinned memory.
-                cp.cuda.runtime.memcpyAsync(
-                    db["x"].data.ptr, ps["in_x"].ctypes.data, nbytes, 1, stream.ptr
-                )
-                cp.cuda.runtime.memcpyAsync(
-                    db["y"].data.ptr, ps["in_y"].ctypes.data, nbytes, 1, stream.ptr
-                )
-                if chunk_z:
-                    cp.cuda.runtime.memcpyAsync(
-                        db["z"].data.ptr, ps["in_z"].ctypes.data, nbytes, 1, stream.ptr
-                    )
-
-                # GPU compute (kernel launch is stream-ordered via the
-                # stream= parameter propagated through pipeline.transform
-                # into fused_transform / fused_helmert_shift).
-                if chunk_z:
-                    result = pipeline.transform(
-                        db["x"][:size],
-                        db["y"][:size],
-                        cp,
-                        z=db["z"][:size],
-                        out_x=db["ox"][:size],
-                        out_y=db["oy"][:size],
-                        out_z=db["oz"][:size],
-                        stream=stream,
-                    )
-                else:
-                    result = pipeline.transform(
-                        db["x"][:size],
-                        db["y"][:size],
-                        cp,
-                        out_x=db["ox"][:size],
-                        out_y=db["oy"][:size],
-                        stream=stream,
-                    )
-
-                # D2H async: device -> pinned host (stream-ordered).
-                # Use memcpyAsync (kind=2 = cudaMemcpyDeviceToHost) for
-                # truly non-blocking transfers. CuPy's .get(out=) blocks
-                # the host thread (~0.31ms), serializing the pipeline and
-                # defeating double-buffering overlap.
-                # The caller must synchronize the stream before reading
-                # from the pinned buffer (_flush_slot handles this).
-                #
-                # For x/y, db["ox"]/db["oy"] are the pre-allocated output
-                # buffers that the fused kernel writes into (via out_x/out_y).
-                # For z, the pipeline may return a DIFFERENT device array
-                # (Helmert output) rather than writing to db["oz"], so we
-                # must use result[2] to get the actual z output pointer.
-                cp.cuda.runtime.memcpyAsync(
-                    ps["out_x"].ctypes.data, db["ox"].data.ptr, nbytes, 2, stream.ptr
-                )
-                cp.cuda.runtime.memcpyAsync(
-                    ps["out_y"].ctypes.data, db["oy"].data.ptr, nbytes, 2, stream.ptr
-                )
-                if chunk_z:
-                    cp.cuda.runtime.memcpyAsync(
-                        ps["out_z"].ctypes.data, result[2].data.ptr, nbytes, 2, stream.ptr
-                    )
-
-            # Record that this slot has pending output.
-            # Keep a reference to the z result to prevent GC while D2H is in-flight.
-            pending[slot] = (start, end, size)  # type: ignore[call-overload]
-            if chunk_z:
-                pending_z_ref[slot] = result[2]
-
-        # Flush any remaining pending slots
-        _flush_slot(0)
-        _flush_slot(1)
-
-        if z is not None:
-            if chunk_z:
-                return out_x, out_y, out_z  # type: ignore[return-value]
-            return out_x, out_y, z_arr  # type: ignore[return-value]
-        return out_x, out_y
+        device_id = int(cp.cuda.runtime.getDevice())
+        workspace = self._get_chunk_workspace(device_id)
+        with workspace.lock, cp.cuda.Device(device_id):
+            return self._transform_chunked_gpu(
+                cp,
+                workspace,
+                device_id,
+                pipeline,
+                x,
+                y,
+                z_arr,
+                chunk_z=chunk_z,
+                chunk_size=chunk_size,
+                buf_size=buf_size,
+                precision=precision,
+                transcendentals=transcendentals,
+            )
 
     def transform_bounds(
         self,
@@ -944,6 +1375,8 @@ class Transformer:
         *,
         densify_pts: int = 21,
         direction: Literal["FORWARD", "INVERSE"] = "FORWARD",
+        precision: str = "auto",
+        transcendentals: TranscendentalPolicy = "auto",
     ) -> tuple[float, float, float, float]:
         """Transform a bounding box, densifying edges to handle projection curvature.
 
@@ -964,6 +1397,11 @@ class Transformer:
             of adjacent corners.  Clamped to a minimum of 0.
         direction : {"FORWARD", "INVERSE"}
             Transform direction.
+        precision : {"auto", "fp64", "fp32", "ds"}
+            Numeric compute precision forwarded to the densified transform.
+        transcendentals : {"auto", "native", "accelerated"}
+            Hardware-aware transcendental implementation policy, independent
+            of *precision*. ``"auto"`` uses the densified point count.
 
         Returns
         -------
@@ -976,6 +1414,13 @@ class Transformer:
         the returned ``left`` will be greater than ``right``
         (e.g. ``left=153, right=-162``), matching the pyproj convention.
         """
+        from vibeproj.transcendentals import (
+            normalize_compute_precision,
+            normalize_transcendental_policy,
+        )
+
+        precision = normalize_compute_precision(precision)
+        transcendentals = normalize_transcendental_policy(transcendentals)
         if direction not in ("FORWARD", "INVERSE"):
             raise ValueError(f"Invalid direction: {direction}")
 
@@ -1020,7 +1465,13 @@ class Transformer:
         y_all[3 * n : 4 * n] = xp.linspace(top, bottom, pts_per_edge)[:-1]
 
         # Transform all edge points at once
-        tx, ty = self.transform(x_all, y_all, direction=direction)
+        tx, ty = self.transform(
+            x_all,
+            y_all,
+            direction=direction,
+            precision=precision,
+            transcendentals=transcendentals,
+        )
 
         # Detect antimeridian crossing before filtering (needs edge structure).
         # Only relevant when the output CRS is geographic (longitudes).

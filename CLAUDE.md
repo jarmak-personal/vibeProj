@@ -5,8 +5,10 @@ GPU-accelerated coordinate projection library. 24 projections, each with a fused
 ## Architecture
 
 - **Fused NVRTC kernels** (`src/vibeproj/fused_kernels.py`) — 48 CUDA kernels (24 projections × fwd/inv).
-  Each runs the full pipeline in one kernel launch: axis swap → deg/rad → central meridian →
+  Each projection stage runs in one kernel launch: axis swap → deg/rad → central meridian →
   projection math → scale/offset → axis swap output. Compiled at runtime via CuPy `RawKernel`.
+  Helmert and SVD are separate mathematical stages, so cross-datum pipelines use one fused launch
+  per stage and reuse bounded device scratch between stages.
 - **xp fallback path** (`src/vibeproj/projections/`) — NumPy/CuPy element-wise implementations.
   Used on CPU and as reference for testing. Each projection is a class with `setup()`, `forward()`, `inverse()`.
 - **Pipeline** (`src/vibeproj/pipeline.py`) — chains pre/post ops. `_try_fused()` fast-path intercepts
@@ -31,10 +33,11 @@ GPU-accelerated coordinate projection library. 24 projections, each with a fused
   fused CUDA kernel (`svd_correction` in fused_kernels.py) or NumPy. Dispatch:
   Helmert (if available) + SVD (if baked pair exists); if neither, warning.
   Fitting tool: `tools/fit_datum_corrections.py`.
-- **GPU detection** (`src/vibeproj/gpu_detect.py`) — queries `SingleToDoublePrecisionPerfRatio` to classify
-  consumer (1:64) vs datacenter (1:2) GPU. Projection arithmetic remains fp64. Helmert trig and
-  guarded forward-UTM transcendentals auto-dispatch to bounded Q1.62 INT64 only on validated Ada
-  `sm_89` consumer GPUs; all other GPUs conservatively use paired native fp64 `sincos`.
+- **Transcendental registry** (`src/vibeproj/transcendentals.py`) — resolves the independent public
+  `transcendentals="auto"|"native"|"accelerated"` policy from operation, domain, precision,
+  workload size, and device capability. Qualified bounded implementations are currently limited to Helmert and
+  forward UTM on Ada `sm_89`; unsupported, datacenter, and unknown devices explicitly use native
+  libdevice behavior. `Transformer.explain_strategy()` exposes every decision.
 - **Fixed-point trig** (`src/vibeproj/_fixed_trig_device_fns.py`) — table-free Q1.62 `sin`/`cos` for
   bounded Helmert and forward-TM angles, using nearest-quadrant reduction and degree-17/18
   polynomials. Forward TM additionally reframes `atan2` as a tiny correction and uses a bounded

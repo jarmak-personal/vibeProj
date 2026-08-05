@@ -18,10 +18,13 @@ For a 10M-point GeoDataFrame this adds ~40ms of PCIe transfer on top of
 ~500ms of CPU projection time. vibeProj eliminates both:
 
 ```
-GPU buffer → fused kernel (GPU) → GPU buffer
+GPU buffer → fused stage kernel(s) (GPU) → GPU buffer
 ```
 
-One kernel launch, no host round-trip, no intermediate allocation.
+There is one fused launch per mathematical stage and no host round-trip.
+Projection-only transforms need no intermediate buffers. Multi-stage
+Helmert/SVD transforms lazily allocate bounded device scratch and reuse it on
+warmed calls.
 
 ## `transform_buffers()` API
 
@@ -29,7 +32,8 @@ The key integration point is `transform_buffers()`. Unlike `transform()`,
 it:
 
 - Skips scalar detection and dtype inference
-- Accepts pre-allocated output arrays (zero allocation)
+- Accepts pre-allocated final output arrays (projection-only calls need no
+  scratch; multi-stage scratch is allocation-free after warm-up)
 - Returns the same output array objects (verifiable with `is`)
 
 ```python
@@ -46,7 +50,7 @@ y_in = cp.asarray(lon_data, dtype=cp.float64)
 x_out = cp.empty_like(x_in)
 y_out = cp.empty_like(y_in)
 
-# Single fused kernel launch, no allocation, no host transfer
+# Projection-only example: one fused launch, no scratch allocation or host transfer
 rx, ry = t.transform_buffers(x_in, y_in, out_x=x_out, out_y=y_out)
 
 assert rx is x_out  # same object — no copy
@@ -83,17 +87,18 @@ def to_crs(gdf, target_crs):
     x_out = cp.empty_like(x_in)
     y_out = cp.empty_like(y_in)
 
-    # Project — single fused kernel launch
+    # Projection-only example — one fused stage launch
     t.transform_buffers(x_in, y_in, out_x=x_out, out_y=y_out)
 
     # Build new GeoDataFrame with projected coordinates
     return gdf._with_coordinates(x_out, y_out, crs=target_crs)
 ```
 
-The critical property: **no data leaves the GPU**. The input coordinate
-arrays are read by the fused kernel, and the output arrays are written
-by the same kernel. There are no intermediate Python objects, no
-temporary arrays, and no host-device transfers.
+The critical property: **no data leaves the GPU**. Projection-only paths read
+the input arrays and write final outputs in one kernel. Helmert/SVD paths run
+two or three fused stage kernels through bounded reusable scratch. Neither path
+creates intermediate Python coordinate objects or performs host-device
+round-trips.
 
 ## Caching the Transformer
 

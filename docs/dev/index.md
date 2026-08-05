@@ -6,5 +6,6 @@
 architecture
 adding-projections
 fused-kernels
+transcendentals
 testing
 ```

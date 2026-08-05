@@ -9,5 +9,6 @@ projections
 datum-corrections
 vibespatial
 precision
+transcendentals
 api
 ```

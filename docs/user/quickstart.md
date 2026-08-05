@@ -75,7 +75,7 @@ lat = cp.asarray(lat_data, dtype=cp.float64)
 out_x = cp.empty_like(lon)
 out_y = cp.empty_like(lat)
 
-# Transform in-place -- no intermediate allocation
+# Projection-only transform into preallocated outputs -- no scratch allocation
 t.transform_buffers(lon, lat, out_x=out_x, out_y=out_y)
 ```
 

@@ -31,7 +31,7 @@ Create a transformer between two coordinate reference systems.
 t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
 ```
 
-### `Transformer.transform(x, y, z=None, direction="FORWARD")`
+### `Transformer.transform(x, y, z=None, direction="FORWARD", *, precision="auto", transcendentals="auto")`
 
 Transform coordinates.
 
@@ -40,6 +40,11 @@ Transform coordinates.
 - `x`, `y` -- Input coordinates. Accepts scalars, lists, NumPy arrays, or CuPy arrays. By default, `always_xy=True`, so geographic CRS input/output is `x` = longitude, `y` = latitude. Pass `always_xy=False` to use native CRS axis order.
 - `z` -- Optional ellipsoidal height in meters. When a Helmert datum shift is active (cross-datum transform), z is transformed through the ECEF intermediate. When no datum shift is needed, z is passed through unchanged.
 - `direction` -- `"FORWARD"` or `"INVERSE"`.
+- `precision` -- Compute precision: `"auto"`, `"fp64"`, `"fp32"`, or `"ds"`.
+- `transcendentals` -- Special-function policy: `"auto"`, `"native"`, or
+  `"accelerated"`. This is a per-call choice and is not stored on the
+  transformer. `"auto"` uses the concrete input size and device capability
+  when applying qualified acceleration crossover thresholds.
 
 **Returns:** Tuple `(x_out, y_out)` or `(x_out, y_out, z_out)` if z was provided. Scalars if input was scalar, arrays otherwise.
 
@@ -57,10 +62,13 @@ x, y = t.transform(lon_array, lat_array)
 x, y, z_out = t.transform(lon, lat, z=45.0)
 ```
 
-### `Transformer.transform_buffers(x, y, z=None, *, direction="FORWARD", out_x=None, out_y=None, out_z=None, precision="auto")`
+### `Transformer.transform_buffers(x, y, z=None, *, direction="FORWARD", out_x=None, out_y=None, out_z=None, precision="auto", transcendentals="auto", stream=None)`
 
-Zero-copy transform for device-resident arrays. Skips scalar detection
-and dtype conversion for maximum throughput.
+Transform device-resident arrays with optional pre-allocated outputs. This path
+skips scalar detection and dtype conversion. With pre-allocated outputs,
+repeated same-size GPU calls on a warmed, cached stream avoid output and
+correction-scratch allocation; first use, cache growth, and kernel compilation
+can allocate.
 
 **Parameters:**
 
@@ -68,8 +76,17 @@ and dtype conversion for maximum throughput.
 - `z` -- Optional ellipsoidal height array. Transformed through Helmert when a datum shift is active; passed through unchanged otherwise.
 - `direction` -- `"FORWARD"` or `"INVERSE"`.
 - `out_x`, `out_y` -- Optional pre-allocated output arrays. When provided, results are written directly into these arrays and the same objects are returned.
-- `out_z` -- Optional pre-allocated output height array. Only used when z is provided and a Helmert datum shift is active.
+- `out_z` -- Optional pre-allocated output height array. When `z` is provided,
+  this buffer is written and returned identically whether height is transformed
+  by Helmert or passed through another pipeline.
 - `precision` -- Compute precision: `"auto"`, `"fp64"`, `"fp32"`, or `"ds"`.
+- `transcendentals` -- Special-function policy: `"auto"`, `"native"`, or
+  `"accelerated"`, independent of `precision`. Unsupported accelerated
+  combinations explicitly use native fallback. `"auto"` applies workload-size
+  crossover thresholds.
+- `stream` -- Optional CuPy CUDA stream. `None` uses the current stream on the
+  input array's device; the null stream is supported, cross-device streams are
+  rejected, and the caller owns synchronization.
 
 **Returns:** Tuple `(out_x, out_y)` or `(out_x, out_y, z_out)` if z was provided.
 
@@ -77,12 +94,83 @@ and dtype conversion for maximum throughput.
 out_x = cp.empty(n, dtype=cp.float64)
 out_y = cp.empty(n, dtype=cp.float64)
 rx, ry = t.transform_buffers(lon, lat, out_x=out_x, out_y=out_y)
-assert rx is out_x  # same object, no allocation
+assert rx is out_x  # supplied output object is returned identically
 
 # With height (cross-datum transforms)
 out_z = cp.empty(n, dtype=cp.float64)
 rx, ry, rz = t.transform_buffers(lon, lat, h, out_x=out_x, out_y=out_y, out_z=out_z)
 ```
+
+### `Transformer.transform_chunked(x, y, z=None, *, direction="FORWARD", chunk_size=1000000, precision="auto", transcendentals="auto")`
+
+Transform host arrays through a double-buffered GPU pipeline. Each Transformer
+keeps a grow-only workspace per CUDA device: two non-blocking streams plus
+pinned-host and device staging slots persist across calls. Calls that share the
+same Transformer and CUDA device serialize around that workspace, while the two
+streams still overlap transfers and compute within each call. Different
+Transformer instances or CUDA devices do not share the lock.
+
+The workspace and any correction scratch allocate lazily on first use or growth
+and are reused for subsequent same-size calls. `precision` accepts `"auto"`,
+`"fp64"`, `"fp32"`, or `"ds"`; `transcendentals` accepts `"auto"`, `"native"`,
+or `"accelerated"`. Size-aware automatic dispatch uses the planned chunk-buffer
+size once and reuses that decision for every chunk, including a smaller final
+chunk.
+
+For `transform_buffers()`, `stream=None` means the current stream on the input
+array's device, and CuPy's legacy null stream is supported. An explicit stream
+from a different device is rejected.
+
+### `Transformer.compile(*, precision="auto", transcendentals="auto")`
+
+Pre-compile this transformer's fused kernels. The two policy keywords use the
+same resolver as transform calls; compilation does not persist either choice
+on the transformer. `precision` accepts `"auto"`, `"fp64"`, `"fp32"`, or `"ds"`.
+Because compilation has no concrete workload, `transcendentals="auto"` selects
+an otherwise-qualified implementation without a runtime crossover threshold.
+Compilation does not allocate per-Transformer stream scratch or chunk staging
+workspaces; those remain lazy.
+
+### `Transformer.transform_bounds(left, bottom, right, top, *, densify_pts=21, direction="FORWARD", precision="auto", transcendentals="auto")`
+
+Transform a densified bounding-box perimeter and return its output envelope.
+`precision` accepts `"auto"`, `"fp64"`, `"fp32"`, or `"ds"`;
+`transcendentals` accepts `"auto"`, `"native"`, or `"accelerated"` independently.
+Size-aware automatic dispatch uses the total densified point count.
+
+### `vibeproj.warm_up(projections=None, *, precision="auto", transcendentals="auto")`
+
+Pre-compile selected fused projection kernels. It accepts the same four
+precision values and three transcendental policies as `Transformer.compile()`.
+Warm-up has no concrete workload size, so automatic policy selects an otherwise-
+qualified implementation without applying runtime crossover thresholds. It
+does not allocate Transformer-owned correction scratch or chunk workspaces.
+
+### `Transformer.explain_strategy(*, transcendentals="auto", precision="auto", direction="FORWARD", device=None, workload_size=None)`
+
+Return an immutable explanation containing one decision for every projection
+stage and any Helmert stage. Each decision reports its stable implementation
+ID, operation/family, device and domain, workload size, accuracy contract,
+reason, and whether an explicit accelerated request fell back to native. Pass
+`workload_size` to preview size-aware automatic selection. Passing a
+`DeviceCapability` makes hardware-policy checks deterministic without querying
+a GPU.
+
+```python
+explanation = t.explain_strategy(transcendentals="accelerated")
+for decision in explanation.decisions:
+    print(decision.implementation_id, decision.fallback, decision.reason)
+```
+
+### `vibeproj.list_transcendental_strategies()`
+
+Return the immutable central registry. Registry entries describe supported
+policies, backends, compute capabilities, compute precisions, domains, accuracy
+contracts, exact `min_elements` crossover thresholds, and native fallback
+behavior.
+
+See [Transcendental policy](transcendentals.md) for the qualified coverage
+matrix and hardware behavior.
 
 ## Pipeline API
 

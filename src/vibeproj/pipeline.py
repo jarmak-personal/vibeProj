@@ -14,7 +14,9 @@ This matches the cuProj operation pipeline architecture but runs on NumPy/CuPy a
 from __future__ import annotations
 
 import math
+import threading
 import warnings
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from vibeproj.projections import get_projection
@@ -29,6 +31,32 @@ RAD_TO_DEG = 180.0 / math.pi
 
 # Lazy CuPy reference for fused kernel fast-path
 _cupy_module = None
+
+
+@dataclass(frozen=True, slots=True)
+class TransformScratch:
+    """Reusable device intermediates owned and synchronized by Transformer."""
+
+    first_x: object
+    first_y: object
+    second_x: object
+    second_y: object
+
+    def pair(self, index: int, size: int):
+        if index == 0:
+            return self.first_x[:size], self.first_y[:size]
+        if index == 1:
+            return self.second_x[:size], self.second_y[:size]
+        raise ValueError(f"Invalid scratch pair index: {index}")
+
+
+def _scratch_pair(scratch: TransformScratch | None, index: int, size: int):
+    return (None, None) if scratch is None else scratch.pair(index, size)
+
+
+def _lat_lon_outputs(out_x, out_y, north_first: bool):
+    """Map public axis-order buffers to internal (lat, lon) buffers."""
+    return (out_x, out_y) if north_first else (out_y, out_x)
 
 
 def _get_cupy():
@@ -56,6 +84,8 @@ def _try_fused(
     out_x=None,
     out_y=None,
     precision="auto",
+    transcendentals="auto",
+    execution_context=None,
     stream=None,
 ):
     """Attempt fused kernel execution. Returns None if not available."""
@@ -74,6 +104,40 @@ def _try_fused(
         return None
     if not can_fuse(projection_name, direction):
         return None
+    if projection_name == "tmerc" and direction == "forward":
+        domain = "utm" if computed.get("is_utm", False) else "global"
+    else:
+        domain = f"{projection_name}.{direction}"
+    if execution_context is None:
+        # Compatibility for direct private-helper callers. Public entry points
+        # construct one immutable plan and pass it through every stage.
+        from vibeproj.transcendentals import (
+            TranscendentalOperation,
+            detect_device_capability,
+            resolve_transcendental_strategy,
+        )
+
+        operation = (
+            TranscendentalOperation.TMERC_FORWARD
+            if projection_name == "tmerc" and direction == "forward"
+            else TranscendentalOperation.PROJECTION
+        )
+        array_device = getattr(getattr(arg1, "device", None), "id", None)
+        device = detect_device_capability(
+            cp, device_id=None if array_device is None else int(array_device)
+        )
+        transcendental_impl = resolve_transcendental_strategy(
+            operation,
+            transcendentals,
+            device=device,
+            domain=domain,
+            precision=precision,
+            workload_size=int(arg1.size),
+        ).implementation_id
+    else:
+        transcendental_impl = execution_context.projection_implementation(
+            projection_name, direction, domain
+        )
     return fused_transform(
         arg1,
         arg2,
@@ -86,6 +150,7 @@ def _try_fused(
         out_x=out_x,
         out_y=out_y,
         precision=precision,
+        transcendental_impl=transcendental_impl,
         stream=stream,
     )
 
@@ -104,6 +169,8 @@ def _apply_datum_shift(
     out_lat=None,
     out_lon=None,
     out_h=None,
+    transcendentals="auto",
+    execution_context=None,
     stream=None,
 ):
     """Apply Helmert datum shift. Tries fused GPU kernel first, falls back to xp.
@@ -117,6 +184,26 @@ def _apply_datum_shift(
         try:
             from vibeproj.fused_kernels import fused_helmert_shift
 
+            if execution_context is None:
+                from vibeproj.transcendentals import (
+                    TranscendentalOperation,
+                    detect_device_capability,
+                    resolve_transcendental_strategy,
+                )
+
+                array_device = getattr(getattr(lat, "device", None), "id", None)
+                device = detect_device_capability(
+                    cp, device_id=None if array_device is None else int(array_device)
+                )
+                helmert_implementation = resolve_transcendental_strategy(
+                    TranscendentalOperation.HELMERT,
+                    transcendentals,
+                    device=device,
+                    precision="auto",
+                    workload_size=int(lat.size),
+                ).implementation_id
+            else:
+                helmert_implementation = execution_context.helmert_implementation
             result = fused_helmert_shift(
                 lat,
                 lon,
@@ -126,6 +213,7 @@ def _apply_datum_shift(
                 out_lat=out_lat,
                 out_lon=out_lon,
                 out_h=out_h,
+                transcendental_impl=helmert_implementation,
                 stream=stream,
             )
             if result is not None:
@@ -216,6 +304,105 @@ class TransformPipeline:
     and post-processing (scale, offset).
     """
 
+    @property
+    def needs_scratch(self) -> bool:
+        """Whether zero-allocation fused execution needs intermediate buffers."""
+        if self.mode == "proj_to_proj":
+            return True
+        if self.mode in ("forward", "inverse"):
+            return self._helmert is not None or self._svd_correction is not None
+        return self._helmert is not None and self._svd_correction is not None
+
+    def build_execution_context(
+        self,
+        *,
+        precision: str,
+        transcendentals: str,
+        device,
+        workload_size: int | None,
+        _normalized: bool = False,
+    ):
+        """Resolve every implementation once at the public-call boundary."""
+        from vibeproj.transcendentals import (
+            NATIVE_LIBDEVICE,
+            ExecutionContext,
+            ProjectionImplementation,
+            TranscendentalOperation,
+            normalize_compute_precision,
+            normalize_transcendental_policy,
+            resolve_transcendental_strategy,
+        )
+
+        if _normalized:
+            normalized_precision = precision
+            normalized_policy = transcendentals
+        else:
+            normalized_precision = normalize_compute_precision(precision)
+            normalized_policy = normalize_transcendental_policy(transcendentals)
+        stages: list[tuple[str, str, str, TranscendentalOperation]] = []
+
+        def add_projection(name: str, direction: str, computed: dict) -> None:
+            if name == "tmerc" and direction == "forward":
+                domain = "utm" if computed.get("is_utm", False) else "global"
+                operation = TranscendentalOperation.TMERC_FORWARD
+            else:
+                domain = f"{name}.{direction}"
+                operation = TranscendentalOperation.PROJECTION
+            stages.append((name, direction, domain, operation))
+
+        if self.mode == "forward":
+            add_projection(self.projection.name, "forward", self.computed)
+        elif self.mode == "inverse":
+            add_projection(self.projection.name, "inverse", self.computed)
+        elif self.mode == "proj_to_proj":
+            add_projection(self.src_projection.name, "inverse", self.src_computed)
+            add_projection(self.dst_projection.name, "forward", self.dst_computed)
+
+        decisions = []
+        implementations = []
+        for projection, direction, domain, operation in stages:
+            decision = resolve_transcendental_strategy(
+                operation,
+                normalized_policy,
+                device=device,
+                domain=domain,
+                precision=normalized_precision,
+                workload_size=workload_size,
+                _normalized=True,
+            )
+            decisions.append(decision)
+            implementations.append(
+                ProjectionImplementation(
+                    projection=projection,
+                    direction=direction,
+                    domain=domain,
+                    implementation_id=decision.implementation_id,
+                )
+            )
+
+        helmert_implementation = NATIVE_LIBDEVICE
+        if self._helmert is not None:
+            decision = resolve_transcendental_strategy(
+                TranscendentalOperation.HELMERT,
+                normalized_policy,
+                device=device,
+                precision=normalized_precision,
+                workload_size=workload_size,
+                _normalized=True,
+            )
+            decisions.append(decision)
+            helmert_implementation = decision.implementation_id
+
+        return ExecutionContext(
+            precision=normalized_precision,
+            transcendentals=normalized_policy,
+            device=device,
+            workload_size=workload_size,
+            projection_implementations=tuple(implementations),
+            helmert_implementation=helmert_implementation,
+            decisions=tuple(decisions),
+        )
+
     def __init__(
         self,
         src_params: ProjectionParams,
@@ -266,9 +453,25 @@ class TransformPipeline:
             self.src_computed.setdefault("y_unit_to_m", self.src.y_unit_to_m)
             self.dst_computed.setdefault("x_unit_to_m", self.dst.x_unit_to_m)
             self.dst_computed.setdefault("y_unit_to_m", self.dst.y_unit_to_m)
+            self._p2p_inv: TransformPipeline | None = None
+            self._p2p_fwd: TransformPipeline | None = None
+            self._p2p_lock = threading.RLock()
 
     def transform(
-        self, x, y, xp, *, z=None, out_x=None, out_y=None, out_z=None, precision="auto", stream=None
+        self,
+        x,
+        y,
+        xp,
+        *,
+        z=None,
+        out_x=None,
+        out_y=None,
+        out_z=None,
+        precision="auto",
+        transcendentals="auto",
+        scratch: TransformScratch | None = None,
+        execution_context=None,
+        stream=None,
     ):
         """Execute the transform pipeline.
 
@@ -289,6 +492,20 @@ class TransformPipeline:
 
         Returns 2-tuple when z is None, 3-tuple when z is provided.
         """
+        if execution_context is None:
+            from vibeproj.transcendentals import detect_device_capability
+
+            is_cupy = getattr(xp, "__name__", "").split(".", 1)[0] == "cupy"
+            device_id = int(x.device.id) if is_cupy else None
+            device = detect_device_capability(xp, device_id=device_id)
+            execution_context = self.build_execution_context(
+                precision=precision,
+                transcendentals=transcendentals,
+                device=device,
+                workload_size=int(x.size),
+            )
+        precision = execution_context.precision
+        transcendentals = execution_context.transcendentals
         if self.mode == "forward":
             return self._forward(
                 x,
@@ -299,6 +516,9 @@ class TransformPipeline:
                 out_y=out_y,
                 out_z=out_z,
                 precision=precision,
+                transcendentals=transcendentals,
+                scratch=scratch,
+                execution_context=execution_context,
                 stream=stream,
             )
         elif self.mode == "inverse":
@@ -311,6 +531,9 @@ class TransformPipeline:
                 out_y=out_y,
                 out_z=out_z,
                 precision=precision,
+                transcendentals=transcendentals,
+                scratch=scratch,
+                execution_context=execution_context,
                 stream=stream,
             )
         elif self.mode == "proj_to_proj":
@@ -323,6 +546,9 @@ class TransformPipeline:
                 out_y=out_y,
                 out_z=out_z,
                 precision=precision,
+                transcendentals=transcendentals,
+                scratch=scratch,
+                execution_context=execution_context,
                 stream=stream,
             )
         else:
@@ -335,13 +561,23 @@ class TransformPipeline:
                     lon, lat = x, y
 
                 z_out = z
+                final_lat, final_lon = _lat_lon_outputs(out_x, out_y, self.dst_north_first)
                 if self._helmert is not None:
+                    if self._svd_correction is None:
+                        helmert_out_lat, helmert_out_lon = final_lat, final_lon
+                    else:
+                        helmert_out_lat, helmert_out_lon = _scratch_pair(scratch, 0, x.size)
                     result = _apply_datum_shift(
                         lat,
                         lon,
                         self._helmert,
                         xp,
                         h=z,
+                        out_lat=helmert_out_lat,
+                        out_lon=helmert_out_lon,
+                        out_h=out_z,
+                        transcendentals=transcendentals,
+                        execution_context=execution_context,
                         stream=stream,
                     )
                     if z is not None:
@@ -356,6 +592,8 @@ class TransformPipeline:
                         self._svd_correction,
                         xp,
                         negate=self._svd_negate,
+                        out_lat=final_lat,
+                        out_lon=final_lon,
                         stream=stream,
                     )
 
@@ -365,14 +603,14 @@ class TransformPipeline:
                 else:
                     rx, ry = lon, lat
 
-                if out_x is not None:
+                if out_x is not None and rx is not out_x:
                     out_x[:] = rx
                     rx = out_x
-                if out_y is not None:
+                if out_y is not None and ry is not out_y:
                     out_y[:] = ry
                     ry = out_y
                 if z is not None:
-                    if out_z is not None:
+                    if out_z is not None and z_out is not out_z:
                         out_z[:] = z_out
                         z_out = out_z
                     return rx, ry, z_out
@@ -403,6 +641,9 @@ class TransformPipeline:
         out_y=None,
         out_z=None,
         precision="auto",
+        transcendentals="auto",
+        scratch: TransformScratch | None = None,
+        execution_context=None,
         stream=None,
     ):
         """Geographic -> Projected.
@@ -426,11 +667,17 @@ class TransformPipeline:
                 out_x=out_x,
                 out_y=out_y,
                 precision=precision,
+                transcendentals=transcendentals,
+                execution_context=execution_context,
                 stream=stream,
             )
             if fused is not None:
                 if z is not None:
-                    return (*fused, z)
+                    z_out = z
+                    if out_z is not None and z_out is not out_z:
+                        out_z[:] = z_out
+                        z_out = out_z
+                    return (*fused, z_out)
                 return fused
 
         # Source axis order: geographic CRS is (lat, lon) when north_first
@@ -441,8 +688,23 @@ class TransformPipeline:
 
         # Datum shift: transform geographic coords (and z) to destination ellipsoid
         z_out = z
+        stage_index = 0
         if self._helmert is not None:
-            result = _apply_datum_shift(lat, lon, self._helmert, xp, h=z, stream=stream)
+            helmert_out_lat, helmert_out_lon = _scratch_pair(scratch, stage_index, arg1.size)
+            result = _apply_datum_shift(
+                lat,
+                lon,
+                self._helmert,
+                xp,
+                h=z,
+                out_lat=helmert_out_lat,
+                out_lon=helmert_out_lon,
+                out_h=out_z,
+                transcendentals=transcendentals,
+                execution_context=execution_context,
+                stream=stream,
+            )
+            stage_index = 1
             if z is not None:
                 lat, lon, z_out = result
             else:
@@ -450,12 +712,15 @@ class TransformPipeline:
 
         # SVD correction: additive correction on geographic coords (degrees)
         if self._svd_correction is not None:
+            svd_out_lat, svd_out_lon = _scratch_pair(scratch, stage_index, arg1.size)
             lat, lon = _apply_svd_correction(
                 lat,
                 lon,
                 self._svd_correction,
                 xp,
                 negate=self._svd_negate,
+                out_lat=svd_out_lat,
+                out_lon=svd_out_lon,
                 stream=stream,
             )
 
@@ -474,10 +739,15 @@ class TransformPipeline:
                 out_x=out_x,
                 out_y=out_y,
                 precision=precision,
+                transcendentals=transcendentals,
+                execution_context=execution_context,
                 stream=stream,
             )
             if fused is not None:
                 if z is not None:
+                    if out_z is not None and z_out is not out_z:
+                        out_z[:] = z_out
+                        z_out = out_z
                     return (*fused, z_out)
                 return fused
 
@@ -514,15 +784,15 @@ class TransformPipeline:
             rx, ry = easting, northing
 
         # Write into pre-allocated output buffers when provided (xp fallback path)
-        if out_x is not None:
+        if out_x is not None and rx is not out_x:
             out_x[:] = rx
             rx = out_x
-        if out_y is not None:
+        if out_y is not None and ry is not out_y:
             out_y[:] = ry
             ry = out_y
 
         if z is not None:
-            if out_z is not None:
+            if out_z is not None and z_out is not out_z:
                 out_z[:] = z_out
                 z_out = out_z
             return rx, ry, z_out
@@ -539,6 +809,9 @@ class TransformPipeline:
         out_y=None,
         out_z=None,
         precision="auto",
+        transcendentals="auto",
+        scratch: TransformScratch | None = None,
+        execution_context=None,
         stream=None,
     ):
         """Projected -> Geographic.
@@ -547,6 +820,7 @@ class TransformPipeline:
         Output follows destination CRS axis order (lat/lon for EPSG:4326).
         z passes through projection inverse (2D), then is transformed by Helmert.
         """
+        final_lat, final_lon = _lat_lon_outputs(out_x, out_y, self.dst_north_first)
         # Fast path: fused CUDA kernel
         if self._helmert is None and self._svd_correction is None:
             # No datum shift or SVD: run fused inverse with final output axis order.
@@ -562,15 +836,22 @@ class TransformPipeline:
                 out_x=out_x,
                 out_y=out_y,
                 precision=precision,
+                transcendentals=transcendentals,
+                execution_context=execution_context,
                 stream=stream,
             )
             if fused is not None:
                 if z is not None:
-                    return (*fused, z)
+                    z_out = z
+                    if out_z is not None and z_out is not out_z:
+                        out_z[:] = z_out
+                        z_out = out_z
+                    return (*fused, z_out)
                 return fused
         elif self._helmert is not None or self._svd_correction is not None:
             # With datum shift/SVD: fused inverse -> SVD -> Helmert -> axis reorder.
             # Fused inverse outputs (lat, lon) for SVD/Helmert input.
+            inverse_out_lat, inverse_out_lon = _scratch_pair(scratch, 0, arg1.size)
             fused = _try_fused(
                 arg1,
                 arg2,
@@ -580,7 +861,11 @@ class TransformPipeline:
                 computed=self.computed,
                 src_north_first=self.src_north_first,
                 dst_north_first=True,  # SVD/Helmert expects (lat, lon)
+                out_x=inverse_out_lat,
+                out_y=inverse_out_lon,
                 precision=precision,
+                transcendentals=transcendentals,
+                execution_context=execution_context,
                 stream=stream,
             )
             if fused is not None:
@@ -588,12 +873,18 @@ class TransformPipeline:
                 z_out = z
                 # SVD correction (before Helmert in inverse direction)
                 if self._svd_correction is not None:
+                    if self._helmert is None:
+                        svd_out_lat, svd_out_lon = final_lat, final_lon
+                    else:
+                        svd_out_lat, svd_out_lon = _scratch_pair(scratch, 1, arg1.size)
                     lat, lon = _apply_svd_correction(
                         lat,
                         lon,
                         self._svd_correction,
                         xp,
                         negate=self._svd_negate,
+                        out_lat=svd_out_lat,
+                        out_lon=svd_out_lon,
                         stream=stream,
                     )
                 if self._helmert is not None:
@@ -603,6 +894,11 @@ class TransformPipeline:
                         self._helmert,
                         xp,
                         h=z,
+                        out_lat=final_lat,
+                        out_lon=final_lon,
+                        out_h=out_z,
+                        transcendentals=transcendentals,
+                        execution_context=execution_context,
                         stream=stream,
                     )
                     if z is not None:
@@ -614,14 +910,14 @@ class TransformPipeline:
                 else:
                     rx, ry = lon, lat
                 # Write into pre-allocated output buffers when provided
-                if out_x is not None:
+                if out_x is not None and rx is not out_x:
                     out_x[:] = rx
                     rx = out_x
-                if out_y is not None:
+                if out_y is not None and ry is not out_y:
                     out_y[:] = ry
                     ry = out_y
                 if z is not None:
-                    if out_z is not None:
+                    if out_z is not None and z_out is not out_z:
                         out_z[:] = z_out
                         z_out = out_z
                     return rx, ry, z_out
@@ -661,19 +957,37 @@ class TransformPipeline:
 
         # SVD correction (before Helmert in inverse direction)
         if self._svd_correction is not None:
+            if self._helmert is None:
+                svd_out_lat, svd_out_lon = final_lat, final_lon
+            else:
+                svd_out_lat, svd_out_lon = _scratch_pair(scratch, 0, arg1.size)
             lat, lon = _apply_svd_correction(
                 lat,
                 lon,
                 self._svd_correction,
                 xp,
                 negate=self._svd_negate,
+                out_lat=svd_out_lat,
+                out_lon=svd_out_lon,
                 stream=stream,
             )
 
         # Datum shift: transform geographic coords (and z) to destination ellipsoid
         z_out = z
         if self._helmert is not None:
-            result = _apply_datum_shift(lat, lon, self._helmert, xp, h=z, stream=stream)
+            result = _apply_datum_shift(
+                lat,
+                lon,
+                self._helmert,
+                xp,
+                h=z,
+                out_lat=final_lat,
+                out_lon=final_lon,
+                out_h=out_z,
+                transcendentals=transcendentals,
+                execution_context=execution_context,
+                stream=stream,
+            )
             if z is not None:
                 lat, lon, z_out = result
             else:
@@ -686,15 +1000,15 @@ class TransformPipeline:
             rx, ry = lon, lat
 
         # Write into pre-allocated output buffers when provided (xp fallback path)
-        if out_x is not None:
+        if out_x is not None and rx is not out_x:
             out_x[:] = rx
             rx = out_x
-        if out_y is not None:
+        if out_y is not None and ry is not out_y:
             out_y[:] = ry
             ry = out_y
 
         if z is not None:
-            if out_z is not None:
+            if out_z is not None and z_out is not out_z:
                 out_z[:] = z_out
                 z_out = out_z
             return rx, ry, z_out
@@ -711,6 +1025,9 @@ class TransformPipeline:
         out_y=None,
         out_z=None,
         precision="auto",
+        transcendentals="auto",
+        scratch: TransformScratch | None = None,
+        execution_context=None,
         stream=None,
     ):
         """Projected -> Projected via geographic intermediate.
@@ -725,25 +1042,52 @@ class TransformPipeline:
         stream: optional CUDA stream for async kernel execution.
         """
         # Build sub-pipelines lazily
-        if not hasattr(self, "_p2p_inv"):
-            from vibeproj.crs import ProjectionParams
+        if self._p2p_inv is None:
+            with self._p2p_lock:
+                if self._p2p_inv is None:
+                    from vibeproj.crs import ProjectionParams
 
-            geo = ProjectionParams(
-                projection_name="longlat",
-                ellipsoid=self.src.ellipsoid,
-                north_first=True,  # intermediate is always (lat, lon)
-            )
-            self._p2p_inv = TransformPipeline(self.src, geo)
-            self._p2p_fwd = TransformPipeline(geo, self.dst)
+                    geo = ProjectionParams(
+                        projection_name="longlat",
+                        ellipsoid=self.src.ellipsoid,
+                        north_first=True,  # intermediate is always (lat, lon)
+                    )
+                    self._p2p_inv = TransformPipeline(self.src, geo)
+                    self._p2p_fwd = TransformPipeline(geo, self.dst)
+        assert self._p2p_inv is not None and self._p2p_fwd is not None
 
         # Step 1: source projected -> geographic (may use fused inverse kernel)
         # z passes through unchanged (projection is 2D)
-        lat, lon = self._p2p_inv.transform(x, y, xp, precision=precision, stream=stream)
+        inverse_out_lat, inverse_out_lon = _scratch_pair(scratch, 0, x.size)
+        lat, lon = self._p2p_inv.transform(
+            x,
+            y,
+            xp,
+            out_x=inverse_out_lat,
+            out_y=inverse_out_lon,
+            precision=precision,
+            transcendentals=transcendentals,
+            execution_context=execution_context,
+            stream=stream,
+        )
 
         # Step 2: datum shift (if cross-datum) — transforms z when present
         z_out = z
         if self._helmert is not None:
-            result = _apply_datum_shift(lat, lon, self._helmert, xp, h=z, stream=stream)
+            helmert_out_lat, helmert_out_lon = _scratch_pair(scratch, 1, x.size)
+            result = _apply_datum_shift(
+                lat,
+                lon,
+                self._helmert,
+                xp,
+                h=z,
+                out_lat=helmert_out_lat,
+                out_lon=helmert_out_lon,
+                out_h=out_z,
+                transcendentals=transcendentals,
+                execution_context=execution_context,
+                stream=stream,
+            )
             if z is not None:
                 lat, lon, z_out = result
             else:
@@ -751,12 +1095,16 @@ class TransformPipeline:
 
         # Step 2b: SVD correction (after Helmert, before forward projection)
         if self._svd_correction is not None:
+            svd_pair_index = 0 if self._helmert is not None else 1
+            svd_out_lat, svd_out_lon = _scratch_pair(scratch, svd_pair_index, x.size)
             lat, lon = _apply_svd_correction(
                 lat,
                 lon,
                 self._svd_correction,
                 xp,
                 negate=self._svd_negate,
+                out_lat=svd_out_lat,
+                out_lon=svd_out_lon,
                 stream=stream,
             )
 
@@ -769,10 +1117,12 @@ class TransformPipeline:
             out_x=out_x,
             out_y=out_y,
             precision=precision,
+            transcendentals=transcendentals,
+            execution_context=execution_context,
             stream=stream,
         )
         if z is not None:
-            if out_z is not None:
+            if out_z is not None and z_out is not out_z:
                 out_z[:] = z_out
                 return (*result, out_z)
             return (*result, z_out)

@@ -15,7 +15,13 @@ import warnings
 
 import numpy as np
 
-# Kernel cache: (projection_name, direction, dtype_name, strategy) -> RawKernel
+from vibeproj.transcendentals import (
+    HELMERT_FIXED_Q62,
+    NATIVE_LIBDEVICE,
+    TMERC_FIXED_Q62,
+)
+
+# Kernel cache: (projection, direction, dtype, implementation_id) -> RawKernel
 # Protected by _kernel_cache_lock for thread-safe compilation.
 _kernel_cache: dict[tuple[str, str, str, str], object] = {}
 _kernel_cache_lock = threading.RLock()
@@ -83,12 +89,23 @@ def can_fuse(projection_name: str, direction: str) -> bool:
 # ===================================================================
 
 from vibeproj._ds_device_fns import DS_DEVICE_FNS as _DS_ARITH  # noqa: E402
-from vibeproj._fixed_trig_device_fns import FIXED_TRIG_DEVICE_FNS as _FIXED_TRIG  # noqa: E402
+from vibeproj._transcendental_device_fns import (  # noqa: E402
+    HELMERT_FIXED_Q62_DEVICE_FNS as _HELMERT_FIXED_Q62_DEVICE_FNS,
+    NATIVE_PAIRED_SINCOS_DEVICE_FNS as _NATIVE_PAIRED_SINCOS_DEVICE_FNS,
+    TM_UTM_QUALIFIED_DEVICE_FNS as _TM_UTM_QUALIFIED_DEVICE_FNS,
+)
 
 # ds gatg + ds clenshaw_complex for TM
 _DS_TM_DEVICE_FNS = (
     _DS_ARITH
     + """
+__device__ __forceinline__ void ds_sincos(ds_t angle, ds_t* sin_out, ds_t* cos_out) {{
+    double sin_value, cos_value;
+    sincos(ds_to_double(angle), &sin_value, &cos_value);
+    *sin_out = ds_from_double(sin_value);
+    *cos_out = ds_from_double(cos_value);
+}}
+
 // ds_gatg: Clenshaw-type series evaluation in ds arithmetic
 __device__ inline ds_t ds_gatg(
     ds_t p0, ds_t p1, ds_t p2, ds_t p3, ds_t p4, ds_t p5,
@@ -205,10 +222,11 @@ __device__ inline {real_t} qsfn({real_t} sin_phi, {real_t} e) {{
 __device__ inline {real_t} phi_from_q({real_t} q, {real_t} e, {real_t} es) {{
     {real_t} phi = asin(fmin(fmax(q / ({real_t})2.0, ({real_t})-1.0), ({real_t})1.0));
     for (int i = 0; i < 15; i++) {{
-        {real_t} sin_phi = sin(phi);
+        {real_t} sin_phi, cos_phi;
+        vp_native_sincos(phi, &sin_phi, &cos_phi);
         {real_t} e_sin = e * sin_phi;
         {real_t} one_minus = ({real_t})1.0 - e_sin * e_sin;
-        {real_t} dphi = (one_minus * one_minus / (({real_t})2.0 * cos(phi)))
+        {real_t} dphi = (one_minus * one_minus / (({real_t})2.0 * cos_phi))
             * (q / (({real_t})1.0 - es) - sin_phi / one_minus
                + (({real_t})0.5 / e) * log((({real_t})1.0 - e_sin) / (({real_t})1.0 + e_sin)));
         phi += dphi;
@@ -451,10 +469,14 @@ _TM_FORWARD_SOURCE = (
 ) {{"""
     + _FWD_PREAMBLE
     + """
+    {real_t} sin_two_phi, cos_two_phi;
+    vp_native_sincos(({real_t})2.0 * phi, &sin_two_phi, &cos_two_phi);
     {real_t} Cn = gatg(cbg0, cbg1, cbg2, cbg3, cbg4, cbg5,
-                       phi, cos(({real_t})2.0 * phi), sin(({real_t})2.0 * phi));
-    {real_t} sin_Cn = sin(Cn), cos_Cn = cos(Cn);
-    {real_t} sin_Ce = sin(lam), cos_Ce = cos(lam);
+                       phi, cos_two_phi, sin_two_phi);
+    {real_t} sin_Cn, cos_Cn;
+    vp_native_sincos(Cn, &sin_Cn, &cos_Cn);
+    {real_t} sin_Ce, cos_Ce;
+    vp_native_sincos(lam, &sin_Ce, &cos_Ce);
     {real_t} cos_Cn_cos_Ce = cos_Cn * cos_Ce;
     Cn = atan2(sin_Cn, cos_Cn_cos_Ce);
     {real_t} inv_denom = rsqrt(sin_Cn * sin_Cn + cos_Cn_cos_Ce * cos_Cn_cos_Ce);
@@ -551,72 +573,16 @@ _TM_FORWARD_FP64_BODY = (
 
 _TM_FORWARD_FP64_SOURCE = _TM_DEVICE_FNS.format(real_t="double") + _TM_FORWARD_FP64_BODY
 
-_TM_FORWARD_FAST_HELPERS = r"""
-__device__ __forceinline__ void vp_tm_fast_sincos(
-    double angle, double longitude_offset, double* sin_out, double* cos_out
-) {
-    if (fabs(longitude_offset) <= 0.06) {
-        vp_fixed_sincos_bounded(angle, sin_out, cos_out);
-    } else {
-        sincos(angle, sin_out, cos_out);
-    }
-}
-
-__device__ __forceinline__ double vp_tm_fast_latitude(
-    double gaussian_lat,
-    double sin_lat,
-    double cos_lat,
-    double cos_lon,
-    double native_denominator,
-    double longitude_offset
-) {
-    if (!(fabs(longitude_offset) <= 0.06)) {
-        return atan2(sin_lat, native_denominator);
-    }
-
-    // atan2(sin(B), cos(B)cos(L)) = B + atan(delta). In a normal UTM
-    // zone |delta| < 6.9e-4, so the odd degree-5 correction is fp64-accurate.
-    const double denominator = fma(
-        cos_lon * cos_lat, cos_lat, sin_lat * sin_lat
-    );
-    double reciprocal = (double)__frcp_rn((float)denominator);
-    reciprocal *= fma(-denominator, reciprocal, 2.0);
-    const double correction =
-        sin_lat * cos_lat * (1.0 - cos_lon) * reciprocal;
-    const double correction_sq = correction * correction;
-    return gaussian_lat + correction * fma(
-        correction_sq, fma(correction_sq, 0.2, -1.0 / 3.0), 1.0
-    );
-}
-
-__device__ __forceinline__ double vp_tm_fast_asinh(double value) {
-    if (!(fabs(value) <= 0.06)) {
-        return asinh(value);
-    }
-
-    // Odd asinh series through x^11. The next term is below one ulp over the
-    // fast domain; normal UTM inputs are bounded by tan(3 degrees) < 0.053.
-    const double x2 = value * value;
-    double polynomial = -63.0 / 2816.0;
-    polynomial = fma(polynomial, x2, 35.0 / 1152.0);
-    polynomial = fma(polynomial, x2, -5.0 / 112.0);
-    polynomial = fma(polynomial, x2, 3.0 / 40.0);
-    polynomial = fma(polynomial, x2, -1.0 / 6.0);
-    return value * fma(polynomial, x2, 1.0);
-}
-"""
-
-_TM_FORWARD_FAST_SOURCE = (
-    _FIXED_TRIG
-    + _TM_FORWARD_FAST_HELPERS
+_TM_FORWARD_FIXED_Q62_SOURCE = (
+    _TM_UTM_QUALIFIED_DEVICE_FNS
     + _TM_DEVICE_FNS.format(real_t="double")
     + r"""
-#define VP_TM_FORWARD_KERNEL_NAME tm_forward_fast
+#define VP_TM_FORWARD_KERNEL_NAME tm_forward_fixed_q62
 #define VP_TM_SINCOS(angle, lam, sin_out, cos_out) \
-    vp_tm_fast_sincos(angle, lam, sin_out, cos_out)
+    vp_tm_utm_sincos(angle, lam, sin_out, cos_out)
 #define VP_TM_LATITUDE(gaussian_lat, sin_lat, cos_lat, cos_lon, product, lam) \
-    vp_tm_fast_latitude(gaussian_lat, sin_lat, cos_lat, cos_lon, product, lam)
-#define VP_TM_ASINH(value) vp_tm_fast_asinh(value)
+    vp_tm_utm_latitude(gaussian_lat, sin_lat, cos_lat, cos_lon, product, lam)
+#define VP_TM_ASINH(value) vp_tm_utm_asinh(value)
 """
     + _TM_FORWARD_FP64_BODY
 )
@@ -633,7 +599,8 @@ _TM_INVERSE_SOURCE = (
     + _INV_PREAMBLE
     + """
     {real_t} Cn = (cy - Zb) / Qn, Ce = cx / Qn;
-    {real_t} sin_arg_r = sin(({real_t})2.0 * Cn), cos_arg_r = cos(({real_t})2.0 * Cn);
+    {real_t} sin_arg_r, cos_arg_r;
+    vp_native_sincos(({real_t})2.0 * Cn, &sin_arg_r, &cos_arg_r);
     {real_t} exp_2_Ce = exp(({real_t})2.0 * Ce);
     {real_t} half_inv = ({real_t})0.5 / exp_2_Ce;
     {real_t} sinh_arg_i = ({real_t})0.5 * exp_2_Ce - half_inv;
@@ -642,7 +609,9 @@ _TM_INVERSE_SOURCE = (
     clenshaw_complex(utg0, utg1, utg2, utg3, utg4, utg5,
                      sin_arg_r, cos_arg_r, sinh_arg_i, cosh_arg_i, &dCn, &dCe);
     Cn += dCn; Ce += dCe;
-    {real_t} sin_Cn = sin(Cn), cos_Cn = cos(Cn), sinhCe = sinh(Ce);
+    {real_t} sin_Cn, cos_Cn;
+    vp_native_sincos(Cn, &sin_Cn, &cos_Cn);
+    {real_t} sinhCe = sinh(Ce);
     Ce = atan2(sinhCe, cos_Cn);
     {real_t} modulus_Ce = hypot(sinhCe, cos_Cn);
     Cn = atan2(sin_Cn, modulus_Ce);
@@ -672,8 +641,10 @@ _LCC_FORWARD_SOURCE = (
     {real_t} ts = tsfn(phi, sin_phi, e);
     {real_t} rho = F * pow(ts, nn) * k0;
     {real_t} theta = nn * lam;
-    double easting  = (double)(rho * sin(theta)) * (double)a + (double)x0;
-    double northing = (double)(rho0 - rho * cos(theta)) * (double)a + (double)y0;
+    {real_t} sin_theta, cos_theta;
+    vp_native_sincos(theta, &sin_theta, &cos_theta);
+    double easting  = (double)(rho * sin_theta) * (double)a + (double)x0;
+    double northing = (double)(rho0 - rho * cos_theta) * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -718,8 +689,10 @@ _STERE_FORWARD_SOURCE = (
     {real_t} sin_phi_adj = sin(phi_adj);
     {real_t} t = tsfn(phi_adj, sin_phi_adj, e);
     {real_t} rho = akm1 * t;
-    double easting  = (double)(rho * sin(lam)) * (double)a + (double)x0;
-    double northing = (double)(-sign * rho * cos(lam)) * (double)a + (double)y0;
+    {real_t} sin_lam, cos_lam;
+    vp_native_sincos(lam, &sin_lam, &cos_lam);
+    double easting  = (double)(rho * sin_lam) * (double)a + (double)x0;
+    double northing = (double)(-sign * rho * cos_lam) * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -764,8 +737,10 @@ _AEA_FORWARD_SOURCE = (
     if (rho_sq < ({real_t})0.0) rho_sq = ({real_t})0.0;
     {real_t} rho = sqrt(rho_sq) / nn;
     {real_t} theta = nn * lam;
-    double easting  = (double)(rho * sin(theta)) * (double)a + (double)x0;
-    double northing = (double)(rho0 - rho * cos(theta)) * (double)a + (double)y0;
+    {real_t} sin_theta, cos_theta;
+    vp_native_sincos(theta, &sin_theta, &cos_theta);
+    double easting  = (double)(rho * sin_theta) * (double)a + (double)x0;
+    double northing = (double)(rho0 - rho * cos_theta) * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -809,8 +784,10 @@ _LAEA_FORWARD_SOURCE = (
     + """
     {real_t} q = qsfn(sin(phi), e);
     {real_t} beta = asin(fmin(fmax(q / qp, ({real_t})-1.0), ({real_t})1.0));
-    {real_t} sin_beta = sin(beta), cos_beta = cos(beta);
-    {real_t} sin_lam = sin(lam), cos_lam = cos(lam);
+    {real_t} sin_beta, cos_beta;
+    vp_native_sincos(beta, &sin_beta, &cos_beta);
+    {real_t} sin_lam, cos_lam;
+    vp_native_sincos(lam, &sin_lam, &cos_lam);
     {real_t} ex, ey;
     if (mode == 0) {{ // oblique
         {real_t} b = ({real_t})1.0 + sin_beta0 * sin_beta + cos_beta0 * cos_beta * cos_lam;
@@ -858,7 +835,8 @@ _LAEA_INVERSE_SOURCE = (
     {real_t} sin_beta, lam;
     if (mode == 0 || mode == 1) {{ // oblique or equatorial
         {real_t} ce = ({real_t})2.0 * asin(fmin(fmax(rho / (({real_t})2.0 * Rq), ({real_t})-1.0), ({real_t})1.0));
-        {real_t} sin_ce = sin(ce), cos_ce = cos(ce);
+        {real_t} sin_ce, cos_ce;
+        vp_native_sincos(ce, &sin_ce, &cos_ce);
         if (mode == 0) {{
             sin_beta = cos_ce * sin_beta0 + y_adj * sin_ce * cos_beta0 / fmax(rho, ({real_t})1e-30);
             lam = atan2(x_adj * sin_ce, rho * cos_beta0 * cos_ce - y_adj * sin_beta0 * sin_ce);
@@ -1000,8 +978,11 @@ _ORTHO_FORWARD_SOURCE = (
 ) {{"""
     + _FWD_PREAMBLE
     + """
-    {real_t} sin_phi = sin(phi), cos_phi = cos(phi), cos_lam = cos(lam);
-    double easting  = (double)(cos_phi * sin(lam)) * (double)a + (double)x0;
+    {real_t} sin_phi, cos_phi;
+    vp_native_sincos(phi, &sin_phi, &cos_phi);
+    {real_t} sin_lam, cos_lam;
+    vp_native_sincos(lam, &sin_lam, &cos_lam);
+    double easting  = (double)(cos_phi * sin_lam) * (double)a + (double)x0;
     double northing = (double)(cos_phi0 * sin_phi - sin_phi0 * cos_phi * cos_lam) * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
@@ -1019,7 +1000,8 @@ _ORTHO_INVERSE_SOURCE = (
     + """
     {real_t} rho = sqrt(cx*cx + cy*cy);
     {real_t} c = asin(fmin(fmax(rho, ({real_t})-1.0), ({real_t})1.0));
-    {real_t} sin_c = sin(c), cos_c = cos(c);
+    {real_t} sin_c, cos_c;
+    vp_native_sincos(c, &sin_c, &cos_c);
     {real_t} safe_rho = fmax(rho, ({real_t})1e-30);
     {real_t} phi = asin(cos_c * sin_phi0 + cy * sin_c * cos_phi0 / safe_rho);
     {real_t} lam = atan2(cx * sin_c, safe_rho * cos_phi0 * cos_c - cy * sin_phi0 * sin_c);
@@ -1041,9 +1023,12 @@ _GNOM_FORWARD_SOURCE = (
 ) {{"""
     + _FWD_PREAMBLE
     + """
-    {real_t} sin_phi = sin(phi), cos_phi = cos(phi), cos_lam = cos(lam);
+    {real_t} sin_phi, cos_phi;
+    vp_native_sincos(phi, &sin_phi, &cos_phi);
+    {real_t} sin_lam, cos_lam;
+    vp_native_sincos(lam, &sin_lam, &cos_lam);
     {real_t} cos_c = sin_phi0 * sin_phi + cos_phi0 * cos_phi * cos_lam;
-    double easting  = (double)(cos_phi * sin(lam) / cos_c) * (double)a + (double)x0;
+    double easting  = (double)(cos_phi * sin_lam / cos_c) * (double)a + (double)x0;
     double northing = (double)((cos_phi0 * sin_phi - sin_phi0 * cos_phi * cos_lam) / cos_c) * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
@@ -1061,7 +1046,8 @@ _GNOM_INVERSE_SOURCE = (
     + """
     {real_t} rho = sqrt(cx*cx + cy*cy);
     {real_t} c = atan(rho);
-    {real_t} sin_c = sin(c), cos_c = cos(c);
+    {real_t} sin_c, cos_c;
+    vp_native_sincos(c, &sin_c, &cos_c);
     {real_t} safe_rho = fmax(rho, ({real_t})1e-30);
     {real_t} phi = asin(cos_c * sin_phi0 + cy * sin_c * cos_phi0 / safe_rho);
     {real_t} lam = atan2(cx * sin_c, safe_rho * cos_phi0 * cos_c - cy * sin_phi0 * sin_c);
@@ -1086,13 +1072,19 @@ _MOLL_FORWARD_SOURCE = (
     {real_t} pi_sin_phi = {pi} * sin(phi);
     {real_t} theta = phi;
     for (int i = 0; i < 20; i++) {{
-        {real_t} dtheta = -(({real_t})2.0 * theta + sin(({real_t})2.0 * theta) - pi_sin_phi)
-                         / (({real_t})2.0 + ({real_t})2.0 * cos(({real_t})2.0 * theta));
+        {real_t} sin_two_theta, cos_two_theta;
+        vp_native_sincos(
+            ({real_t})2.0 * theta, &sin_two_theta, &cos_two_theta
+        );
+        {real_t} dtheta = -(({real_t})2.0 * theta + sin_two_theta - pi_sin_phi)
+                         / (({real_t})2.0 + ({real_t})2.0 * cos_two_theta);
         theta += dtheta;
         if (fabs(dtheta) < {tol}) break;
     }}
-    double easting  = (double)(lam * ({real_t})2.0 * SQRT2 / {pi} * cos(theta)) * (double)a + (double)x0;
-    double northing = (double)(SQRT2 * sin(theta)) * (double)a + (double)y0;
+    {real_t} sin_theta, cos_theta;
+    vp_native_sincos(theta, &sin_theta, &cos_theta);
+    double easting  = (double)(lam * ({real_t})2.0 * SQRT2 / {pi} * cos_theta) * (double)a + (double)x0;
+    double northing = (double)(SQRT2 * sin_theta) * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -1139,7 +1131,9 @@ _OMERC_FORWARD_SOURCE = (
     {real_t} Q = H / pow(t, B);
     {real_t} S = (Q - ({real_t})1.0 / Q) * ({real_t})0.5;
     {real_t} T = (Q + ({real_t})1.0 / Q) * ({real_t})0.5;
-    {real_t} V = sin(B * lam);
+    {real_t} sin_B_lam, cos_B_lam;
+    vp_native_sincos(B * lam, &sin_B_lam, &cos_B_lam);
+    {real_t} V = sin_B_lam;
     {real_t} U = (-V * cos_g0 + S * sin_g0) / T;
     // Clamp U
     if (U > ({real_t})0.9999999999) U = ({real_t})0.9999999999;
@@ -1148,7 +1142,7 @@ _OMERC_FORWARD_SOURCE = (
     {real_t} v_ob = A_norm / (({real_t})2.0 * B)
                   * log((({real_t})1.0 - U) / (({real_t})1.0 + U));
     {real_t} u_ob = (A_norm / B)
-                  * atan2(S * cos_g0 + V * sin_g0, cos(B * lam))
+                  * atan2(S * cos_g0 + V * sin_g0, cos_B_lam)
                   - u_c;
 
     // Rectified grid rotation + scale + offset (fp64)
@@ -1178,7 +1172,9 @@ _OMERC_INVERSE_SOURCE = (
     {real_t} Qp = exp(-B * v_ob / A_norm);
     {real_t} Sp = (Qp - ({real_t})1.0 / Qp) * ({real_t})0.5;
     {real_t} Tp = (Qp + ({real_t})1.0 / Qp) * ({real_t})0.5;
-    {real_t} Vp = sin(B * u_ob / A_norm);
+    {real_t} sin_B_u, cos_B_u;
+    vp_native_sincos(B * u_ob / A_norm, &sin_B_u, &cos_B_u);
+    {real_t} Vp = sin_B_u;
     {real_t} Up = (Vp * cos_g0 + Sp * sin_g0) / Tp;
     if (Up > ({real_t})0.9999999999) Up = ({real_t})0.9999999999;
     if (Up < ({real_t})-0.9999999999) Up = ({real_t})-0.9999999999;
@@ -1198,7 +1194,7 @@ _OMERC_INVERSE_SOURCE = (
 
     // Recover lambda
     {real_t} lam = -atan2(Sp * cos_g0 - Vp * sin_g0,
-                          cos(B * u_ob / A_norm)) / B;
+                          cos_B_u) / B;
 """
     + _INV_POSTAMBLE
     + "}}"
@@ -1228,18 +1224,22 @@ _KROVAK_FORWARD_SOURCE = (
     {real_t} V = -B * lam;
 
     // Oblique coordinates
-    {real_t} cos_U = cos(U), sin_U = sin(U);
-    {real_t} cos_V = cos(V), sin_V = sin(V);
+    {real_t} sin_U, cos_U;
+    vp_native_sincos(U, &sin_U, &cos_U);
+    {real_t} sin_V, cos_V;
+    vp_native_sincos(V, &sin_V, &cos_V);
     {real_t} T = asin(cos_ac * sin_U + sin_ac * cos_U * cos_V);
     {real_t} D = asin(cos_U * sin_V / cos(T));
 
     // Oblique cone
     {real_t} theta = nn * D;
     {real_t} r_norm = r0_norm * pow(tan_half_p / tan(({real_t})0.25 * {pi} + T * ({real_t})0.5), nn);
+    {real_t} sin_theta, cos_theta;
+    vp_native_sincos(theta, &sin_theta, &cos_theta);
 
     // North Orientated: negate
-    double easting  = (double)(-r_norm * sin(theta)) * (double)a + (double)x0;
-    double northing = (double)(-r_norm * cos(theta)) * (double)a + (double)y0;
+    double easting  = (double)(-r_norm * sin_theta) * (double)a + (double)x0;
+    double northing = (double)(-r_norm * cos_theta) * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -1267,8 +1267,10 @@ _KROVAK_INVERSE_SOURCE = (
     ) - ({real_t})0.5 * {pi};
 
     // Inverse oblique
-    {real_t} cos_T = cos(T), sin_T = sin(T);
-    {real_t} cos_D = cos(D), sin_D = sin(D);
+    {real_t} sin_T, cos_T;
+    vp_native_sincos(T, &sin_T, &cos_T);
+    {real_t} sin_D, cos_D;
+    vp_native_sincos(D, &sin_D, &cos_D);
     {real_t} U = asin(cos_ac * sin_T - sin_ac * cos_T * cos_D);
     {real_t} V = asin(cos_T * sin_D / cos(U));
 
@@ -1308,15 +1310,17 @@ _ECK4_FORWARD_SOURCE = (
     {real_t} p = C_p * sin(phi);
     {real_t} theta = phi;
     for (int i = 0; i < 20; i++) {{
-        {real_t} sin_t = sin(theta);
-        {real_t} cos_t = cos(theta);
+        {real_t} sin_t, cos_t;
+        vp_native_sincos(theta, &sin_t, &cos_t);
         {real_t} V = theta + sin_t * cos_t + ({real_t})2.0 * sin_t - p;
         {real_t} dtheta = -V / (({real_t})1.0 + cos(({real_t})2.0 * theta) + ({real_t})2.0 * cos_t);
         theta += dtheta;
         if (fabs(dtheta) < {tol}) break;
     }}
-    double easting  = (double)(C_x * lam * (({real_t})1.0 + cos(theta))) * (double)a + (double)x0;
-    double northing = (double)(C_y * sin(theta)) * (double)a + (double)y0;
+    {real_t} sin_theta, cos_theta;
+    vp_native_sincos(theta, &sin_theta, &cos_theta);
+    double easting  = (double)(C_x * lam * (({real_t})1.0 + cos_theta)) * (double)a + (double)x0;
+    double northing = (double)(C_y * sin_theta) * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -1334,8 +1338,8 @@ _ECK4_INVERSE_SOURCE = (
     const {real_t} C_y = ({real_t})1.32650042817700232218;
     const {real_t} C_p = ({real_t})3.57079632679489661923;
     {real_t} theta = asin(fmin(fmax(cy / C_y, ({real_t})-1.0), ({real_t})1.0));
-    {real_t} sin_t = sin(theta);
-    {real_t} cos_t = cos(theta);
+    {real_t} sin_t, cos_t;
+    vp_native_sincos(theta, &sin_t, &cos_t);
     {real_t} phi = asin(fmin(fmax((theta + sin_t * cos_t + ({real_t})2.0 * sin_t) / C_p, ({real_t})-1.0), ({real_t})1.0));
     {real_t} lam = cx / (C_x * (({real_t})1.0 + cos_t));
 """
@@ -1361,8 +1365,10 @@ _ECK6_FORWARD_SOURCE = (
     {real_t} p = C_p * sin(phi);
     {real_t} theta = phi;
     for (int i = 0; i < 20; i++) {{
-        {real_t} V = theta + sin(theta) - p;
-        {real_t} dtheta = -V / (({real_t})1.0 + cos(theta));
+        {real_t} sin_theta, cos_theta;
+        vp_native_sincos(theta, &sin_theta, &cos_theta);
+        {real_t} V = theta + sin_theta - p;
+        {real_t} dtheta = -V / (({real_t})1.0 + cos_theta);
         theta += dtheta;
         if (fabs(dtheta) < {tol}) break;
     }}
@@ -1385,8 +1391,10 @@ _ECK6_INVERSE_SOURCE = (
     const {real_t} C_x = ({real_t})0.44101327172257790882;
     const {real_t} C_y = ({real_t})0.88202654344515581764;
     {real_t} theta = cy / C_y;
-    {real_t} phi = asin(fmin(fmax((theta + sin(theta)) / C_p, ({real_t})-1.0), ({real_t})1.0));
-    {real_t} lam = cx / (C_x * (({real_t})1.0 + cos(theta)));
+    {real_t} sin_theta, cos_theta;
+    vp_native_sincos(theta, &sin_theta, &cos_theta);
+    {real_t} phi = asin(fmin(fmax((theta + sin_theta) / C_p, ({real_t})-1.0), ({real_t})1.0));
+    {real_t} lam = cx / (C_x * (({real_t})1.0 + cos_theta));
 """
     + _INV_POSTAMBLE
     + "}}"
@@ -1410,8 +1418,10 @@ _STEREA_FORWARD_SOURCE = (
     {real_t} w = c * S;
     {real_t} chi = asin((w - ({real_t})1.0) / (w + ({real_t})1.0));
     {real_t} lam_s = nn * lam;
-    {real_t} sin_chi = sin(chi), cos_chi = cos(chi);
-    {real_t} cos_lam_s = cos(lam_s), sin_lam_s = sin(lam_s);
+    {real_t} sin_chi, cos_chi;
+    vp_native_sincos(chi, &sin_chi, &cos_chi);
+    {real_t} sin_lam_s, cos_lam_s;
+    vp_native_sincos(lam_s, &sin_lam_s, &cos_lam_s);
     {real_t} k_den = ({real_t})1.0 + sin_chi0*sin_chi + cos_chi0*cos_chi*cos_lam_s;
     double easting  = (double)(({real_t})2.0 * R * k0 * cos_chi * sin_lam_s / k_den) * (double)a + (double)x0;
     double northing = (double)(({real_t})2.0 * R * k0 * (cos_chi0*sin_chi - sin_chi0*cos_chi*cos_lam_s) / k_den) * (double)a + (double)y0;
@@ -1432,7 +1442,8 @@ _STEREA_INVERSE_SOURCE = (
     {real_t} xs = cx / (({real_t})2.0 * R * k0), ys = cy / (({real_t})2.0 * R * k0);
     {real_t} rho = sqrt(xs*xs + ys*ys);
     {real_t} ce = ({real_t})2.0 * atan(rho);
-    {real_t} sin_ce = sin(ce), cos_ce = cos(ce);
+    {real_t} sin_ce, cos_ce;
+    vp_native_sincos(ce, &sin_ce, &cos_ce);
     {real_t} sin_chi = cos_ce*sin_chi0 + ys*sin_ce*cos_chi0 / fmax(rho, ({real_t})1e-30);
     {real_t} chi = asin(fmin(fmax(sin_chi, ({real_t})-1.0), ({real_t})1.0));
     {real_t} lam_s = atan2(xs*sin_ce, rho*cos_chi0*cos_ce - ys*sin_chi0*sin_ce);
@@ -1441,10 +1452,11 @@ _STEREA_INVERSE_SOURCE = (
     {real_t} psi = ({real_t})0.5 * (log((({real_t})1.0 + sin_chi) / fmax(({real_t})1.0 - sin_chi, ({real_t})1e-30)) - log(c)) / nn;
     {real_t} phi = ({real_t})2.0 * atan(exp(psi)) - ({real_t})0.5 * {pi};
     for (int i = 0; i < 15; i++) {{
-        {real_t} sp = sin(phi);
+        {real_t} sp, cp;
+        vp_native_sincos(phi, &sp, &cp);
         {real_t} es = e * sp;
         {real_t} psi_c = log(tan(({real_t})0.25*{pi} + ({real_t})0.5*phi) * pow((({real_t})1.0-es)/(({real_t})1.0+es), ({real_t})0.5*e));
-        {real_t} dphi = (psi - psi_c) * cos(phi) * (({real_t})1.0 - e*e*sp*sp) / (({real_t})1.0 - e*e);
+        {real_t} dphi = (psi - psi_c) * cp * (({real_t})1.0 - e*e*sp*sp) / (({real_t})1.0 - e*e);
         phi += dphi;
         if (fabs(dphi) < {tol}) break;
     }}
@@ -1467,13 +1479,15 @@ _GEOS_FORWARD_SOURCE = (
     + _FWD_PREAMBLE
     + """
     {real_t} phi_gc = atan(r_pol2 / r_eq2 * tan(phi));
-    {real_t} cos_pgc = cos(phi_gc), sin_pgc = sin(phi_gc);
+    {real_t} sin_pgc, cos_pgc;
+    vp_native_sincos(phi_gc, &sin_pgc, &cos_pgc);
     // Geocentric earth radius (CGMS standard)
     {real_t} r_pol = sqrt(r_pol2);
     {real_t} r_earth = r_pol / sqrt(({real_t})1.0 - (r_eq2 - r_pol2) / r_eq2 * cos_pgc * cos_pgc);
-    {real_t} cos_l = cos(lam);
+    {real_t} sin_l, cos_l;
+    vp_native_sincos(lam, &sin_l, &cos_l);
     {real_t} Sx = H - r_earth * cos_pgc * cos_l;
-    {real_t} Sy = -r_earth * cos_pgc * sin(lam);
+    {real_t} Sy = -r_earth * cos_pgc * sin_l;
     {real_t} Sz = r_earth * sin_pgc;
     // Sweep Y (GOES-R PUG): x = atan2(-Sy, Sx), y = asin(Sz/|S|)
     {real_t} sn = sqrt(Sx*Sx + Sy*Sy + Sz*Sz);
@@ -1495,7 +1509,9 @@ _GEOS_INVERSE_SOURCE = (
     + """
     // cx = (easting - x0) / a, but physical coords are h * angle, so angle = cx * a / h
     {real_t} x_angle = cx * a / h, y_angle = cy * a / h;
-    {real_t} sx = sin(x_angle), cx2 = cos(x_angle), sy = sin(y_angle), cy2 = cos(y_angle);
+    {real_t} sx, cx2, sy, cy2;
+    vp_native_sincos(x_angle, &sx, &cx2);
+    vp_native_sincos(y_angle, &sy, &cy2);
     // Sweep Y ray-ellipsoid intersection
     {real_t} ac = cy2*cy2 + sy*sy*r_eq2/r_pol2;
     {real_t} bc = ({real_t})-2.0*H*cy2*cx2;
@@ -1623,11 +1639,14 @@ _WINTRI_FORWARD_SOURCE = (
 ) {{"""
     + _FWD_PREAMBLE
     + """
-    {real_t} cos_phi = cos(phi);
-    {real_t} alpha = acos(fmin(fmax(cos_phi * cos(lam * ({real_t})0.5), ({real_t})-1.0), ({real_t})1.0));
+    {real_t} sin_phi, cos_phi;
+    vp_native_sincos(phi, &sin_phi, &cos_phi);
+    {real_t} sin_half_lam, cos_half_lam;
+    vp_native_sincos(lam * ({real_t})0.5, &sin_half_lam, &cos_half_lam);
+    {real_t} alpha = acos(fmin(fmax(cos_phi * cos_half_lam, ({real_t})-1.0), ({real_t})1.0));
     {real_t} sinc_a = fabs(alpha) < ({real_t})1e-10 ? ({real_t})1.0 : sin(alpha) / alpha;
-    double easting  = (double)((({real_t})2.0 * cos_phi * sin(lam*({real_t})0.5) / sinc_a + lam*cos_phi1) * ({real_t})0.5) * (double)a + (double)x0;
-    double northing = (double)((sin(phi) / sinc_a + phi) * ({real_t})0.5) * (double)a + (double)y0;
+    double easting  = (double)((({real_t})2.0 * cos_phi * sin_half_lam / sinc_a + lam*cos_phi1) * ({real_t})0.5) * (double)a + (double)x0;
+    double northing = (double)((sin_phi / sinc_a + phi) * ({real_t})0.5) * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -1646,8 +1665,10 @@ _WINTRI_INVERSE_SOURCE = (
     {real_t} phi = cy;
     const {real_t} EPS = ({real_t})1e-12;
     for (int i = 0; i < 10; i++) {{
-        {real_t} cp = cos(phi), sp = sin(phi);
-        {real_t} ch = cos(lam * ({real_t})0.5), sh = sin(lam * ({real_t})0.5);
+        {real_t} sp, cp;
+        vp_native_sincos(phi, &sp, &cp);
+        {real_t} sh, ch;
+        vp_native_sincos(lam * ({real_t})0.5, &sh, &ch);
         {real_t} D = cp * ch;
         {real_t} al = acos(fmin(fmax(D, ({real_t})-1.0), ({real_t})1.0));
         {real_t} sa = sin(al);
@@ -1736,7 +1757,9 @@ _AEQD_FORWARD_SOURCE = (
 ) {{"""
     + _FWD_PREAMBLE
     + """
-    {real_t} sp = sin(phi), cp = cos(phi), cl = cos(lam), sl = sin(lam);
+    {real_t} sp, cp, sl, cl;
+    vp_native_sincos(phi, &sp, &cp);
+    vp_native_sincos(lam, &sl, &cl);
     {real_t} cos_c = fmin(fmax(sin_phi0*sp + cos_phi0*cp*cl, ({real_t})-1.0), ({real_t})1.0);
     {real_t} c2 = acos(cos_c);
     {real_t} k = fabs(c2) < ({real_t})1e-10 ? ({real_t})1.0 : c2 / sin(c2);
@@ -1757,7 +1780,8 @@ _AEQD_INVERSE_SOURCE = (
     + _INV_PREAMBLE
     + """
     {real_t} c2 = sqrt(cx*cx + cy*cy);
-    {real_t} sin_c = sin(c2), cos_c = cos(c2);
+    {real_t} sin_c, cos_c;
+    vp_native_sincos(c2, &sin_c, &cos_c);
     {real_t} safe_c = fmax(c2, ({real_t})1e-30);
     {real_t} phi = asin(fmin(fmax(cos_c*sin_phi0 + cy*sin_c*cos_phi0/safe_c, ({real_t})-1.0), ({real_t})1.0));
     {real_t} lam = atan2(cx*sin_c, safe_c*cos_phi0*cos_c - cy*sin_phi0*sin_c);
@@ -1801,11 +1825,15 @@ extern "C" __global__ void __launch_bounds__(256) tm_forward_ds(
 
     // gatg: geodetic -> Gaussian latitude
     ds_t two_phi = ds_mul(ds_from_float(2.0f), phi);
-    ds_t Cn = ds_gatg(c0,c1,c2,c3,c4,c5, phi, ds_cos(two_phi), ds_sin(two_phi));
+    ds_t sin_two_phi, cos_two_phi;
+    ds_sincos(two_phi, &sin_two_phi, &cos_two_phi);
+    ds_t Cn = ds_gatg(c0,c1,c2,c3,c4,c5, phi, cos_two_phi, sin_two_phi);
 
     // Gaussian -> complex spherical
-    ds_t sin_Cn = ds_sin(Cn), cos_Cn = ds_cos(Cn);
-    ds_t sin_Ce = ds_sin(lam), cos_Ce = ds_cos(lam);
+    ds_t sin_Cn, cos_Cn;
+    ds_sincos(Cn, &sin_Cn, &cos_Cn);
+    ds_t sin_Ce, cos_Ce;
+    ds_sincos(lam, &sin_Ce, &cos_Ce);
     ds_t cos_Cn_cos_Ce = ds_mul(cos_Cn, cos_Ce);
     Cn = ds_atan2(sin_Cn, cos_Cn_cos_Ce);
     ds_t inv_denom = ds_div(ds_from_float(1.0f), ds_hypot(sin_Cn, cos_Cn_cos_Ce));
@@ -1871,7 +1899,8 @@ extern "C" __global__ void __launch_bounds__(256) tm_inverse_ds(
 
     // Clenshaw complex with utg
     ds_t two_Cn = ds_mul(ds_from_float(2.0f), Cn);
-    ds_t sin_ar = ds_sin(two_Cn), cos_ar = ds_cos(two_Cn);
+    ds_t sin_ar, cos_ar;
+    ds_sincos(two_Cn, &sin_ar, &cos_ar);
     ds_t two_Ce = ds_mul(ds_from_float(2.0f), Ce);
     ds_t exp_2Ce = ds_exp(two_Ce);
     ds_t half_inv = ds_div(ds_from_float(0.5f), exp_2Ce);
@@ -1884,7 +1913,8 @@ extern "C" __global__ void __launch_bounds__(256) tm_inverse_ds(
     Ce = ds_add(Ce, dCe);
 
     // Complex spherical -> Gaussian
-    ds_t sin_Cn = ds_sin(Cn), cos_Cn = ds_cos(Cn);
+    ds_t sin_Cn, cos_Cn;
+    ds_sincos(Cn, &sin_Cn, &cos_Cn);
     ds_t sinhCe = ds_sinh(Ce);
     Ce = ds_atan2(sinhCe, cos_Cn);
     ds_t modulus_Ce = ds_hypot(sinhCe, cos_Cn);
@@ -1981,13 +2011,36 @@ _TYPE_MAP = {
 
 
 def _resolve_tmerc_forward_mode(mode: str) -> str:
-    if mode == "auto":
-        from vibeproj.gpu_detect import select_tmerc_forward_mode
-
-        return select_tmerc_forward_mode()
     if mode not in ("fp64", "int64"):
-        raise ValueError(f"Invalid TM forward mode: {mode!r}. Must be 'auto', 'fp64', or 'int64'.")
+        raise ValueError(
+            f"Invalid TM forward mode (private): {mode!r}. Must be 'fp64' or 'int64'; "
+            "resolve public policy through vibeproj.transcendentals."
+        )
     return mode
+
+
+def _tmerc_implementation_from_legacy_mode(mode: str) -> str:
+    """Translate the private pre-registry override used by benchmarks/tests."""
+    return TMERC_FIXED_Q62 if _resolve_tmerc_forward_mode(mode) == "int64" else NATIVE_LIBDEVICE
+
+
+def _validate_projection_implementation(
+    projection_name: str,
+    direction: str,
+    compute_dtype: str,
+    implementation_id: str,
+) -> None:
+    if implementation_id == NATIVE_LIBDEVICE:
+        return
+    if implementation_id != TMERC_FIXED_Q62:
+        raise ValueError(
+            f"Unsupported transcendental implementation for fused projection kernel: "
+            f"{implementation_id!r}"
+        )
+    if (projection_name, direction, compute_dtype) != ("tmerc", "forward", "float64"):
+        raise ValueError(
+            f"{TMERC_FIXED_Q62!r} is qualified only for fp64 forward Transverse Mercator"
+        )
 
 
 def _get_kernel(
@@ -1995,7 +2048,8 @@ def _get_kernel(
     direction: str,
     compute_dtype: str,
     *,
-    tmerc_mode: str = "auto",
+    transcendental_impl: str = NATIVE_LIBDEVICE,
+    tmerc_mode: str | None = None,
 ):
     """Get or compile a fused kernel (thread-safe).
 
@@ -2007,10 +2061,12 @@ def _get_kernel(
     """
     import cupy as cp
 
-    strategy = "default"
-    if (projection_name, direction, compute_dtype) == ("tmerc", "forward", "float64"):
-        strategy = _resolve_tmerc_forward_mode(tmerc_mode)
-    key = (projection_name, direction, compute_dtype, strategy)
+    if tmerc_mode is not None and (projection_name, direction) == ("tmerc", "forward"):
+        transcendental_impl = _tmerc_implementation_from_legacy_mode(tmerc_mode)
+    _validate_projection_implementation(
+        projection_name, direction, compute_dtype, transcendental_impl
+    )
+    key = (projection_name, direction, compute_dtype, transcendental_impl)
     # Fast path: lock-free read (dict reads are thread-safe in CPython)
     if key in _kernel_cache:
         return _kernel_cache[key]
@@ -2026,9 +2082,9 @@ def _get_kernel(
             "forward",
             "float64",
         ):
-            if strategy == "int64":
-                source = _TM_FORWARD_FAST_SOURCE
-                func_name = "tm_forward_fast"
+            if transcendental_impl == TMERC_FIXED_Q62:
+                source = _TM_FORWARD_FIXED_Q62_SOURCE
+                func_name = "tm_forward_fixed_q62"
             else:
                 source = _TM_FORWARD_FP64_SOURCE
                 func_name = "tm_forward_fp64"
@@ -2045,10 +2101,15 @@ def _get_kernel(
                     f"falling back to fp64.",
                     stacklevel=3,
                 )
-                return _get_kernel(projection_name, direction, "float64")
+                return _get_kernel(
+                    projection_name,
+                    direction,
+                    "float64",
+                    transcendental_impl=NATIVE_LIBDEVICE,
+                )
         else:
             template, func_name = _SOURCE_MAP[(projection_name, direction)]
-            source = _inject_linear_unit_args(
+            source = _NATIVE_PAIRED_SINCOS_DEVICE_FNS + _inject_linear_unit_args(
                 template.format(
                     real_t=_TYPE_MAP[compute_dtype],
                     pi=_PI_LITERALS[compute_dtype],
@@ -2074,7 +2135,13 @@ _DS_SOURCE_MAP = {
 # ===================================================================
 
 
-def compile_kernels(projections=None, *, precision="auto", tmerc_mode="auto"):
+def compile_kernels(
+    projections=None,
+    *,
+    precision="auto",
+    transcendental_impl=NATIVE_LIBDEVICE,
+    tmerc_mode=None,
+):
     """Pre-compile fused NVRTC kernels to eliminate first-call latency.
 
     Parameters
@@ -2084,8 +2151,11 @@ def compile_kernels(projections=None, *, precision="auto", tmerc_mode="auto"):
         If None, compiles all supported projections.
     precision : str
         Compute precision: "auto"/"fp64"/"fp32"/"ds".
-    tmerc_mode : str
-        Internal forward-TM strategy override used by Transformer warm-up.
+    transcendental_impl : str
+        Exact registry implementation ID for forward TM. Other projection
+        operations use the native implementation by design.
+    tmerc_mode : str, optional
+        Private compatibility override for deterministic legacy benchmarks.
     """
     try:
         import cupy  # noqa: F401
@@ -2101,12 +2171,22 @@ def compile_kernels(projections=None, *, precision="auto", tmerc_mode="auto"):
             (p, d) for p in projections for d in ("forward", "inverse") if (p, d) in _SUPPORTED
         ]
     for proj_name, direction in targets:
-        _get_kernel(
+        operation_impl = (
+            transcendental_impl
+            if (proj_name, direction) == ("tmerc", "forward")
+            else NATIVE_LIBDEVICE
+        )
+        kernel = _get_kernel(
             proj_name,
             direction,
             compute_dtype,
+            transcendental_impl=operation_impl,
             tmerc_mode=tmerc_mode,
         )
+        # RawKernel construction is lazy. Explicit warm-up APIs must force
+        # NVRTC now, under the same lock that protects cache population.
+        with _kernel_cache_lock:
+            kernel.compile()
 
 
 def fused_transform(
@@ -2123,7 +2203,8 @@ def fused_transform(
     out_y=None,
     precision: str = "auto",
     stream=None,
-    tmerc_mode: str = "auto",
+    transcendental_impl: str = NATIVE_LIBDEVICE,
+    tmerc_mode: str | None = None,
 ) -> tuple | None:
     """Execute a fused GPU kernel for the full transform pipeline.
 
@@ -2135,10 +2216,11 @@ def fused_transform(
         "fp64" = full double precision (default for fp64 input).
         "fp32" = fp32 compute with fp64 I/O (ADR-0002 mixed precision).
         "auto" = fp64 arithmetic with validated internal device strategies.
-    tmerc_mode : str
-        Internal forward-TM strategy override. ``"auto"`` selects the guarded
-        fixed-point path only on validated consumer GPUs; ``"fp64"`` and
-        ``"int64"`` force a strategy for testing and benchmarking.
+    transcendental_impl : str
+        Exact implementation ID resolved by :mod:`vibeproj.transcendentals`.
+        Selection is compile-time and forms part of the RawKernel cache key.
+    tmerc_mode : str, optional
+        Private compatibility override for deterministic legacy benchmarks.
 
     Mixed precision (fp32 compute, fp64 I/O) is ADR-0002 compliant:
     - Input/output arrays are always fp64 (canonical storage precision)
@@ -2193,19 +2275,18 @@ def fused_transform(
 
     # ds kernels take double params (the ds arithmetic is internal)
     real_t = np.float64 if compute_dtype in ("float64", "ds") else np.float32
-    effective_tmerc_mode = tmerc_mode
     if (
-        tmerc_mode == "auto"
-        and projection_name == "tmerc"
-        and direction == "forward"
+        transcendental_impl == TMERC_FIXED_Q62
+        and (projection_name, direction) == ("tmerc", "forward")
         and not computed.get("is_utm", False)
     ):
-        effective_tmerc_mode = "fp64"
+        raise ValueError(f"{TMERC_FIXED_Q62!r} is qualified only for UTM domains")
     kernel = _get_kernel(
         projection_name,
         direction,
         compute_dtype,
-        tmerc_mode=effective_tmerc_mode,
+        transcendental_impl=transcendental_impl,
+        tmerc_mode=tmerc_mode,
     )
     if out_x is None:
         out_x = cp.empty(n, dtype=io_dtype)
@@ -2585,32 +2666,13 @@ extern "C" __global__ void __launch_bounds__(256) VP_HELMERT_KERNEL_NAME(
 """
 
 _HELMERT_SHIFT_SOURCE = _HELMERT_SHIFT_BODY
-_HELMERT_SHIFT_FIXED_TRIG_SOURCE = (
-    _FIXED_TRIG
+_HELMERT_SHIFT_FIXED_Q62_SOURCE = (
+    _HELMERT_FIXED_Q62_DEVICE_FNS
     + """
-// Height recovery is ill-conditioned near a pole: p/cos(lat) amplifies even
-// sub-ULP cosine differences. Keep those uncommon coordinates entirely native.
-__device__ __forceinline__ void vp_helmert_fixed_sincos(
-    double angle, double* sin_out, double* cos_out
-) {
-    if (fabs(fabs(angle) - 1.5707963267948966192313216916397514) < 0.02) {
-        sincos(angle, sin_out, cos_out);
-        return;
-    }
-    vp_fixed_sincos_bounded(angle, sin_out, cos_out);
-}
-
-__device__ __forceinline__ double vp_helmert_fixed_sin(double angle) {
-    if (fabs(fabs(angle) - 1.5707963267948966192313216916397514) < 0.02) {
-        return sin(angle);
-    }
-    return vp_fixed_sin_bounded(angle);
-}
-
-#define VP_HELMERT_KERNEL_NAME helmert_shift_fixed_trig
+#define VP_HELMERT_KERNEL_NAME helmert_shift_fixed_q62
 #define VP_HELMERT_SINCOS(angle, sin_out, cos_out) \\
-    vp_helmert_fixed_sincos(angle, sin_out, cos_out)
-#define VP_HELMERT_SIN(angle) vp_helmert_fixed_sin(angle)
+    vp_helmert_fixed_q62_sincos(angle, sin_out, cos_out)
+#define VP_HELMERT_SIN(angle) vp_helmert_fixed_q62_sin(angle)
 """
     + _HELMERT_SHIFT_BODY
 )
@@ -2620,46 +2682,63 @@ _helmert_kernel_lock = threading.Lock()
 
 
 def _resolve_helmert_trig_mode(trig_mode: str) -> str:
-    if trig_mode == "auto":
-        from vibeproj.gpu_detect import select_helmert_trig_mode
-
-        return select_helmert_trig_mode()
     if trig_mode not in ("fp64", "int64"):
         raise ValueError(
-            f"Invalid Helmert trig mode: {trig_mode!r}. Must be 'auto', 'fp64', or 'int64'."
+            f"Invalid Helmert trig mode (private): {trig_mode!r}. Must be 'fp64' or 'int64'; "
+            "resolve public policy through vibeproj.transcendentals."
         )
     return trig_mode
 
 
-def _get_helmert_kernel(trig_mode: str = "auto"):
+def _helmert_implementation_from_legacy_mode(mode: str) -> str:
+    """Translate the private pre-registry override used by benchmarks/tests."""
+    return HELMERT_FIXED_Q62 if _resolve_helmert_trig_mode(mode) == "int64" else NATIVE_LIBDEVICE
+
+
+def _get_helmert_kernel(
+    transcendental_impl: str = NATIVE_LIBDEVICE,
+    *,
+    trig_mode: str | None = None,
+):
     """Get or compile a Helmert datum shift kernel (thread-safe)."""
-    resolved_mode = _resolve_helmert_trig_mode(trig_mode)
-    if resolved_mode in _helmert_kernel_cache:
-        return _helmert_kernel_cache[resolved_mode]
+    if trig_mode is not None:
+        transcendental_impl = _helmert_implementation_from_legacy_mode(trig_mode)
+    if transcendental_impl not in (NATIVE_LIBDEVICE, HELMERT_FIXED_Q62):
+        raise ValueError(
+            f"Unsupported transcendental implementation for Helmert kernel: {transcendental_impl!r}"
+        )
+    if transcendental_impl in _helmert_kernel_cache:
+        return _helmert_kernel_cache[transcendental_impl]
 
     import cupy as cp
 
     with _helmert_kernel_lock:
-        if resolved_mode in _helmert_kernel_cache:
-            return _helmert_kernel_cache[resolved_mode]
-        if resolved_mode == "int64":
-            source = _HELMERT_SHIFT_FIXED_TRIG_SOURCE
-            function_name = "helmert_shift_fixed_trig"
+        if transcendental_impl in _helmert_kernel_cache:
+            return _helmert_kernel_cache[transcendental_impl]
+        if transcendental_impl == HELMERT_FIXED_Q62:
+            source = _HELMERT_SHIFT_FIXED_Q62_SOURCE
+            function_name = "helmert_shift_fixed_q62"
         else:
             source = _HELMERT_SHIFT_SOURCE
             function_name = "helmert_shift"
         kernel = cp.RawKernel(source, function_name)
-        _helmert_kernel_cache[resolved_mode] = kernel
+        _helmert_kernel_cache[transcendental_impl] = kernel
         return kernel
 
 
-def compile_helmert_kernel(*, trig_mode: str = "auto"):
+def compile_helmert_kernel(
+    *,
+    transcendental_impl: str = NATIVE_LIBDEVICE,
+    trig_mode: str | None = None,
+):
     """Pre-compile the selected Helmert datum shift kernel."""
     try:
         import cupy  # noqa: F401
     except (ImportError, ModuleNotFoundError):
         return
-    _get_helmert_kernel(trig_mode)
+    kernel = _get_helmert_kernel(transcendental_impl, trig_mode=trig_mode)
+    with _helmert_kernel_lock:
+        kernel.compile()
 
 
 def fused_helmert_shift(
@@ -2672,7 +2751,8 @@ def fused_helmert_shift(
     out_lon=None,
     out_h=None,
     stream=None,
-    trig_mode="auto",
+    transcendental_impl: str = NATIVE_LIBDEVICE,
+    trig_mode: str | None = None,
 ):
     """Execute the Helmert datum shift on GPU.
 
@@ -2692,10 +2772,11 @@ def fused_helmert_shift(
         Pre-allocated output height array (only used when h is not None).
     stream : cupy.cuda.Stream, optional
         CUDA stream for async execution.
+    transcendental_impl : str
+        Exact implementation ID resolved by :mod:`vibeproj.transcendentals`.
+        Selection is compile-time and forms part of the RawKernel cache key.
     trig_mode : str, optional
-        Internal kernel strategy: ``"auto"`` selects fixed-point trig only on
-        validated consumer GPUs, ``"fp64"`` uses native paired sine/cosine,
-        and ``"int64"`` forces bounded Q1.62 trig with fp64 fallback.
+        Private compatibility override for deterministic legacy benchmarks.
 
     Returns
     -------
@@ -2709,7 +2790,7 @@ def fused_helmert_shift(
     if xp is not cp:
         return None
 
-    kernel = _get_helmert_kernel(trig_mode)
+    kernel = _get_helmert_kernel(transcendental_impl, trig_mode=trig_mode)
 
     from vibeproj.exceptions import CoordinateValidationError
 
@@ -2915,56 +2996,127 @@ def compile_svd_kernel():
         import cupy  # noqa: F401
     except (ImportError, ModuleNotFoundError):
         return
-    _get_svd_kernel()
+    kernel = _get_svd_kernel()
+    with _svd_kernel_lock:
+        kernel.compile()
 
 
 # Device array cache for SVD coefficients.
-# Keyed by id(DatumCorrectionData).  We store a strong reference to the
-# correction object alongside the cached arrays so the id() cannot be
-# recycled by the GC while the cache entry exists.
-_svd_device_cache: dict[int, tuple] = {}
+# Keyed by (CUDA device ID, id(DatumCorrectionData)). We store a strong
+# correction reference and a readiness event alongside the arrays so IDs
+# cannot be recycled and cross-stream first use remains ordered without a
+# device-wide synchronization.
+_svd_device_cache: dict[tuple[int, int], tuple] = {}
 _svd_device_cache_lock = threading.Lock()
 
 
-def _get_svd_device_arrays(correction):
+def _svd_device_cache_key(correction, device_id: int) -> tuple[int, int]:
+    return device_id, id(correction)
+
+
+def _validate_svd_coefficient_devices(arrays, device_id: int) -> None:
+    """Reject a corrupt/cross-device coefficient cache entry."""
+    names = ("u_lat", "s_lat", "vt_lat", "u_lon", "s_lon", "vt_lon")
+    for name, array in zip(names, arrays, strict=True):
+        array_device_id = int(array.device.id)
+        if array_device_id != device_id:
+            raise ValueError(
+                f"SVD coefficient {name} is on CUDA device {array_device_id}, "
+                f"expected device {device_id}"
+            )
+
+
+def _resolve_svd_stream(cp, stream, device_id: int):
+    """Resolve a stream for *device_id*, accepting CUDA null/legacy streams."""
+    with cp.cuda.Device(device_id):
+        target_stream = stream if stream is not None else cp.cuda.get_current_stream()
+    stream_device_id = int(target_stream.device_id)
+    # CuPy reports -1 for the CUDA null/legacy stream. Its device is the
+    # surrounding CUDA device context, so normalize it to the launch device.
+    if stream_device_id not in (-1, device_id):
+        raise ValueError(
+            f"SVD stream is on CUDA device {stream_device_id}, expected device {device_id}"
+        )
+    return target_stream
+
+
+def _wait_for_svd_coefficients(key, cached, target_stream, device_id: int):
+    """Order incomplete first-use copies without polluting steady-state capture."""
+    ready_event = cached[2]
+    if ready_event is None:
+        return cached
+
+    import cupy as cp
+
+    with cp.cuda.Device(device_id):
+        if not ready_event.done:
+            target_stream.wait_event(ready_event)
+            return cached
+
+    # Once readiness is observed, discard the event under the cache lock.
+    # Subsequent steady-state calls perform no CUDA event operation, which is
+    # required when the consuming transform is captured into a CUDA graph.
+    completed = (cached[0], cached[1], None)
+    with _svd_device_cache_lock:
+        if _svd_device_cache.get(key) is cached:
+            _svd_device_cache[key] = completed
+            return completed
+        return _svd_device_cache[key]
+
+
+def _get_svd_device_arrays(correction, *, device_id=None, stream=None):
     """Lazily transfer SVD coefficients to device (thread-safe, cached).
 
     Returns a tuple of 6 CuPy arrays:
         (u_lat_d, s_lat_d, vt_lat_d, u_lon_d, s_lon_d, vt_lon_d)
-    All are contiguous fp64 arrays.
+    All are contiguous fp64 arrays on *device_id*. First-use transfers are
+    enqueued on *stream*, and every consumer waits on the cached readiness
+    event without synchronizing the device or host.
     """
-    key = id(correction)
+    import cupy as cp
+
+    if device_id is None:
+        device_id = int(cp.cuda.runtime.getDevice())
+    device_id = int(device_id)
+    target_stream = _resolve_svd_stream(cp, stream, device_id)
+
+    key = _svd_device_cache_key(correction, device_id)
     cached = _svd_device_cache.get(key)
     if cached is not None:
-        return cached[1]  # (strong_ref, arrays) -> arrays
-
-    import cupy as cp
+        _validate_svd_coefficient_devices(cached[1], device_id)
+        cached = _wait_for_svd_coefficients(key, cached, target_stream, device_id)
+        return cached[1]  # (strong_ref, arrays, ready_event) -> arrays
 
     with _svd_device_cache_lock:
         cached = _svd_device_cache.get(key)
-        if cached is not None:
-            return cached[1]
+        if cached is None:
+            # Flatten rank x n into contiguous 1D arrays (row-major).
+            u_lat_flat = np.array([v for row in correction.u_lat for v in row], dtype=np.float64)
+            vt_lat_flat = np.array([v for row in correction.vt_lat for v in row], dtype=np.float64)
+            s_lat_flat = np.array(correction.s_lat, dtype=np.float64)
 
-        # Flatten rank x n into contiguous 1D arrays (row-major)
-        u_lat_flat = np.array([v for row in correction.u_lat for v in row], dtype=np.float64)
-        vt_lat_flat = np.array([v for row in correction.vt_lat for v in row], dtype=np.float64)
-        s_lat_flat = np.array(correction.s_lat, dtype=np.float64)
+            u_lon_flat = np.array([v for row in correction.u_lon for v in row], dtype=np.float64)
+            vt_lon_flat = np.array([v for row in correction.vt_lon for v in row], dtype=np.float64)
+            s_lon_flat = np.array(correction.s_lon, dtype=np.float64)
 
-        u_lon_flat = np.array([v for row in correction.u_lon for v in row], dtype=np.float64)
-        vt_lon_flat = np.array([v for row in correction.vt_lon for v in row], dtype=np.float64)
-        s_lon_flat = np.array(correction.s_lon, dtype=np.float64)
+            with cp.cuda.Device(device_id), target_stream:
+                arrays = (
+                    cp.asarray(u_lat_flat),
+                    cp.asarray(s_lat_flat),
+                    cp.asarray(vt_lat_flat),
+                    cp.asarray(u_lon_flat),
+                    cp.asarray(s_lon_flat),
+                    cp.asarray(vt_lon_flat),
+                )
+                ready_event = cp.cuda.Event()
+                ready_event.record(target_stream)
+            _validate_svd_coefficient_devices(arrays, device_id)
+            cached = (correction, arrays, ready_event)
+            _svd_device_cache[key] = cached
 
-        arrays = (
-            cp.asarray(u_lat_flat),
-            cp.asarray(s_lat_flat),
-            cp.asarray(vt_lat_flat),
-            cp.asarray(u_lon_flat),
-            cp.asarray(s_lon_flat),
-            cp.asarray(vt_lon_flat),
-        )
-        # Store (strong_ref, arrays) to pin the correction object in memory
-        _svd_device_cache[key] = (correction, arrays)
-        return arrays
+    _validate_svd_coefficient_devices(cached[1], device_id)
+    cached = _wait_for_svd_coefficients(key, cached, target_stream, device_id)
+    return cached[1]
 
 
 def fused_svd_correction(
@@ -3007,11 +3159,6 @@ def fused_svd_correction(
     if xp is not cp:
         return None
 
-    try:
-        kernel = _get_svd_kernel()
-    except Exception:
-        return None
-
     from vibeproj.exceptions import CoordinateValidationError
 
     n = lat.size
@@ -3020,10 +3167,32 @@ def fused_svd_correction(
             f"lat and lon must have the same size, got {n} and {lon.size}"
         )
 
-    if not lat.flags.c_contiguous:
-        lat = cp.ascontiguousarray(lat)
-    if not lon.flags.c_contiguous:
-        lon = cp.ascontiguousarray(lon)
+    launch_device_id = int(lat.device.id)
+    lon_device_id = int(lon.device.id)
+    if lon_device_id != launch_device_id:
+        raise CoordinateValidationError(
+            f"lon is on CUDA device {lon_device_id}, expected device {launch_device_id}"
+        )
+
+    try:
+        target_stream = _resolve_svd_stream(cp, stream, launch_device_id)
+    except ValueError as exc:
+        raise CoordinateValidationError(str(exc)) from exc
+
+    if out_lat is not None and int(out_lat.device.id) != launch_device_id:
+        raise CoordinateValidationError(
+            f"out_lat is on CUDA device {out_lat.device.id}, expected device {launch_device_id}"
+        )
+    if out_lon is not None and int(out_lon.device.id) != launch_device_id:
+        raise CoordinateValidationError(
+            f"out_lon is on CUDA device {out_lon.device.id}, expected device {launch_device_id}"
+        )
+
+    with cp.cuda.Device(launch_device_id), target_stream:
+        if not lat.flags.c_contiguous:
+            lat = cp.ascontiguousarray(lat)
+        if not lon.flags.c_contiguous:
+            lon = cp.ascontiguousarray(lon)
 
     if lat.dtype != np.float64:
         raise CoordinateValidationError(
@@ -3035,7 +3204,8 @@ def fused_svd_correction(
         )
 
     if out_lat is None:
-        out_lat = cp.empty(n, dtype=cp.float64)
+        with cp.cuda.Device(launch_device_id), target_stream:
+            out_lat = cp.empty(n, dtype=cp.float64)
     elif out_lat.dtype != np.float64:
         raise CoordinateValidationError(
             f"out_lat must be float64 (kernel writes double*), got {out_lat.dtype}"
@@ -3046,7 +3216,8 @@ def fused_svd_correction(
         )
 
     if out_lon is None:
-        out_lon = cp.empty(n, dtype=cp.float64)
+        with cp.cuda.Device(launch_device_id), target_stream:
+            out_lon = cp.empty(n, dtype=cp.float64)
     elif out_lon.dtype != np.float64:
         raise CoordinateValidationError(
             f"out_lon must be float64 (kernel writes double*), got {out_lon.dtype}"
@@ -3056,8 +3227,26 @@ def fused_svd_correction(
             f"out_lon too small: need at least {n} elements, got {out_lon.size}"
         )
 
-    # Get device arrays (lazy transfer, cached by correction_data identity)
-    u_lat_d, s_lat_d, vt_lat_d, u_lon_d, s_lon_d, vt_lon_d = _get_svd_device_arrays(correction_data)
+    # Get device arrays on the launch device. First-use transfers and the
+    # consuming kernel are ordered on the supplied stream without host sync.
+    try:
+        u_lat_d, s_lat_d, vt_lat_d, u_lon_d, s_lon_d, vt_lon_d = _get_svd_device_arrays(
+            correction_data,
+            device_id=launch_device_id,
+            stream=target_stream,
+        )
+        _validate_svd_coefficient_devices(
+            (u_lat_d, s_lat_d, vt_lat_d, u_lon_d, s_lon_d, vt_lon_d),
+            launch_device_id,
+        )
+    except ValueError as exc:
+        raise CoordinateValidationError(str(exc)) from exc
+
+    with cp.cuda.Device(launch_device_id), target_stream:
+        try:
+            kernel = _get_svd_kernel()
+        except Exception:
+            return None
 
     # Pre-compute grid scaling factors
     lat_min, lat_max, lon_min, lon_max = correction_data.bbox
@@ -3091,10 +3280,7 @@ def fused_svd_correction(
         np.int32(1 if negate else 0),
     )
 
-    if stream is not None:
-        with stream:
-            kernel((grid,), (block,), args)
-    else:
+    with cp.cuda.Device(launch_device_id), target_stream:
         kernel((grid,), (block,), args)
 
     return out_lat, out_lon

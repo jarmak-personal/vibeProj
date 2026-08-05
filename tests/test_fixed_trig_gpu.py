@@ -7,6 +7,11 @@ import pytest
 from numpy.testing import assert_allclose
 
 cp = pytest.importorskip("cupy")
+try:
+    if cp.cuda.runtime.getDeviceCount() < 1:
+        pytest.skip("CUDA device not available", allow_module_level=True)
+except Exception as exc:  # pragma: no cover - import-time environment guard
+    pytest.skip(f"CUDA device not available: {exc}", allow_module_level=True)
 
 from vibeproj._fixed_trig_device_fns import FIXED_TRIG_DEVICE_FNS  # noqa: E402
 from vibeproj import Transformer  # noqa: E402
@@ -15,7 +20,13 @@ from vibeproj.fused_kernels import (  # noqa: E402
     _helmert_kernel_cache,
     fused_helmert_shift,
 )
-from vibeproj.gpu_detect import select_helmert_trig_mode  # noqa: E402
+from vibeproj.transcendentals import (  # noqa: E402
+    HELMERT_FIXED_Q62,
+    NATIVE_LIBDEVICE,
+    TranscendentalOperation,
+    detect_device_capability,
+    resolve_transcendental_strategy,
+)
 
 
 _TEST_SOURCE = (
@@ -114,8 +125,10 @@ def test_fixed_trig_helmert_matches_fp64_globally(with_height):
     lon = cp.asarray(rng.uniform(-180.0, 180.0, n), dtype=cp.float64)
     height = cp.asarray(rng.uniform(-500.0, 10_000.0, n), dtype=cp.float64) if with_height else None
 
-    fp64 = fused_helmert_shift(lat, lon, params, cp, h=height, trig_mode="fp64")
-    fixed = fused_helmert_shift(lat, lon, params, cp, h=height, trig_mode="int64")
+    fp64 = fused_helmert_shift(lat, lon, params, cp, h=height, transcendental_impl=NATIVE_LIBDEVICE)
+    fixed = fused_helmert_shift(
+        lat, lon, params, cp, h=height, transcendental_impl=HELMERT_FIXED_Q62
+    )
     cp.cuda.get_current_stream().synchronize()
 
     radius = params.dst_ellipsoid.a
@@ -136,23 +149,50 @@ def test_fixed_trig_helmert_falls_back_for_unbounded_longitude():
     lat = cp.asarray([0.0, 45.0, -45.0, 80.0], dtype=cp.float64)
     lon = cp.asarray([360.0, -540.0, 720.0, -1000.0], dtype=cp.float64)
 
-    fp64 = fused_helmert_shift(lat, lon, params, cp, trig_mode="fp64")
-    fixed = fused_helmert_shift(lat, lon, params, cp, trig_mode="int64")
+    fp64 = fused_helmert_shift(lat, lon, params, cp, transcendental_impl=NATIVE_LIBDEVICE)
+    fixed = fused_helmert_shift(lat, lon, params, cp, transcendental_impl=HELMERT_FIXED_Q62)
     assert_allclose(cp.asnumpy(fixed[0]), cp.asnumpy(fp64[0]), rtol=0.0, atol=1e-13)
     assert_allclose(cp.asnumpy(fixed[1]), cp.asnumpy(fp64[1]), rtol=0.0, atol=1e-13)
 
 
-def test_helmert_auto_mode_resolves_to_cached_device_strategy():
-    selected_mode = select_helmert_trig_mode()
-    assert selected_mode in ("fp64", "int64")
-    assert _get_helmert_kernel("auto") is _get_helmert_kernel(selected_mode)
+def test_helmert_registry_implementation_uses_exact_strategy_cache():
+    assert _get_helmert_kernel(HELMERT_FIXED_Q62) is _get_helmert_kernel(HELMERT_FIXED_Q62)
+
+
+def test_fused_helmert_honors_all_preallocated_output_identities():
+    transformer = Transformer.from_crs("EPSG:4326", "EPSG:4277")
+    params = transformer._helmert
+    assert params is not None
+    lat = cp.asarray([0.0, 45.0], dtype=cp.float64)
+    lon = cp.asarray([0.0, -3.0], dtype=cp.float64)
+    height = cp.asarray([10.0, 100.0], dtype=cp.float64)
+    outputs = tuple(cp.empty_like(lat) for _ in range(3))
+
+    result = fused_helmert_shift(
+        lat,
+        lon,
+        params,
+        cp,
+        h=height,
+        out_lat=outputs[0],
+        out_lon=outputs[1],
+        out_h=outputs[2],
+        transcendental_impl=NATIVE_LIBDEVICE,
+    )
+
+    assert all(actual is expected for actual, expected in zip(result, outputs, strict=True))
 
 
 def test_transformer_compile_warms_auto_selected_helmert_kernel():
     transformer = Transformer.from_crs("EPSG:4326", "EPSG:27700")
     assert transformer._helmert is not None
+    expected_impl = resolve_transcendental_strategy(
+        TranscendentalOperation.HELMERT,
+        "auto",
+        device=detect_device_capability(cp),
+    ).implementation_id
 
     _helmert_kernel_cache.clear()
     transformer.compile()
 
-    assert set(_helmert_kernel_cache) == {select_helmert_trig_mode()}
+    assert set(_helmert_kernel_cache) == {expected_impl}

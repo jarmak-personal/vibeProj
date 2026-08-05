@@ -10,6 +10,16 @@ from vibeproj.exceptions import (
     VibeProjectionError,
 )
 from vibeproj.transformer import Transformer
+from vibeproj.transcendentals import (
+    AccuracyContract,
+    DeviceCapability,
+    StrategyDecision,
+    StrategyExplanation,
+    StrategyImplementation,
+    TranscendentalOperation,
+    TranscendentalPolicy,
+    list_transcendental_strategies,
+)
 
 
 def list_projections() -> dict[str, dict]:
@@ -39,7 +49,12 @@ def list_projections() -> dict[str, dict]:
     return result
 
 
-def warm_up(projections: list[str] | None = None, *, precision: str = "auto") -> None:
+def warm_up(
+    projections: list[str] | None = None,
+    *,
+    precision: str = "auto",
+    transcendentals: TranscendentalPolicy = "auto",
+) -> None:
     """Pre-compile fused NVRTC kernels to eliminate first-call latency.
 
     Parameters
@@ -47,8 +62,19 @@ def warm_up(projections: list[str] | None = None, *, precision: str = "auto") ->
     projections : list of str, optional
         Projection names to compile (e.g. ["tmerc", "webmerc"]).
         If None, compiles all supported projections.
-    precision : str
-        Compute precision: "auto"/"fp64"/"fp32"/"ds".
+    precision : {"auto", "fp64", "fp32", "ds"}
+        Compute precision: ``"auto"``, ``"fp64"``, ``"fp32"``, or ``"ds"``.
+    transcendentals : {"auto", "native", "accelerated"}
+        Hardware-aware transcendental implementation policy, independent of
+        compute precision. Warm-up has no concrete workload size, so ``"auto"``
+        selects an otherwise-qualified implementation without applying runtime
+        crossover thresholds.
+
+    Notes
+    -----
+    This compiles fused projection kernels. Per-Transformer correction scratch,
+    pinned staging buffers, device buffers, and persistent chunk streams remain
+    lazily allocated on first use or growth.
 
     Examples
     --------
@@ -56,15 +82,47 @@ def warm_up(projections: list[str] | None = None, *, precision: str = "auto") ->
     >>> vibeproj.warm_up(["tmerc", "webmerc"])  # selective
     >>> vibeproj.warm_up()                       # all projections
     """
+    from vibeproj.transcendentals import (
+        NATIVE_LIBDEVICE,
+        TranscendentalOperation,
+        detect_device_capability,
+        normalize_compute_precision,
+        normalize_transcendental_policy,
+        resolve_transcendental_strategy,
+    )
+
+    precision = normalize_compute_precision(precision)
+    transcendentals = normalize_transcendental_policy(transcendentals)
     from vibeproj.fused_kernels import compile_kernels
 
-    compile_kernels(projections, precision=precision)
+    transcendental_impl = NATIVE_LIBDEVICE
+    if projections is None or "tmerc" in projections:
+        transcendental_impl = resolve_transcendental_strategy(
+            TranscendentalOperation.TMERC_FORWARD,
+            transcendentals,
+            device=detect_device_capability(),
+            domain="utm",
+            precision=precision,
+        ).implementation_id
+    compile_kernels(
+        projections,
+        precision=precision,
+        transcendental_impl=transcendental_impl,
+    )
 
 
 __all__ = [
     "CRSInput",
+    "AccuracyContract",
+    "DeviceCapability",
+    "StrategyDecision",
+    "StrategyExplanation",
+    "StrategyImplementation",
     "Transformer",
+    "TranscendentalOperation",
+    "TranscendentalPolicy",
     "list_projections",
+    "list_transcendental_strategies",
     "warm_up",
     "VibeProjectionError",
     "UnsupportedProjectionError",

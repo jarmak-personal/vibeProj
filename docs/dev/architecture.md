@@ -18,7 +18,7 @@ Transformer.from_crs("EPSG:4326", "EPSG:32631")
 │  pipeline.py │  chains pre/post ops with projection core
 └──────┬───────┘
        │
-       ├──── GPU? ──► fused_kernels.py  (single kernel launch)
+       ├──── GPU? ──► fused_kernels.py  (one launch per mathematical stage)
        │
        └──── CPU? ──► projections/<name>.py  (NumPy element-wise)
 ```
@@ -62,9 +62,11 @@ kernel launch between them.
 
 ## Fused kernel fast-path
 
-When `_try_fused()` detects a CuPy array input and a supported projection,
-it dispatches to a single GPU kernel that performs all 7 pipeline stages
-in one kernel launch. This eliminates:
+When `_try_fused()` detects a CuPy array input and a supported projection, it
+dispatches one GPU kernel for that projection stage. The kernel performs all
+projection-local steps in one launch. Helmert and SVD corrections remain
+separate fused stages with bounded reusable scratch between them. This
+eliminates:
 
 - ~20 intermediate CuPy kernel launches
 - ~20 temporary array allocations

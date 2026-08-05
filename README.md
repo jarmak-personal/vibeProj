@@ -1,6 +1,6 @@
 # vibeProj
 
-GPU-accelerated coordinate projection library. Extracted from [RAPIDS cuProj](https://github.com/rapidsai/cuspatial), re-engineered as a pure Python + CuPy package, and expanded from 1 to 24 projections — each with a fused NVRTC kernel that runs the full transform pipeline in a single GPU kernel launch.
+GPU-accelerated coordinate projection library. Extracted from [RAPIDS cuProj](https://github.com/rapidsai/cuspatial), re-engineered as a pure Python + CuPy package, and expanded from 1 to 24 projections. Each mathematical projection, Helmert, or SVD stage uses one fused NVRTC kernel launch; complete multi-stage transforms use one launch per stage.
 
 ## Performance
 
@@ -79,6 +79,28 @@ t = Transformer.from_crs("EPSG:4326", "EPSG:32631", always_xy=False)
 x, y = t.transform(49.0, 2.0)           # (lat, lon) in, (easting, northing) out
 ```
 
+Compute precision and transcendental implementation are independent per-call
+choices:
+
+```python
+t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
+x, y = t.transform(
+    2.0,
+    49.0,
+    precision="fp64",
+    transcendentals="accelerated",
+)
+print(t.explain_strategy(transcendentals="accelerated"))
+```
+
+`transcendentals="accelerated"` uses an accuracy-qualified implementation when
+the transform and GPU are supported, and explicitly falls back to native math
+otherwise. Initial automatic acceleration is limited to bounded Helmert and
+forward UTM operations on validated Ada `sm_89` consumer GPUs and only above
+their measured workload-size crossovers; Hopper and unmeasured devices remain
+native. See the
+[transcendental policy](https://jarmak-personal.github.io/vibeProj/user/transcendentals.html).
+
 ### Cross-datum transforms (Helmert)
 
 ```python
@@ -89,7 +111,7 @@ x, y = t.transform(-0.1278, 51.5074)
 # With ellipsoidal height — z is transformed through the ECEF intermediate
 x, y, z = t.transform(-0.1278, 51.5074, z=45.0)
 
-# Same-datum: z passes through unchanged, zero overhead
+# Same-datum: z passes through unchanged
 t = Transformer.from_crs("EPSG:4326", "EPSG:32631")
 x, y, z = t.transform(2.0, 49.0, z=45.0)  # z == 45.0
 ```
@@ -107,7 +129,7 @@ vibeProj works with popular geospatial Python libraries. GPU acceleration is aut
 ### vibeSpatial Integration (zero-copy GPU)
 
 ```python
-# Pre-allocated output, no intermediate allocations, stays on GPU
+# Pre-allocated final output; all stages stay on the GPU
 t = Transformer.from_crs(src_crs, dst_crs, always_xy=True)
 new_x = cp.empty_like(buf.x)
 new_y = cp.empty_like(buf.y)
@@ -118,18 +140,20 @@ new_z = cp.empty_like(buf.z)
 t.transform_buffers(buf.x, buf.y, buf.z, out_x=new_x, out_y=new_y, out_z=new_z)
 ```
 
-`transform_buffers()` accepts pre-allocated CuPy output arrays, writes results directly into them, and returns the same objects. No host round-trip, no intermediate allocation. Designed for vibeSpatial's `OwnedGeometryArray` coordinate buffers.
+`transform_buffers()` accepts pre-allocated CuPy output arrays, writes results directly into them, and returns the same objects. No stage performs a host round-trip. A projection-only call needs no intermediate buffers; multi-stage Helmert/SVD pipelines lazily allocate bounded scratch and reuse it on warmed calls. Designed for vibeSpatial's `OwnedGeometryArray` coordinate buffers.
 
 ## Architecture
 
 - **Pure Python + CuPy** — no compiled extensions, no CMake
-- **Fused NVRTC kernels** — each projection's full pipeline (axis swap, deg/rad, central meridian, projection math, scale/offset) runs in a single CUDA kernel launch via CuPy `RawKernel`
+- **Fused NVRTC kernels** — each mathematical stage runs in one CUDA launch via CuPy `RawKernel`; Helmert/SVD plus projection paths use the corresponding two or three stage launches
 - **NumPy fallback** — all projections work on CPU when CuPy is unavailable
 - **Helmert datum shifts** — 7/15-parameter (time-dependent) datum transformation with 3D ellipsoidal height support, runs on its own GPU kernel
 - **SVD datum corrections** — baked SVD-compressed grid corrections for sub-5cm accuracy on supported datum pairs (e.g. NAD27 to NAD83), no external grid files needed
 - **pyproj for CRS metadata** — EPSG codes resolved via pyproj, transform math is ours
 - **fp64 I/O** — input/output arrays always double precision (ADR-0002 compliant)
-- **Auto GPU detection** — queries `SingleToDoublePrecisionPerfRatio` to classify consumer vs datacenter GPU
+- **Inspectable transcendental policy** — a central registry resolves
+  `auto`/`native`/`accelerated` from hardware, projection domain, direction,
+  and accuracy qualification, with native fallback everywhere
 
 ## Test
 

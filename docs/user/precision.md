@@ -27,6 +27,11 @@ t.transform_buffers(lon, lat, precision="ds")
 
 ## Automatic device strategies
 
+The public `transcendentals="auto"|"native"|"accelerated"` policy is
+independent of these compute-precision modes. See
+[Transcendental policy](transcendentals.md) for resolution, fallback, hardware
+qualification, and introspection.
+
 Projection arithmetic and all coordinate I/O remain fp64 by default. Accurate
 double transcendental functions expand to argument reduction and native
 instruction sequences, which are expensive on consumer GPUs with weak fp64
