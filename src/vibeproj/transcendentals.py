@@ -23,12 +23,16 @@ TMERC_FIXED_Q62 = "tmerc.forward.fixed_q62"
 SINU_FORWARD_FIXED_Q62 = "sinu.forward.fixed_q62"
 ORTHO_FORWARD_FIXED_Q62 = "ortho.forward.fixed_q62"
 ORTHO_INVERSE_GUARDED_REFRAME = "ortho.inverse.guarded_reframe"
+GEOS_FORWARD_FIXED_Q62 = "geos.forward.fixed_q62"
+LAEA_FORWARD_POLAR_FIXED_Q62 = "laea.forward.polar.fixed_q62"
 PROJECTION_FIXED_Q62_MAX_SCALE_M = 6_400_000.0
 TMERC_FIXED_Q62_MIN_ELEMENTS = 256
 HELMERT_FIXED_Q62_MIN_ELEMENTS = 131_072
 SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS = 524_288
 ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS = 262_144
 ORTHO_INVERSE_GUARDED_REFRAME_MIN_ELEMENTS = 524_288
+GEOS_FORWARD_FIXED_Q62_MIN_ELEMENTS = 2_097_152
+LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS = 1_048_576
 
 _EXACT_DOMAIN_FAMILIES = frozenset({"aeqd", "geos", "laea", "ortho", "stere", "sterea"})
 
@@ -336,6 +340,65 @@ _REGISTRY = (
                 "ill-conditioned output-latitude inputs use exact native fallback. "
                 "Final RTX 4090 full-valid-disk maximum/p99 horizontal error: "
                 "6.328/1.584 nm."
+            ),
+        ),
+        native_fallback=True,
+    ),
+    StrategyImplementation(
+        implementation_id=GEOS_FORWARD_FIXED_Q62,
+        operation=TranscendentalOperation.PROJECTION,
+        family="qualified_geos_forward_transcendentals",
+        supported_policies=("auto", "accelerated"),
+        supported_backends=("cuda",),
+        supported_compute_capabilities=((8, 9),),
+        min_fp32_to_fp64_ratio=16,
+        supported_compute_precisions=("auto", "fp64"),
+        min_elements=GEOS_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+        domains=(
+            "geos.forward.spherical.sweep_x",
+            "geos.forward.spherical.sweep_y",
+            "geos.forward.ellipsoidal.sweep_x",
+            "geos.forward.ellipsoidal.sweep_y",
+        ),
+        accuracy=AccuracyContract(
+            reference=NATIVE_LIBDEVICE,
+            max_horizontal_error_m=1e-8,
+            max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+            notes=(
+                "Q1.62 paired geocentric-latitude and longitude trig. The "
+                "launch-uniform native fallback requires a finite positive "
+                "satellite height, exact finite H=h+a with H>h, and physical "
+                "Earth radius a <= 6,400,000 m. The scan-angle perturbation's "
+                ">=h line-of-sight denominator cancels the final h output scale. "
+                "A bounded visibility-uncertainty band recomputes the complete "
+                "native trig, classification, and projected output at the limb. "
+                "Formal four-domain maximum/p99 projected error: 3.979/1.863 nm."
+            ),
+        ),
+        native_fallback=True,
+    ),
+    StrategyImplementation(
+        implementation_id=LAEA_FORWARD_POLAR_FIXED_Q62,
+        operation=TranscendentalOperation.PROJECTION,
+        family="qualified_laea_polar_forward_transcendentals",
+        supported_policies=("auto", "accelerated"),
+        supported_backends=("cuda",),
+        supported_compute_capabilities=((8, 9),),
+        min_fp32_to_fp64_ratio=16,
+        supported_compute_precisions=("auto", "fp64"),
+        min_elements=LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS,
+        domains=(
+            "laea.forward.spherical.north_pole",
+            "laea.forward.spherical.south_pole",
+        ),
+        accuracy=AccuracyContract(
+            reference=NATIVE_LIBDEVICE,
+            max_horizontal_error_m=1e-8,
+            max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+            notes=(
+                "Polar LAEA forward uses Q1.62 paired longitude trig with "
+                "launch-uniform native fallback above 6,400,000 m physical scale. "
+                "Formal spherical-polar maximum/p99 error: 4.165/2.634 nm."
             ),
         ),
         native_fallback=True,
@@ -746,8 +809,12 @@ __all__ = [
     "ComputePrecision",
     "DeviceCapability",
     "ExecutionContext",
+    "GEOS_FORWARD_FIXED_Q62",
+    "GEOS_FORWARD_FIXED_Q62_MIN_ELEMENTS",
     "HELMERT_FIXED_Q62",
     "HELMERT_FIXED_Q62_MIN_ELEMENTS",
+    "LAEA_FORWARD_POLAR_FIXED_Q62",
+    "LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS",
     "NATIVE_LIBDEVICE",
     "ORTHO_FORWARD_FIXED_Q62",
     "ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS",

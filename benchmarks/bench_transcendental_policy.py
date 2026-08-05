@@ -34,8 +34,12 @@ from typing import Any
 import numpy as np
 
 from vibeproj.transcendentals import (
+    GEOS_FORWARD_FIXED_Q62,
+    GEOS_FORWARD_FIXED_Q62_MIN_ELEMENTS,
     HELMERT_FIXED_Q62,
     HELMERT_FIXED_Q62_MIN_ELEMENTS,
+    LAEA_FORWARD_POLAR_FIXED_Q62,
+    LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS,
     NATIVE_LIBDEVICE,
     ORTHO_FORWARD_FIXED_Q62,
     ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
@@ -149,6 +153,32 @@ QUALIFICATION_SPECS = {
         coordinate_contract_m=1e-8,
         max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
     ),
+    **{
+        f"geos-forward-{geometry}-sweep-{sweep}": QualificationSpec(
+            implementation_id=GEOS_FORWARD_FIXED_Q62,
+            operation="projection",
+            domain=f"geos.forward.{geometry}.sweep_{sweep}",
+            direction="forward",
+            min_elements=GEOS_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+            coordinate_contract_m=1e-8,
+            max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+        )
+        for geometry in ("spherical", "ellipsoidal")
+        for sweep in ("x", "y")
+    },
+    **{
+        f"laea-forward-{geometry}-{pole}": QualificationSpec(
+            implementation_id=LAEA_FORWARD_POLAR_FIXED_Q62,
+            operation="projection",
+            domain=f"laea.forward.{geometry}.{pole}_pole",
+            direction="forward",
+            min_elements=LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS,
+            coordinate_contract_m=1e-8,
+            max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+        )
+        for geometry in ("spherical",)
+        for pole in ("north", "south")
+    },
 }
 CASES = tuple(QUALIFICATION_SPECS)
 WORKLOAD_GRID_CASES = tuple(
@@ -397,7 +427,7 @@ def _json_edge_values(values: np.ndarray) -> list[float | str]:
     return result
 
 
-def _prepare_spherical_projection_forward(
+def _prepare_geographic_projection_forward(
     cp: Any,
     n: int,
     rng: np.random.Generator,
@@ -408,21 +438,30 @@ def _prepare_spherical_projection_forward(
     latitude_range: tuple[float, float],
     edge_longitude: np.ndarray,
     edge_latitude: np.ndarray,
+    source_crs: str = _SPHERICAL_LONG_LAT_CRS,
+    family: str | None = None,
+    uniform_surface: bool = False,
 ) -> BenchmarkCase:
-    """Prepare one reusable spherical forward-projection qualification case."""
+    """Prepare one reusable geographic forward-projection qualification case."""
     from vibeproj import Transformer
 
     transformer = Transformer.from_crs(
-        _SPHERICAL_LONG_LAT_CRS,
+        source_crs,
         target_crs,
         always_xy=True,
     )
     longitude = rng.uniform(*longitude_range, n).astype(np.float64)
-    latitude = rng.uniform(*latitude_range, n).astype(np.float64)
-    family = name.removesuffix("-forward")
+    if uniform_surface:
+        sin_min, sin_max = np.sin(np.deg2rad(latitude_range))
+        latitude = np.rad2deg(
+            np.arcsin(rng.uniform(min(sin_min, sin_max), max(sin_min, sin_max), n))
+        ).astype(np.float64)
+    else:
+        latitude = rng.uniform(*latitude_range, n).astype(np.float64)
+    resolved_family = family or name.removesuffix("-forward")
     return BenchmarkCase(
         name=name,
-        family=family,
+        family=resolved_family,
         direction="FORWARD",
         transformer=transformer,
         input_x=cp.asarray(longitude),
@@ -432,7 +471,7 @@ def _prepare_spherical_projection_forward(
         edge_host_x=edge_longitude,
         edge_host_y=edge_latitude,
         domain={
-            "crs": f"{_SPHERICAL_LONG_LAT_CRS} -> {target_crs}",
+            "crs": f"{source_crs} -> {target_crs}",
             "longitude_degrees": list(longitude_range),
             "latitude_degrees": list(latitude_range),
         },
@@ -441,7 +480,7 @@ def _prepare_spherical_projection_forward(
             "latitude_degrees": _json_edge_values(edge_latitude),
         },
         output_is_geographic=False,
-        oracle_from_crs=_SPHERICAL_LONG_LAT_CRS,
+        oracle_from_crs=source_crs,
         oracle_to_crs=target_crs,
         qualification=QUALIFICATION_SPECS[name],
     )
@@ -471,7 +510,7 @@ def _prepare_sinu_forward(cp: Any, n: int, rng: np.random.Generator) -> Benchmar
         [-180.0, -180.0, 0.0, 180.0, 180.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, np.inf, np.nan],
         dtype=np.float64,
     )
-    return _prepare_spherical_projection_forward(
+    return _prepare_geographic_projection_forward(
         cp,
         n,
         rng,
@@ -527,7 +566,7 @@ def _prepare_ortho_forward(cp: Any, n: int, rng: np.random.Generator) -> Benchma
         ],
         dtype=np.float64,
     )
-    return _prepare_spherical_projection_forward(
+    return _prepare_geographic_projection_forward(
         cp,
         n,
         rng,
@@ -601,6 +640,257 @@ def _prepare_ortho_inverse(cp: Any, n: int, rng: np.random.Generator) -> Benchma
     )
 
 
+def _earth_crs_parts(geometry: str) -> tuple[str, float, float]:
+    if geometry == "spherical":
+        return "+R=6378137", EARTH_RADIUS_M, EARTH_RADIUS_M
+    return "+ellps=WGS84", EARTH_RADIUS_M, 6_356_752.314245179
+
+
+def _geos_visible_samples(
+    n: int,
+    rng: np.random.Generator,
+    *,
+    equatorial_radius: float,
+    polar_radius: float,
+    satellite_height: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Sample the visible ellipsoid without biasing the timed set to the limb."""
+    longitude_parts: list[np.ndarray] = []
+    latitude_parts: list[np.ndarray] = []
+    remaining = n
+    satellite_distance = satellite_height + equatorial_radius
+    flattening_ratio = (polar_radius / equatorial_radius) ** 2
+    while remaining:
+        batch = max(4_096, int(remaining * 2.75))
+        longitude = rng.uniform(-math.pi, math.pi, batch)
+        latitude = np.arcsin(rng.uniform(-1.0, 1.0, batch))
+        phi_gc = np.arctan(flattening_ratio * np.tan(latitude))
+        cos_phi_gc = np.cos(phi_gc)
+        r_earth = polar_radius / np.sqrt(1.0 - (1.0 - flattening_ratio) * cos_phi_gc * cos_phi_gc)
+        point_x = r_earth * cos_phi_gc * np.cos(longitude)
+        visible = satellite_distance * point_x >= equatorial_radius**2
+        count = min(remaining, int(np.count_nonzero(visible)))
+        longitude_parts.append(longitude[visible][:count])
+        latitude_parts.append(latitude[visible][:count])
+        remaining -= count
+    return (
+        np.rad2deg(np.concatenate(longitude_parts)),
+        np.rad2deg(np.concatenate(latitude_parts)),
+    )
+
+
+def _geos_limb_samples(
+    n: int,
+    rng: np.random.Generator,
+    *,
+    equatorial_radius: float,
+    polar_radius: float,
+    satellite_height: float,
+    outside: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    satellite_distance = satellite_height + equatorial_radius
+    flattening_ratio = (polar_radius / equatorial_radius) ** 2
+    latitude_parts: list[np.ndarray] = []
+    longitude_parts: list[np.ndarray] = []
+    remaining = n
+    while remaining:
+        batch = max(4_096, int(remaining * 1.5))
+        latitude = np.arcsin(
+            rng.uniform(-math.sin(math.radians(81.0)), math.sin(math.radians(81.0)), batch)
+        )
+        phi_gc = np.arctan(flattening_ratio * np.tan(latitude))
+        cos_phi_gc = np.cos(phi_gc)
+        r_earth = polar_radius / np.sqrt(1.0 - (1.0 - flattening_ratio) * cos_phi_gc * cos_phi_gc)
+        ratio = equatorial_radius**2 / (satellite_distance * r_earth * cos_phi_gc)
+        valid = np.isfinite(ratio) & (ratio < 1.0)
+        latitude = latitude[valid]
+        longitude_limit = np.arccos(np.clip(ratio[valid], -1.0, 1.0))
+        count = min(remaining, latitude.size)
+        distance = np.power(10.0, rng.uniform(-12.0, -3.0, count))
+        factor = 1.0 + distance if outside else 1.0 - distance
+        sign = np.where(rng.random(count) < 0.5, -1.0, 1.0)
+        latitude_parts.append(latitude[:count])
+        longitude_parts.append(sign * factor * longitude_limit[:count])
+        remaining -= count
+    return (
+        np.rad2deg(np.concatenate(longitude_parts)),
+        np.rad2deg(np.concatenate(latitude_parts)),
+    )
+
+
+def _geos_analytic_limb_samples(
+    *,
+    equatorial_radius: float,
+    polar_radius: float,
+    satellite_height: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return exact/adjacent analytic limb longitudes over both hemispheres."""
+    satellite_distance = satellite_height + equatorial_radius
+    flattening_ratio = (polar_radius / equatorial_radius) ** 2
+    latitude = np.linspace(-80.0, 80.0, 513, dtype=np.float64)
+    latitude_rad = np.deg2rad(latitude)
+    phi_gc = np.arctan(flattening_ratio * np.tan(latitude_rad))
+    cos_phi_gc = np.cos(phi_gc)
+    r_earth = polar_radius / np.sqrt(1.0 - (1.0 - flattening_ratio) * cos_phi_gc * cos_phi_gc)
+    ratio = equatorial_radius**2 / (satellite_distance * r_earth * cos_phi_gc)
+    valid = np.isfinite(ratio) & (ratio < 1.0)
+    latitude = latitude[valid]
+    limb = np.rad2deg(np.arccos(np.clip(ratio[valid], -1.0, 1.0)))
+
+    positive = np.stack(
+        (np.nextafter(limb, 0.0), limb, np.nextafter(limb, math.inf)),
+        axis=1,
+    )
+    negative_limb = -limb
+    negative = np.stack(
+        (
+            np.nextafter(negative_limb, 0.0),
+            negative_limb,
+            np.nextafter(negative_limb, -math.inf),
+        ),
+        axis=1,
+    )
+    longitude = np.concatenate((positive, negative), axis=1).reshape(-1)
+    return longitude, np.repeat(latitude, 6)
+
+
+def _prepare_geos_forward(
+    cp: Any,
+    n: int,
+    rng: np.random.Generator,
+    *,
+    geometry: str,
+    sweep: str,
+) -> BenchmarkCase:
+    from vibeproj import Transformer
+
+    earth, equatorial_radius, polar_radius = _earth_crs_parts(geometry)
+    satellite_height = 35_785_831.0
+    source_crs = f"+proj=longlat {earth} +type=crs"
+    target_crs = (
+        f"+proj=geos +lon_0=0 +h={satellite_height:g} +sweep={sweep} {earth} +units=m +type=crs"
+    )
+    longitude, latitude = _geos_visible_samples(
+        n,
+        rng,
+        equatorial_radius=equatorial_radius,
+        polar_radius=polar_radius,
+        satellite_height=satellite_height,
+    )
+    inside_lon, inside_lat = _geos_limb_samples(
+        4_096,
+        rng,
+        equatorial_radius=equatorial_radius,
+        polar_radius=polar_radius,
+        satellite_height=satellite_height,
+        outside=False,
+    )
+    outside_lon, outside_lat = _geos_limb_samples(
+        1_024,
+        rng,
+        equatorial_radius=equatorial_radius,
+        polar_radius=polar_radius,
+        satellite_height=satellite_height,
+        outside=True,
+    )
+    analytic_lon, analytic_lat = _geos_analytic_limb_samples(
+        equatorial_radius=equatorial_radius,
+        polar_radius=polar_radius,
+        satellite_height=satellite_height,
+    )
+    edge_longitude = np.concatenate(
+        (
+            analytic_lon,
+            inside_lon,
+            outside_lon,
+            [0.0, 0.0, np.inf, -np.inf, np.nan],
+        )
+    ).astype(np.float64)
+    edge_latitude = np.concatenate(
+        (
+            analytic_lat,
+            inside_lat,
+            outside_lat,
+            [90.0, -90.0, 0.0, 0.0, 0.0],
+        )
+    ).astype(np.float64)
+    name = f"geos-forward-{geometry}-sweep-{sweep}"
+    return BenchmarkCase(
+        name=name,
+        family="geos",
+        direction="FORWARD",
+        transformer=Transformer.from_crs(source_crs, target_crs, always_xy=True),
+        input_x=cp.asarray(longitude),
+        input_y=cp.asarray(latitude),
+        host_x=longitude,
+        host_y=latitude,
+        edge_host_x=edge_longitude,
+        edge_host_y=edge_latitude,
+        domain={
+            "crs": f"{source_crs} -> {target_crs}",
+            "timed_distribution": "uniform-area sphere samples conditioned on visibility",
+            "randomized_limb_stress_coordinates": int(inside_lon.size + outside_lon.size),
+            "analytic_exact_nextafter_limb_coordinates": int(analytic_lon.size),
+            "sweep_axis": sweep,
+            "geometry": geometry,
+        },
+        edges={
+            "longitude_degrees": _json_edge_values(edge_longitude),
+            "latitude_degrees": _json_edge_values(edge_latitude),
+        },
+        output_is_geographic=False,
+        oracle_from_crs=source_crs,
+        oracle_to_crs=target_crs,
+        qualification=QUALIFICATION_SPECS[name],
+    )
+
+
+def _prepare_laea_polar_forward(
+    cp: Any,
+    n: int,
+    rng: np.random.Generator,
+    *,
+    geometry: str,
+    pole: str,
+) -> BenchmarkCase:
+    earth, _, _ = _earth_crs_parts(geometry)
+    source_crs = f"+proj=longlat {earth} +type=crs"
+    latitude_origin = 90.0 if pole == "north" else -90.0
+    antipode = -latitude_origin
+    edge_longitude = np.asarray(
+        [-180.0, 0.0, 180.0, 0.0, 0.0, np.inf, -np.inf, np.nan],
+        dtype=np.float64,
+    )
+    edge_latitude = np.asarray(
+        [
+            latitude_origin,
+            latitude_origin,
+            antipode,
+            np.nextafter(antipode, 0.0),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ],
+        dtype=np.float64,
+    )
+    name = f"laea-forward-{geometry}-{pole}"
+    return _prepare_geographic_projection_forward(
+        cp,
+        n,
+        rng,
+        name=name,
+        target_crs=(f"+proj=laea +lat_0={latitude_origin:g} +lon_0=0 {earth} +units=m +type=crs"),
+        longitude_range=(-180.0, 180.0),
+        latitude_range=(-90.0, 90.0),
+        edge_longitude=edge_longitude,
+        edge_latitude=edge_latitude,
+        source_crs=source_crs,
+        family="laea",
+        uniform_surface=True,
+    )
+
+
 def _prepare_case(cp: Any, name: str, n: int, seed: int) -> BenchmarkCase:
     rng = np.random.default_rng(seed)
     if name == "tmerc-forward":
@@ -617,6 +907,12 @@ def _prepare_case(cp: Any, name: str, n: int, seed: int) -> BenchmarkCase:
         return _prepare_ortho_forward(cp, n, rng)
     if name == "ortho-inverse":
         return _prepare_ortho_inverse(cp, n, rng)
+    if name.startswith("geos-forward-"):
+        _, _, geometry, _, sweep = name.split("-")
+        return _prepare_geos_forward(cp, n, rng, geometry=geometry, sweep=sweep)
+    if name.startswith("laea-forward-"):
+        _, _, geometry, pole = name.split("-")
+        return _prepare_laea_polar_forward(cp, n, rng, geometry=geometry, pole=pole)
     raise ValueError(f"Unknown benchmark case: {name}")
 
 
@@ -1018,14 +1314,22 @@ def _coordinate_error(
         & np.isfinite(reference_x)
         & np.isfinite(reference_y)
     )
+    actual_x_finite = actual_x[finite]
+    actual_y_finite = actual_y[finite]
+    reference_x_finite = reference_x[finite]
+    reference_y_finite = reference_y[finite]
     if geographic:
-        dlat_m = np.deg2rad(actual_y - reference_y) * EARTH_RADIUS_M
-        delta_longitude = (actual_x - reference_x + 180.0) % 360.0 - 180.0
-        dlon_m = np.deg2rad(delta_longitude) * EARTH_RADIUS_M * np.cos(np.deg2rad(reference_y))
-        radial = np.hypot(dlat_m, dlon_m)
+        dlat_m = np.deg2rad(actual_y_finite - reference_y_finite) * EARTH_RADIUS_M
+        delta_longitude = (actual_x_finite - reference_x_finite + 180.0) % 360.0 - 180.0
+        dlon_m = (
+            np.deg2rad(delta_longitude) * EARTH_RADIUS_M * np.cos(np.deg2rad(reference_y_finite))
+        )
+        values = np.hypot(dlat_m, dlon_m)
     else:
-        radial = np.hypot(actual_x - reference_x, actual_y - reference_y)
-    values = radial[finite]
+        values = np.hypot(
+            actual_x_finite - reference_x_finite,
+            actual_y_finite - reference_y_finite,
+        )
     if values.size == 0:
         return {
             "finite_coordinates": 0,
@@ -1103,6 +1407,12 @@ def _scale_guard_behavior(cp: Any, case: BenchmarkCase, precision: str) -> dict[
         projection_parameters = f"+proj={case.family} +lon_0=0"
         if case.family == "ortho":
             projection_parameters += " +lat_0=0" if case.name == "ortho-inverse" else " +lat_0=45"
+        elif case.family == "laea":
+            latitude_origin = 90 if case.name.endswith("-north") else -90
+            projection_parameters += f" +lat_0={latitude_origin}"
+        elif case.family == "geos":
+            sweep = case.name.rsplit("-", maxsplit=1)[1]
+            projection_parameters += f" +h=35785831 +sweep={sweep}"
         target_crs = f"{projection_parameters} +R={physical_scale:.17g} +units=m +type=crs"
         if case.name == "ortho-inverse":
             transformer = Transformer.from_crs(target_crs, source_crs, always_xy=True)
@@ -1285,8 +1595,11 @@ def _run_case(cp: Any, case: BenchmarkCase, args: argparse.Namespace) -> dict[st
     wall_repeat_speedups = wall_timing["accelerated"]["repeat_speedups_vs_native"]
     coordinate_contract_m = qualification.coordinate_contract_m
     accelerated_native_error = errors_vs_native["accelerated"]["max_m"]
+    accelerated_native_nonfinite_match = errors_vs_native["accelerated"]["nonfinite_match"]
     native_pyproj_error = errors_vs_pyproj["native"]["max_m"]
     accelerated_pyproj_error = errors_vs_pyproj["accelerated"]["max_m"]
+    native_pyproj_nonfinite_match = errors_vs_pyproj["native"]["nonfinite_match"]
+    accelerated_pyproj_nonfinite_match = errors_vs_pyproj["accelerated"]["nonfinite_match"]
     allocators = [instrumentation[policy]["allocator"] for policy in POLICIES]
     graphs = [instrumentation[policy]["cuda_graph"] for policy in POLICIES]
     gates = {
@@ -1326,14 +1639,19 @@ def _run_case(cp: Any, case: BenchmarkCase, args: argparse.Namespace) -> dict[st
         ),
         "native_coordinate_contract_m": coordinate_contract_m,
         "native_coordinate_contract_pass": accelerated_native_error is not None
-        and accelerated_native_error <= coordinate_contract_m,
+        and accelerated_native_error <= coordinate_contract_m
+        and accelerated_native_nonfinite_match,
+        "accelerated_native_nonfinite_match": accelerated_native_nonfinite_match,
         "edge_coordinate_contract_pass": edge_error_vs_native["max_m"] is not None
         and edge_error_vs_native["max_m"] <= coordinate_contract_m
         and edge_error_vs_native["nonfinite_match"],
         "scale_guard_native_behavior_pass": scale_guard["qualification_pass"],
         "no_pyproj_regression": accelerated_pyproj_error is not None
         and native_pyproj_error is not None
-        and accelerated_pyproj_error <= native_pyproj_error + coordinate_contract_m,
+        and accelerated_pyproj_error <= native_pyproj_error + coordinate_contract_m
+        and (not native_pyproj_nonfinite_match or accelerated_pyproj_nonfinite_match),
+        "accelerated_pyproj_nonfinite_match": accelerated_pyproj_nonfinite_match,
+        "native_pyproj_nonfinite_match": native_pyproj_nonfinite_match,
     }
     required_gate_names = (
         "median_speedup_pass",

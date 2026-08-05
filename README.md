@@ -103,12 +103,13 @@ print(t.explain_strategy(transcendentals="accelerated"))
 the transform and GPU are supported, and explicitly falls back to native math
 otherwise. Automatic acceleration currently covers bounded Helmert, forward
 UTM, sinusoidal-forward, orthographic-forward, and spherical-equatorial
-orthographic-inverse operations on validated Ada `sm_89` consumer GPUs above
-their measured workload-size crossovers. Orthographic inverse starts at 524,288
-coordinates; the canonical policy matrix lists every threshold. Hopper and
-unmeasured devices remain native. A selected accelerated kernel may still take
-its guarded native branch for individual out-of-domain coordinates or a
-uniformly unsupported physical scale. See the
+orthographic-inverse, GEOS-forward (sphere/ellipsoid and sweep x/y), and
+spherical-polar LAEA-forward operations on validated Ada `sm_89` consumer GPUs
+above their measured workload-size crossovers. GEOS forward starts at 2,097,152
+coordinates and spherical-polar LAEA forward at 1,048,576; the canonical policy
+matrix lists every threshold. Hopper and unmeasured devices remain native. A selected
+accelerated kernel may still take its guarded native branch for individual
+out-of-domain coordinates or a uniformly unsupported physical scale. See the
 [transcendental policy](https://jarmak-personal.github.io/vibeProj/user/transcendentals.html).
 
 ### Cross-datum transforms (Helmert)

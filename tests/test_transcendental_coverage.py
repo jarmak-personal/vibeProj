@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import re
 import importlib.util
+import math
 import sys
+import warnings
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,8 +19,12 @@ from vibeproj import Transformer
 from vibeproj.fused_kernels import _SUPPORTED
 from vibeproj.transcendentals import (
     AccuracyContract,
+    GEOS_FORWARD_FIXED_Q62,
+    GEOS_FORWARD_FIXED_Q62_MIN_ELEMENTS,
     HELMERT_FIXED_Q62,
     HELMERT_FIXED_Q62_MIN_ELEMENTS,
+    LAEA_FORWARD_POLAR_FIXED_Q62,
+    LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS,
     NATIVE_LIBDEVICE,
     ORTHO_FORWARD_FIXED_Q62,
     ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
@@ -120,6 +126,30 @@ EXPECTED_REGISTRY_MATRIX = frozenset(
             ORTHO_INVERSE_GUARDED_REFRAME_MIN_ELEMENTS,
         ),
         (
+            GEOS_FORWARD_FIXED_Q62,
+            TranscendentalOperation.PROJECTION,
+            (
+                "geos.forward.spherical.sweep_x",
+                "geos.forward.spherical.sweep_y",
+                "geos.forward.ellipsoidal.sweep_x",
+                "geos.forward.ellipsoidal.sweep_y",
+            ),
+            ((8, 9),),
+            ("auto", "fp64"),
+            GEOS_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+        ),
+        (
+            LAEA_FORWARD_POLAR_FIXED_Q62,
+            TranscendentalOperation.PROJECTION,
+            (
+                "laea.forward.spherical.north_pole",
+                "laea.forward.spherical.south_pole",
+            ),
+            ((8, 9),),
+            ("auto", "fp64"),
+            LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS,
+        ),
+        (
             HELMERT_FIXED_Q62,
             TranscendentalOperation.HELMERT,
             ("global",),
@@ -195,6 +225,28 @@ def test_static_inventory_covers_every_fused_family_and_direction():
     )
     assert documented_paths == EXPECTED_FUSED_PATHS
     assert "| `helmert` | datum shift (forward or inverse pipeline) |" in section
+
+
+def test_wave2b_inventory_and_readme_name_automatic_coverage() -> None:
+    root = Path(__file__).resolve().parents[1]
+    developer_text = (root / "docs/dev/transcendentals.md").read_text(encoding="utf-8")
+    inventory = developer_text.split("## Complete fused-kernel inventory", maxsplit=1)[1].split(
+        "## Coverage matrix", maxsplit=1
+    )[0]
+    laea_row = next(
+        line for line in inventory.splitlines() if line.startswith("| `laea` | forward |")
+    )
+    geos_row = next(
+        line for line in inventory.splitlines() if line.startswith("| `geos` | forward |")
+    )
+    assert LAEA_FORWARD_POLAR_FIXED_Q62 in laea_row
+    assert GEOS_FORWARD_FIXED_Q62 in geos_row
+    assert laea_row.endswith("| T2 |")
+    assert geos_row.endswith("| T2 |")
+
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    assert "GEOS-forward (sphere/ellipsoid and sweep x/y)" in readme
+    assert "spherical-polar LAEA-forward" in readme
 
 
 def test_registry_exactly_matches_documented_coverage_matrix():
@@ -457,11 +509,13 @@ def test_all_48_fused_paths_resolve_nonempty_decisions_for_every_policy(device):
                 assert decision.implementation_id == NATIVE_LIBDEVICE
                 assert decision.fallback is False
             elif device == ADA_4090 and (family, direction) in {
+                ("geos", "forward"),
                 ("tmerc", "forward"),
                 ("sinu", "forward"),
                 ("ortho", "forward"),
             }:
                 expected = {
+                    "geos": GEOS_FORWARD_FIXED_Q62,
                     "tmerc": TMERC_FIXED_Q62,
                     "sinu": SINU_FORWARD_FIXED_Q62,
                     "ortho": ORTHO_FORWARD_FIXED_Q62,
@@ -668,7 +722,9 @@ def test_user_and_developer_coverage_tables_name_exact_registry_ids():
 def test_documented_auto_thresholds_match_registry_exactly():
     root = Path(__file__).resolve().parents[1]
     expected = {
+        GEOS_FORWARD_FIXED_Q62: GEOS_FORWARD_FIXED_Q62_MIN_ELEMENTS,
         HELMERT_FIXED_Q62: HELMERT_FIXED_Q62_MIN_ELEMENTS,
+        LAEA_FORWARD_POLAR_FIXED_Q62: LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS,
         ORTHO_FORWARD_FIXED_Q62: ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
         ORTHO_INVERSE_GUARDED_REFRAME: ORTHO_INVERSE_GUARDED_REFRAME_MIN_ELEMENTS,
         SINU_FORWARD_FIXED_Q62: SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
@@ -749,6 +805,120 @@ def test_wave1_benchmark_specs_enforce_complete_public_qualification_surface():
         assert np.any(~np.isfinite(case.edge_host_x))
         assert np.any(~np.isfinite(case.edge_host_y))
         assert case.qualification is specification
+
+
+def test_wave2b_benchmark_specs_cover_exact_public_domains() -> None:
+    benchmark_module = _load_policy_benchmark_module()
+    expected = {
+        "geos-forward-spherical-sweep-x": "geos.forward.spherical.sweep_x",
+        "geos-forward-spherical-sweep-y": "geos.forward.spherical.sweep_y",
+        "geos-forward-ellipsoidal-sweep-x": "geos.forward.ellipsoidal.sweep_x",
+        "geos-forward-ellipsoidal-sweep-y": "geos.forward.ellipsoidal.sweep_y",
+        "laea-forward-spherical-north": "laea.forward.spherical.north_pole",
+        "laea-forward-spherical-south": "laea.forward.spherical.south_pole",
+    }
+    for index, (case_name, domain) in enumerate(expected.items()):
+        specification = benchmark_module.QUALIFICATION_SPECS[case_name]
+        expected_id = (
+            GEOS_FORWARD_FIXED_Q62
+            if case_name.startswith("geos-")
+            else LAEA_FORWARD_POLAR_FIXED_Q62
+        )
+        expected_minimum = (
+            GEOS_FORWARD_FIXED_Q62_MIN_ELEMENTS
+            if case_name.startswith("geos-")
+            else LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS
+        )
+        assert specification.implementation_id == expected_id
+        assert specification.domain == domain
+        assert specification.min_elements == expected_minimum
+        assert specification.max_physical_scale_m == PROJECTION_FIXED_Q62_MAX_SCALE_M
+
+        case = benchmark_module._prepare_case(np, case_name, 128, 20260805 + index)
+        assert case.family in {"geos", "laea"}
+        assert case.direction == "FORWARD"
+        assert np.all(np.isfinite(case.host_x))
+        assert np.all(np.isfinite(case.host_y))
+        assert np.any(~np.isfinite(case.edge_host_x))
+        assert case.qualification is specification
+        if case.family == "geos":
+            assert case.domain["analytic_exact_nextafter_limb_coordinates"] == 3_078
+            assert case.domain["randomized_limb_stress_coordinates"] == 5_120
+
+
+@pytest.mark.parametrize("geometry", ["spherical", "ellipsoidal"])
+def test_geos_benchmark_analytic_limb_contains_exact_adjacent_triplets(
+    geometry: str,
+) -> None:
+    benchmark_module = _load_policy_benchmark_module()
+    _, equatorial_radius, polar_radius = benchmark_module._earth_crs_parts(geometry)
+    longitude, latitude = benchmark_module._geos_analytic_limb_samples(
+        equatorial_radius=equatorial_radius,
+        polar_radius=polar_radius,
+        satellite_height=35_785_831.0,
+    )
+
+    longitude = longitude.reshape(-1, 6)
+    latitude = latitude.reshape(-1, 6)
+    assert longitude.shape == (513, 6)
+    assert np.all(longitude[:, 0] == np.nextafter(longitude[:, 1], 0.0))
+    assert np.all(longitude[:, 2] == np.nextafter(longitude[:, 1], math.inf))
+    assert np.all(longitude[:, 3] == np.nextafter(longitude[:, 4], 0.0))
+    assert np.all(longitude[:, 5] == np.nextafter(longitude[:, 4], -math.inf))
+    assert np.all(latitude == latitude[:, :1])
+
+
+@pytest.mark.parametrize(
+    "case_name",
+    [
+        "geos-forward-spherical-sweep-x",
+        "geos-forward-spherical-sweep-y",
+        "geos-forward-ellipsoidal-sweep-x",
+        "geos-forward-ellipsoidal-sweep-y",
+        "laea-forward-spherical-north",
+        "laea-forward-spherical-south",
+    ],
+)
+def test_wave2b_nonfinite_edge_comparison_is_warning_free(case_name: str) -> None:
+    benchmark_module = _load_policy_benchmark_module()
+    case = benchmark_module._prepare_case(np, case_name, 128, 20260805)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        result = benchmark_module._coordinate_error(
+            case.edge_host_x,
+            case.edge_host_y,
+            case.edge_host_x.copy(),
+            case.edge_host_y.copy(),
+            geographic=case.output_is_geographic,
+        )
+
+    assert result["nonfinite_match"] is True
+    assert result["max_m"] == 0.0
+
+
+@pytest.mark.parametrize(
+    "domain",
+    [
+        "laea.forward.ellipsoidal.north_pole",
+        "laea.forward.ellipsoidal.south_pole",
+        "laea.forward.spherical.equatorial",
+        "laea.forward.spherical.oblique",
+        "laea.inverse.spherical.north_pole",
+        "geos.inverse.spherical.sweep_x",
+    ],
+)
+def test_wave2b_unqualified_domains_remain_observably_native(domain: str) -> None:
+    decision = resolve_transcendental_strategy(
+        TranscendentalOperation.PROJECTION,
+        "accelerated",
+        device=ADA_4090,
+        domain=domain,
+        precision="fp64",
+    )
+    assert decision.implementation_id == NATIVE_LIBDEVICE
+    assert decision.fallback is True
+    assert "not accuracy-qualified" in decision.reason
 
 
 def test_every_accelerated_registry_id_has_matching_benchmark_contract():

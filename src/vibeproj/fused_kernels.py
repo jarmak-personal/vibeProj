@@ -17,7 +17,9 @@ import warnings
 import numpy as np
 
 from vibeproj.transcendentals import (
+    GEOS_FORWARD_FIXED_Q62,
     HELMERT_FIXED_Q62,
+    LAEA_FORWARD_POLAR_FIXED_Q62,
     NATIVE_LIBDEVICE,
     ORTHO_FORWARD_FIXED_Q62,
     ORTHO_INVERSE_GUARDED_REFRAME,
@@ -1621,7 +1623,8 @@ _GEOS_FORWARD_SOURCE = (
     _GEOS_DEVICE_NUMERIC_CONTRACT
     + _FWD_SIGNATURE.format(func="geos_forward", real_t="{real_t}")
     + """
-    {real_t} H, {real_t} h, {real_t} r_eq2, {real_t} r_pol2, int sweep_x,
+    {real_t} H, {real_t} h, {real_t} r_eq2, {real_t} r_pol2,
+    {real_t} visibility_uncertainty, int sweep_x,
     {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
     int src_north_first, int dst_north_first, int n
 ) {{"""
@@ -2226,13 +2229,125 @@ _TYPE_MAP = {
 # The registry remains host-owned; this table only validates and materializes
 # the exact implementation selected for a fused launch.
 _PROJECTION_IMPLEMENTATION_TARGETS = {
+    GEOS_FORWARD_FIXED_Q62: ("geos", "forward", "float64"),
+    LAEA_FORWARD_POLAR_FIXED_Q62: ("laea", "forward", "float64"),
     TMERC_FIXED_Q62: ("tmerc", "forward", "float64"),
     SINU_FORWARD_FIXED_Q62: ("sinu", "forward", "float64"),
     ORTHO_FORWARD_FIXED_Q62: ("ortho", "forward", "float64"),
     ORTHO_INVERSE_GUARDED_REFRAME: ("ortho", "inverse", "float64"),
 }
 
+_GEOS_FORWARD_FIXED_Q62_FALLBACK_HELPERS = r"""
+// Q1.62 perturbations can change the sign of the GEOS visibility residual at
+// a resolved limb coordinate. Keep the uncommon uncertainty band out of the
+// hot path and recompute the complete native expression there so visibility,
+// sentinels, and scan-angle outputs match native policy.
+__device__ __noinline__ double2 vp_geos_forward_native_cold(
+    double phi_gc,
+    double lam,
+    double H,
+    double r_eq2,
+    double r_pol2,
+    int sweep_x
+) {
+    double sin_pgc, cos_pgc;
+    sincos(phi_gc, &sin_pgc, &cos_pgc);
+    const double r_pol = sqrt(r_pol2);
+    const double r_earth = r_pol / sqrt(
+        1.0 - (r_eq2 - r_pol2) / r_eq2 * cos_pgc * cos_pgc
+    );
+    double sin_l, cos_l;
+    sincos(lam, &sin_l, &cos_l);
+    const double Vx = r_earth * cos_pgc * cos_l;
+    const double Vy = r_earth * cos_pgc * sin_l;
+    const double Vz = r_earth * sin_pgc;
+    const double Sx = H - Vx;
+    const double visibility =
+        Sx * Vx - Vy * Vy - (r_eq2 / r_pol2) * Vz * Vz;
+    double ex, ey;
+    if (isnan(visibility)) {
+        ex = ey = nan("");
+    } else if (visibility < 0.0) {
+        ex = ey = 1.0 / 0.0;
+    } else if (sweep_x) {
+        ex = atan2(Vy, hypot(Sx, Vz));
+        ey = atan2(Vz, Sx);
+    } else {
+        ex = atan2(Vy, Sx);
+        ey = atan2(Vz, hypot(Sx, Vy));
+    }
+    return make_double2(ex, ey);
+}
+"""
+
 _PROJECTION_FIXED_Q62_REWRITES = {
+    GEOS_FORWARD_FIXED_Q62: (
+        "geos_forward_fixed_q62",
+        (
+            (
+                "double sin_pgc, cos_pgc;\n        vp_native_sincos(phi_gc, &sin_pgc, &cos_pgc);",
+                "double sin_pgc, cos_pgc, sin_l, cos_l;\n"
+                "        // For perturbations of the Earth-point unit vector, the h\n"
+                "        // in the final scan-angle scale cancels the >=h line-of-sight\n"
+                "        // denominator. The physical error bound is therefore set by\n"
+                "        // Earth radius a, not satellite height h. Still require the\n"
+                "        // launch-uniform H=a+h relationship so malformed/custom\n"
+                "        // satellite parameters fall back atomically.\n"
+                "        const unsigned long long h_bits =\n"
+                "            (unsigned long long)__double_as_longlong(h);\n"
+                "        const unsigned long long H_bits =\n"
+                "            (unsigned long long)__double_as_longlong(H);\n"
+                "        const bool satellite_height_is_qualified =\n"
+                "            h_bits - 1ULL < 0x7ff0000000000000ULL - 1ULL\n"
+                "            && H_bits - 1ULL < 0x7ff0000000000000ULL - 1ULL\n"
+                "            && H_bits != h_bits && H == h + a;\n"
+                "        const bool fixed_trig_is_qualified =\n"
+                "            satellite_height_is_qualified\n"
+                "            && vp_projection_fixed_scale_is_qualified(a);\n"
+                "        const double guarded_output_scale = fixed_trig_is_qualified\n"
+                "            ? a : -1.0;\n"
+                "        vp_projection_fixed_sincos_pair(\n"
+                "            phi_gc, 0.5 * VP_PI_D, &sin_pgc, &cos_pgc,\n"
+                "            lam, VP_PI_D, &sin_l, &cos_l, guarded_output_scale\n"
+                "        );",
+            ),
+            (
+                "double sin_l, cos_l;\n        vp_native_sincos(lam, &sin_l, &cos_l);",
+                "// sin_l/cos_l were evaluated atomically with phi_gc above.",
+            ),
+            (
+                'if (isnan(visibility)) {\n            ex = ey = (double)nan("");',
+                "// The documented Q1.62 component error, native rounding,\n"
+                "        // ellipsoidal-radius conditioning, and the rounded product\n"
+                "        // chain are bounded conservatively by 2e-13*H*a*(k+1),\n"
+                "        // where k=max(1,a^2/b^2). If that interval overlaps zero,\n"
+                "        // recompute the complete native expression before deciding\n"
+                "        // whether this coordinate is visible.\n"
+                "        if (fixed_trig_is_qualified\n"
+                "            && fabs(visibility) <= visibility_uncertainty) {\n"
+                "            const double2 native_output = vp_geos_forward_native_cold(\n"
+                "                phi_gc, lam, H, r_eq2, r_pol2, sweep_x\n"
+                "            );\n"
+                "            ex = native_output.x;\n"
+                "            ey = native_output.y;\n"
+                "        } else if (isnan(visibility)) {\n"
+                '            ex = ey = (double)nan("");',
+            ),
+        ),
+    ),
+    LAEA_FORWARD_POLAR_FIXED_Q62: (
+        "laea_forward_polar_fixed_q62",
+        (
+            (
+                "double sin_lam, cos_lam;\n    vp_native_sincos(lam, &sin_lam, &cos_lam);",
+                "double sin_lam, cos_lam;\n"
+                "    vp_projection_fixed_sincos(\n"
+                "        lam, (mode == 2 || mode == 3) ? VP_PI_D : -1.0, a,\n"
+                "        &sin_lam, &cos_lam\n"
+                "    );",
+            ),
+        ),
+    ),
     SINU_FORWARD_FIXED_Q62: (
         "sinu_forward_fixed_q62",
         (
@@ -2352,7 +2467,18 @@ def _build_projection_fixed_q62_source(
                 f"Expected one {native_expression!r} site while building {implementation_id!r}"
             )
         source = source.replace(native_expression, accelerated_expression)
-    return _PROJECTION_BOUNDED_Q62_DEVICE_FNS + source, function_name
+    fallback_helpers = (
+        _GEOS_FORWARD_FIXED_Q62_FALLBACK_HELPERS
+        if implementation_id == GEOS_FORWARD_FIXED_Q62
+        else ""
+    )
+    return (
+        _NATIVE_PAIRED_SINCOS_DEVICE_FNS
+        + _PROJECTION_BOUNDED_Q62_DEVICE_FNS
+        + fallback_helpers
+        + source,
+        function_name,
+    )
 
 
 def _build_projection_guarded_source(
@@ -2964,11 +3090,25 @@ def fused_transform(
             )
 
         elif projection_name == "geos":
+            forward_only_args: tuple[np.floating, ...] = ()
+            if direction == "forward":
+                shape_condition = max(
+                    1.0,
+                    abs(float(computed["r_eq2"]) / float(computed["r_pol2"])),
+                )
+                visibility_uncertainty = (
+                    2e-13
+                    * abs(float(computed["H"]))
+                    * abs(float(computed["a"]))
+                    * (shape_condition + 1.0)
+                )
+                forward_only_args = (real_t(visibility_uncertainty),)
             args = _with_units(
                 real_t(computed["H"]),
                 real_t(computed["h"]),
                 real_t(computed["r_eq2"]),
                 real_t(computed["r_pol2"]),
+                *forward_only_args,
                 np.int32(computed["sweep_axis"] == "x"),
                 real_t(computed["lam0"]),
                 real_t(computed["a"]),

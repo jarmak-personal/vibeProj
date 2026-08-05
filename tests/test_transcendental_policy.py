@@ -14,8 +14,12 @@ import pytest
 import vibeproj
 from vibeproj import DeviceCapability, Transformer
 from vibeproj.transcendentals import (
+    GEOS_FORWARD_FIXED_Q62,
+    GEOS_FORWARD_FIXED_Q62_MIN_ELEMENTS,
     HELMERT_FIXED_Q62,
     HELMERT_FIXED_Q62_MIN_ELEMENTS,
+    LAEA_FORWARD_POLAR_FIXED_Q62,
+    LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS,
     NATIVE_LIBDEVICE,
     ORTHO_FORWARD_FIXED_Q62,
     ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
@@ -110,6 +114,8 @@ def test_registry_is_immutable_and_contains_stable_ids():
     assert {entry.implementation_id for entry in registry} == {
         NATIVE_LIBDEVICE,
         HELMERT_FIXED_Q62,
+        GEOS_FORWARD_FIXED_Q62,
+        LAEA_FORWARD_POLAR_FIXED_Q62,
         ORTHO_FORWARD_FIXED_Q62,
         ORTHO_INVERSE_GUARDED_REFRAME,
         SINU_FORWARD_FIXED_Q62,
@@ -354,6 +360,18 @@ def test_resolver_uses_priority_then_rejects_equal_priority_overlap(monkeypatch)
             ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
             ORTHO_FORWARD_FIXED_Q62,
         ),
+        (
+            TranscendentalOperation.PROJECTION,
+            "geos.forward.ellipsoidal.sweep_x",
+            GEOS_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+            GEOS_FORWARD_FIXED_Q62,
+        ),
+        (
+            TranscendentalOperation.PROJECTION,
+            "laea.forward.spherical.north_pole",
+            LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS,
+            LAEA_FORWARD_POLAR_FIXED_Q62,
+        ),
     ],
 )
 def test_auto_strategy_uses_exact_workload_crossover(operation, domain, threshold, accelerated_id):
@@ -401,6 +419,16 @@ def test_auto_strategy_uses_exact_workload_crossover(operation, domain, threshol
         (TranscendentalOperation.TMERC_FORWARD, "utm", TMERC_FIXED_Q62),
         (TranscendentalOperation.PROJECTION, "sinu.forward", SINU_FORWARD_FIXED_Q62),
         (TranscendentalOperation.PROJECTION, ORTHO_FORWARD_DOMAIN, ORTHO_FORWARD_FIXED_Q62),
+        (
+            TranscendentalOperation.PROJECTION,
+            "geos.forward.spherical.sweep_y",
+            GEOS_FORWARD_FIXED_Q62,
+        ),
+        (
+            TranscendentalOperation.PROJECTION,
+            "laea.forward.spherical.south_pole",
+            LAEA_FORWARD_POLAR_FIXED_Q62,
+        ),
     ],
 )
 def test_ada_auto_selects_qualified_implementations(operation, domain, expected):

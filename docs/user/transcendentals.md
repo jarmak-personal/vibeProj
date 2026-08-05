@@ -76,17 +76,20 @@ The initial accelerated coverage is deliberately small:
 | `sinu.forward.fixed_q62` | Sinusoidal forward only | Guarded Q1.62 cosine; remaining arithmetic stays fp64 | Ada `sm_89` consumer GPUs | 524,288 |
 | `ortho.forward.fixed_q62` | Orthographic forward only | Atomically guarded Q1.62 sine/cosine pairs; remaining arithmetic stays fp64 | Ada `sm_89` consumer GPUs | 262,144 |
 | `ortho.inverse.guarded_reframe` | Spherical equatorial Orthographic inverse only (after CRS setup canonicalization) | Guarded algebraic reframe removes one `asin` and one `sincos`; ill-conditioned inputs use native fp64 | Ada `sm_89` consumer GPUs | 524,288 |
+| `geos.forward.fixed_q62` | Geostationary forward, sphere/ellipsoid and sweep x/y | Paired Q1.62 trig for geocentric latitude and longitude; uncertain limb visibility recomputes complete native output | Ada `sm_89` consumer GPUs | 2,097,152 |
+| `laea.forward.polar.fixed_q62` | Spherical polar LAEA forward, north/south origins | Q1.62 longitude sine/cosine; authalic and inverse paths remain native fp64 | Ada `sm_89` consumer GPUs | 1,048,576 |
 
 On a qualified RTX 4090, `"auto"` resolves the specialized implementations at
 or above the listed sizes; below them it resolves native. Explicit
 `"accelerated"` can select the specialized implementation at any size. Generic
 Transverse Mercator, inverse UTM, sinusoidal inverse, Orthographic inverse
-outside the exact spherical-equatorial origin domain, all other projection
-families, unsupported precision combinations, and unknown devices resolve or
-fall back to `native.libdevice`. Guarded input values do not
+outside the exact spherical-equatorial origin domain, LAEA outside spherical
+polar forward, GEOS inverse, all other projection families, unsupported
+precision combinations, and unknown devices resolve or fall back to
+`native.libdevice`. Guarded input values do not
 change the host decision: a selected fixed `StrategyDecision` remains selected
-while its kernel executes the native branch for those values. The two
-projection-specific Q1.62 implementations
+while its kernel executes the native branch for those values. These
+projection-specific accelerated implementations
 are fp64-only; `precision="fp32"` and `precision="ds"` stay native. Planning
 calls with `precision="auto"` may select them because the corresponding fused
 kernel resolves to fp64.
@@ -133,14 +136,27 @@ against native policy. The current release gates are:
   `|phi_argument| > 0.95` conditioning band execute the exact native formula.
   Final RTX 4090 full-valid-disk qualification measured 6.328/1.584 nm
   maximum/p99 error.
+- Geostationary forward: the Q1.62 pairs cover both geocentric latitude and
+  wrapped longitude for spherical and ellipsoidal geometry with sweep x or y.
+  A launch-uniform guard requires finite valid satellite geometry and
+  `0 < a <= 6,400,000 m`; otherwise the exact native trig path runs. The
+  line-of-sight denominator is at least the satellite height, so its factor
+  cancels the final height output scale rather than amplifying angular error.
+  Coordinates whose Q1.62 visibility residual lies in the proved uncertainty
+  band recompute native trig, visibility classification, and output atomically;
+  exact and adjacent limb sentinels therefore match native policy.
+- Spherical polar LAEA forward: north- and south-pole origins use Q1.62 paired
+  longitude trig for finite wrapped longitude at
+  `0 < scale <= 6,400,000 m`. Ellipsoidal polar, equatorial, oblique, and all
+  inverse domains remain native.
 - Non-finite, out-of-domain, wide-TM, near-pole, and otherwise unsupported
 coordinates take the native branch per coordinate.
 
 Host strategy fallback and kernel guards are intentionally distinct. An
 unsupported backend, device, direction, precision, or domain produces an
-observable `StrategyDecision` for `native.libdevice`. A qualified Sinu/Ortho
-decision remains on its fixed implementation ID when the physical scale is
-above 6,400,000 m, while the kernel uniformly executes native math. This keeps
+observable `StrategyDecision` for `native.libdevice`. A qualified fixed
+projection decision remains on its implementation ID when its uniform scale
+or parameter guard fails, while the kernel executes native math. This keeps
 dispatch inspectable without claiming the guarded inputs were accelerated.
 
 These are native-equivalence contracts for the implementation change. The
