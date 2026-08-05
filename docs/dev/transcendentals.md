@@ -48,7 +48,7 @@ shared native pairing helper (or the equivalent double-single helper).
 | `lcc` | forward | `sin`, `tan`, `pow`, output `sin`/`cos` | `phi`: unknown; `theta = n*lambda` depends on CRS parameter | pair `theta` | `native.libdevice` | paired native only | T3 |
 | `lcc` | inverse | `sqrt`, `atan2`, `pow`, iterative `atan`/`sin`/`pow` | projected radius and iteration arguments: unknown | none | `native.libdevice` | native only | T3 |
 | `stere` | forward | `sin`, `tan`, `pow`, output `sin`/`cos` | adjusted `phi`: unknown; `lambda` finite wrapped | pair `lambda` | `native.libdevice` | paired native only | T3 |
-| `stere` | inverse | `sqrt`, `atan2`, iterative `atan`/`sin`/`pow` | projected radius and iteration arguments: unknown | none | `native.libdevice` | native only | T3 |
+| `stere` | inverse | `sqrt`, `atan2`, iterative `atan`/`sin`/`pow` | public ellipsoidal A/B north/south and C south domains; accelerated uniform guard requires `0.05 <= e <= 0.2` and `0 < a <= 6,400,000 m`; shared helper guards each iterative sine angle | none | `native.libdevice`, or `stere.inverse.fixed_q62` | qualified Q1.62 iterative sine in five exact domains; native otherwise | T2 |
 | `aea` | forward | `sin`, `atanh`, `sqrt`, output `sin`/`cos` | `phi`: unknown; negative radicand is clamped to zero; `theta=n*lambda` depends on CRS | pair `theta` | `native.libdevice` | paired native only | T3 |
 | `aea` | inverse | `sqrt`, `atan2`, iterative `atanh`, `asin` | projected radius unknown; exact authalic poles accepted within the shared `1e-10` representational band; material `|q|>qp` is atomically invalid | none | `native.libdevice` | native only | T3 |
 | `laea` | forward | `sin`, `atanh`, clamped `asin`, `sqrt`, `sin`/`cos` | finite latitude restricted to `[-pi/2,pi/2]`; spherical north/south polar acceleration guards wrapped `|lambda| <= pi` and `0 < scale <= 6,400,000 m`; antipode and non-finite behavior remain exact | pair authalic latitude; pair `lambda` | `native.libdevice`, or `laea.forward.polar.fixed_q62` in the exact spherical-polar domains | qualified guarded longitude pair for spherical polar modes; native otherwise | T2 |
@@ -103,6 +103,7 @@ The user-facing coverage matrix is intentionally narrower than the inventory:
 | `sinu.forward.fixed_q62` | `sinu` | forward | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 524,288 | Q1.62 `cos(phi)`; valid latitude/wrapped longitude and `0 < scale <= 6,400,000 m`, native otherwise |
 | `ortho.forward.fixed_q62` | `ortho` | forward | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 262,144 | Q1.62 paired `sin`/`cos`; atomic argument guard and `0 < scale <= 6,400,000 m`, native otherwise |
 | `ortho.inverse.guarded_reframe` | `ortho` | inverse, spherical equatorial only | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 524,288 | guarded algebraic reframe for normalized `1e-16 < rho^2 <= 0.99`; center/near-center, axes, horizon/outside, non-finite, scale, and conditioning failures call the exact native expression |
+| `stere.inverse.fixed_q62` | `stere` | inverse, ellipsoidal A/B north/south and C south | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 1,000,000 | Q1.62 sine inside `phi2`; CRS setup proves positive `akm1` and sign, uniform `0.05 <= e <= 0.2` and `a <= 6,400,000 m` guards, per-angle native fallback |
 | `geos.forward.fixed_q62` | `geos` | forward, sphere/ellipsoid, sweep x/y | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 2,097,152 | Q1.62 pairs for geocentric latitude and longitude; complete-native visibility-uncertainty fallback plus launch-uniform finite geometry/`a <= 6,400,000 m` guard |
 | `laea.forward.polar.fixed_q62` | `laea` | forward, spherical north/south polar only | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 1,048,576 | Q1.62 paired longitude trig; exact pole/antipode/non-finite handling and `a <= 6,400,000 m` guard |
 
@@ -367,6 +368,43 @@ zero finite-mask mismatches across 1.2 million probes per domain. At
 1,048,576, one post-fallback GEOS screen measured only about 1.045x, so `auto`
 stays native until the clean 2,097,152 boundary. GEOS inverse, non-polar or
 ellipsoidal LAEA forward, and every LAEA inverse domain remain native.
+
+### Wave 2C stereographic evidence
+
+Polar Stereographic inverse qualified on the RTX 4090 through normal public
+projected-CRS-to-geodetic `transform_buffers()` calls with preallocated
+outputs. The timed distribution covers full longitude and polar latitude
+magnitudes from 45 through 90 degrees. All five public exact domains—variants
+A and B in both hemispheres and variant C south—passed three interleaved
+30-iteration device and synchronized-wall repeats at 1,000,000, 2,000,000,
+and 5,000,000 coordinates. The minimum wall repeat was 1.055206x at the
+threshold and 1.056216x at 5,000,000; 999,999 coordinates resolved native and
+showed no regression. Representative maximum error was 1.582008 nm.
+
+The kernel replaces only the iterative `phi2` sine. CRS setup proves positive
+`akm1` and exact sign for the registered methods. A launch-uniform guard
+requires `0.05 <= e <= 0.2` and `0 < a <= 6,400,000 m`, while the shared helper
+routes non-finite or out-of-range iterative angles to native sine. Scale at the
+exact ceiling passes the coordinate contract; nextafter above, `1e12 m`,
+near-spherical eccentricity, and high eccentricity are bitwise native. The two
+eccentricity fallback screens retained 1.013–1.015x synchronized wall ratios,
+so the selected-but-native kernel branch has no material regression.
+Separate logarithmic projected-radius accuracy probes from `1e-15` through
+`1e140`, centers, axes, huge values, and non-finite inputs reached 3.164 nm
+with matching classifications. Those adversarial data are correctness
+evidence, not a universal performance claim; the deliberately huge-radius mix
+missed 1.05x at 1,000,000.
+
+Polar forward Q1.62 and both Oblique Stereographic forward approaches were
+rejected. At 2,097,152 full-domain coordinates their best wall repeats were
+about 0.941x, 0.896x, and 0.901x native. An outlined oblique algebraic form was
+1.112–1.212x in a direct RD bounding-box kernel, but its public path reached
+only about 1.044x there and about 0.958x over the full globe. Coordinate
+locality is not an exact dispatch domain, so `auto` does not depend on input
+ordering or inspect data on the host. `benchmarks/wave2c_rejection.py` retains
+these forward no-go results and deterministic guard/warp profiles. The earlier
+Oblique Stereographic inverse screen was reversed twice and is intentionally
+absent from all retained claims.
 
 ### Go/no-go gates
 

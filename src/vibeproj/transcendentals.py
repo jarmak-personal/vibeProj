@@ -23,6 +23,7 @@ TMERC_FIXED_Q62 = "tmerc.forward.fixed_q62"
 SINU_FORWARD_FIXED_Q62 = "sinu.forward.fixed_q62"
 ORTHO_FORWARD_FIXED_Q62 = "ortho.forward.fixed_q62"
 ORTHO_INVERSE_GUARDED_REFRAME = "ortho.inverse.guarded_reframe"
+STERE_INVERSE_FIXED_Q62 = "stere.inverse.fixed_q62"
 GEOS_FORWARD_FIXED_Q62 = "geos.forward.fixed_q62"
 LAEA_FORWARD_POLAR_FIXED_Q62 = "laea.forward.polar.fixed_q62"
 PROJECTION_FIXED_Q62_MAX_SCALE_M = 6_400_000.0
@@ -31,6 +32,7 @@ HELMERT_FIXED_Q62_MIN_ELEMENTS = 131_072
 SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS = 524_288
 ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS = 262_144
 ORTHO_INVERSE_GUARDED_REFRAME_MIN_ELEMENTS = 524_288
+STERE_INVERSE_FIXED_Q62_MIN_ELEMENTS = 1_000_000
 GEOS_FORWARD_FIXED_Q62_MIN_ELEMENTS = 2_097_152
 LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS = 1_048_576
 
@@ -340,6 +342,41 @@ _REGISTRY = (
                 "ill-conditioned output-latitude inputs use exact native fallback. "
                 "Final RTX 4090 full-valid-disk maximum/p99 horizontal error: "
                 "6.328/1.584 nm."
+            ),
+        ),
+        native_fallback=True,
+    ),
+    StrategyImplementation(
+        implementation_id=STERE_INVERSE_FIXED_Q62,
+        operation=TranscendentalOperation.PROJECTION,
+        family="qualified_stere_inverse_transcendentals",
+        supported_policies=("auto", "accelerated"),
+        supported_backends=("cuda",),
+        supported_compute_capabilities=((8, 9),),
+        min_fp32_to_fp64_ratio=16,
+        supported_compute_precisions=("auto", "fp64"),
+        min_elements=STERE_INVERSE_FIXED_Q62_MIN_ELEMENTS,
+        domains=(
+            "stere.inverse.ellipsoidal.variant_a.north",
+            "stere.inverse.ellipsoidal.variant_a.south",
+            "stere.inverse.ellipsoidal.variant_b.north",
+            "stere.inverse.ellipsoidal.variant_b.south",
+            "stere.inverse.ellipsoidal.variant_c.south",
+        ),
+        accuracy=AccuracyContract(
+            reference=NATIVE_LIBDEVICE,
+            max_horizontal_error_m=1e-8,
+            max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+            notes=(
+                "Polar Stereographic inverse uses Q1.62 sine inside the "
+                "ellipsoidal phi2 iteration. CRS setup proves finite positive "
+                "akm1 and exact sign +/-1 for the five public method domains. "
+                "The uniform device guard additionally requires "
+                "0.05 <= eccentricity <= 0.2 and physical scale "
+                "a <= 6,400,000 m. The shared bounded helper routes non-finite "
+                "or out-of-range iterative angles to native sine. Representative "
+                "and adversarial maximum native-relative horizontal errors: "
+                "1.582 and 3.164 nm."
             ),
         ),
         native_fallback=True,
@@ -824,6 +861,8 @@ __all__ = [
     "ProjectionImplementation",
     "SINU_FORWARD_FIXED_Q62",
     "SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS",
+    "STERE_INVERSE_FIXED_Q62",
+    "STERE_INVERSE_FIXED_Q62_MIN_ELEMENTS",
     "StrategyDecision",
     "StrategyExplanation",
     "StrategyImplementation",

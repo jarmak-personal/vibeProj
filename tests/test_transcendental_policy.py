@@ -27,6 +27,7 @@ from vibeproj.transcendentals import (
     ORTHO_INVERSE_GUARDED_REFRAME_MIN_ELEMENTS,
     SINU_FORWARD_FIXED_Q62,
     SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+    STERE_INVERSE_FIXED_Q62,
     TMERC_FIXED_Q62,
     TMERC_FIXED_Q62_MIN_ELEMENTS,
     TranscendentalOperation,
@@ -119,6 +120,7 @@ def test_registry_is_immutable_and_contains_stable_ids():
         ORTHO_FORWARD_FIXED_Q62,
         ORTHO_INVERSE_GUARDED_REFRAME,
         SINU_FORWARD_FIXED_Q62,
+        STERE_INVERSE_FIXED_Q62,
         TMERC_FIXED_Q62,
     }
     with pytest.raises(dataclasses.FrozenInstanceError):

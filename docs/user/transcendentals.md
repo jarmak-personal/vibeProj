@@ -76,6 +76,7 @@ The initial accelerated coverage is deliberately small:
 | `sinu.forward.fixed_q62` | Sinusoidal forward only | Guarded Q1.62 cosine; remaining arithmetic stays fp64 | Ada `sm_89` consumer GPUs | 524,288 |
 | `ortho.forward.fixed_q62` | Orthographic forward only | Atomically guarded Q1.62 sine/cosine pairs; remaining arithmetic stays fp64 | Ada `sm_89` consumer GPUs | 262,144 |
 | `ortho.inverse.guarded_reframe` | Spherical equatorial Orthographic inverse only (after CRS setup canonicalization) | Guarded algebraic reframe removes one `asin` and one `sincos`; ill-conditioned inputs use native fp64 | Ada `sm_89` consumer GPUs | 524,288 |
+| `stere.inverse.fixed_q62` | Polar Stereographic inverse, public ellipsoidal A/B north/south and C south modes | Q1.62 sine inside the conformal-latitude iteration; scale, eccentricity, and iterative-angle guard failures use native fp64 | Ada `sm_89` consumer GPUs | 1,000,000 |
 | `geos.forward.fixed_q62` | Geostationary forward, sphere/ellipsoid and sweep x/y | Paired Q1.62 trig for geocentric latitude and longitude; uncertain limb visibility recomputes complete native output | Ada `sm_89` consumer GPUs | 2,097,152 |
 | `laea.forward.polar.fixed_q62` | Spherical polar LAEA forward, north/south origins | Q1.62 longitude sine/cosine; authalic and inverse paths remain native fp64 | Ada `sm_89` consumer GPUs | 1,048,576 |
 
@@ -84,7 +85,8 @@ or above the listed sizes; below them it resolves native. Explicit
 `"accelerated"` can select the specialized implementation at any size. Generic
 Transverse Mercator, inverse UTM, sinusoidal inverse, Orthographic inverse
 outside the exact spherical-equatorial origin domain, LAEA outside spherical
-polar forward, GEOS inverse, all other projection families, unsupported
+polar forward, Polar Stereographic outside the five listed inverse domains,
+GEOS inverse, all other projection families, unsupported
 precision combinations, and unknown devices resolve or fall back to
 `native.libdevice`. Guarded input values do not
 change the host decision: a selected fixed `StrategyDecision` remains selected
@@ -136,6 +138,12 @@ against native policy. The current release gates are:
   `|phi_argument| > 0.95` conditioning band execute the exact native formula.
   Final RTX 4090 full-valid-disk qualification measured 6.328/1.584 nm
   maximum/p99 error.
+- Polar Stereographic inverse: Q1.62 sine is used inside the ellipsoidal
+  conformal-latitude iteration for public variants A/B north/south and variant
+  C south. The uniform guard requires `0.05 <= e <= 0.2` and
+  `0 < a <= 6,400,000 m`; scale/eccentricity failures and non-finite or
+  out-of-range iterative angles use native sine. Representative and
+  adversarial maximum native-relative errors were 1.582 and 3.164 nm.
 - Geostationary forward: the Q1.62 pairs cover both geocentric latitude and
   wrapped longitude for spherical and ellipsoidal geometry with sweep x or y.
   A launch-uniform guard requires finite valid satellite geometry and
@@ -167,6 +175,7 @@ passes its native-equivalence bound.
 The exact IDs, guarded-domain contracts, and automatic thresholds above are
 public. On the qualified RTX 4090 at 5,000,000 randomized coordinates, the
 final enforced public benchmark measured 1.096x synchronized-wall speedup for
-sinusoidal forward and 1.341x for orthographic forward. These measurements
+sinusoidal forward, 1.341x for orthographic forward, and a minimum 1.056x for
+Polar Stereographic inverse across its five exact domains. These measurements
 qualify the listed hardware and thresholds; they are not a performance promise
 for other devices or workloads.

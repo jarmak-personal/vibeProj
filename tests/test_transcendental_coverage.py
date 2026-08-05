@@ -33,6 +33,8 @@ from vibeproj.transcendentals import (
     PROJECTION_FIXED_Q62_MAX_SCALE_M,
     SINU_FORWARD_FIXED_Q62,
     SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+    STERE_INVERSE_FIXED_Q62,
+    STERE_INVERSE_FIXED_Q62_MIN_ELEMENTS,
     TMERC_FIXED_Q62,
     TMERC_FIXED_Q62_MIN_ELEMENTS,
     DeviceCapability,
@@ -124,6 +126,20 @@ EXPECTED_REGISTRY_MATRIX = frozenset(
             ((8, 9),),
             ("auto", "fp64"),
             ORTHO_INVERSE_GUARDED_REFRAME_MIN_ELEMENTS,
+        ),
+        (
+            STERE_INVERSE_FIXED_Q62,
+            TranscendentalOperation.PROJECTION,
+            (
+                "stere.inverse.ellipsoidal.variant_a.north",
+                "stere.inverse.ellipsoidal.variant_a.south",
+                "stere.inverse.ellipsoidal.variant_b.north",
+                "stere.inverse.ellipsoidal.variant_b.south",
+                "stere.inverse.ellipsoidal.variant_c.south",
+            ),
+            ((8, 9),),
+            ("auto", "fp64"),
+            STERE_INVERSE_FIXED_Q62_MIN_ELEMENTS,
         ),
         (
             GEOS_FORWARD_FIXED_Q62,
@@ -513,12 +529,14 @@ def test_all_48_fused_paths_resolve_nonempty_decisions_for_every_policy(device):
                 ("tmerc", "forward"),
                 ("sinu", "forward"),
                 ("ortho", "forward"),
+                ("stere", "inverse"),
             }:
                 expected = {
                     "geos": GEOS_FORWARD_FIXED_Q62,
                     "tmerc": TMERC_FIXED_Q62,
                     "sinu": SINU_FORWARD_FIXED_Q62,
                     "ortho": ORTHO_FORWARD_FIXED_Q62,
+                    "stere": STERE_INVERSE_FIXED_Q62,
                 }[family]
                 assert decision.implementation_id == expected
                 assert decision.fallback is False
@@ -728,6 +746,7 @@ def test_documented_auto_thresholds_match_registry_exactly():
         ORTHO_FORWARD_FIXED_Q62: ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
         ORTHO_INVERSE_GUARDED_REFRAME: ORTHO_INVERSE_GUARDED_REFRAME_MIN_ELEMENTS,
         SINU_FORWARD_FIXED_Q62: SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+        STERE_INVERSE_FIXED_Q62: STERE_INVERSE_FIXED_Q62_MIN_ELEMENTS,
         TMERC_FIXED_Q62: TMERC_FIXED_Q62_MIN_ELEMENTS,
     }
     for relative_path, heading in (
@@ -844,6 +863,37 @@ def test_wave2b_benchmark_specs_cover_exact_public_domains() -> None:
         if case.family == "geos":
             assert case.domain["analytic_exact_nextafter_limb_coordinates"] == 3_078
             assert case.domain["randomized_limb_stress_coordinates"] == 5_120
+
+
+def test_wave2c_stere_inverse_benchmark_specs_cover_exact_public_domains() -> None:
+    benchmark_module = _load_policy_benchmark_module()
+    expected = {
+        "stere-inverse-variant_a-north": "stere.inverse.ellipsoidal.variant_a.north",
+        "stere-inverse-variant_a-south": "stere.inverse.ellipsoidal.variant_a.south",
+        "stere-inverse-variant_b-north": "stere.inverse.ellipsoidal.variant_b.north",
+        "stere-inverse-variant_b-south": "stere.inverse.ellipsoidal.variant_b.south",
+        "stere-inverse-variant_c-south": "stere.inverse.ellipsoidal.variant_c.south",
+    }
+    for index, (case_name, domain) in enumerate(expected.items()):
+        specification = benchmark_module.QUALIFICATION_SPECS[case_name]
+        assert specification.implementation_id == STERE_INVERSE_FIXED_Q62
+        assert specification.domain == domain
+        assert specification.direction == "inverse"
+        assert specification.min_elements == STERE_INVERSE_FIXED_Q62_MIN_ELEMENTS
+        assert specification.max_physical_scale_m == PROJECTION_FIXED_Q62_MAX_SCALE_M
+
+        case = benchmark_module._prepare_case(np, case_name, 128, 20260805 + index)
+        assert case.family == "stere"
+        assert case.direction == "FORWARD"
+        assert case.output_is_geographic is True
+        assert (
+            case.geographic_scale_m
+            == case.transformer._pipeline_for_direction("FORWARD").computed["a"]
+        )
+        assert np.all(np.isfinite(case.host_x))
+        assert np.all(np.isfinite(case.host_y))
+        assert np.any(~np.isfinite(case.edge_host_x))
+        assert case.domain["adversarial_accuracy_only"].startswith("normalized radius")
 
 
 @pytest.mark.parametrize("geometry", ["spherical", "ellipsoidal"])

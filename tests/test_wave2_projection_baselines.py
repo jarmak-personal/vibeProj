@@ -89,16 +89,40 @@ def test_laea_public_domain_is_exact_for_geometry_and_mode(geometry, lat_0, mode
 
 
 @pytest.mark.parametrize(
-    ("epsg", "expected"),
+    ("target_input", "expected"),
     [
         (32661, "stere.forward.ellipsoidal.variant_a.north"),
+        (32761, "stere.forward.ellipsoidal.variant_a.south"),
+        (5041, "stere.forward.ellipsoidal.variant_a.north"),
+        (5042, "stere.forward.ellipsoidal.variant_a.south"),
         (3413, "stere.forward.ellipsoidal.variant_b.north"),
+        (3031, "stere.forward.ellipsoidal.variant_b.south"),
         (2985, "stere.forward.ellipsoidal.variant_c.south"),
+        (
+            "+proj=stere +lat_0=90 +k_0=0.994 +lon_0=37 +R=6378137 +units=m +type=crs",
+            "stere.forward.spherical.variant_a.north",
+        ),
+        (
+            "+proj=stere +lat_0=-90 +k_0=0.994 +lon_0=37 +R=6378137 +units=m +type=crs",
+            "stere.forward.spherical.variant_a.south",
+        ),
+        (
+            "+proj=stere +lat_0=90 +lat_ts=70 +lon_0=37 +R=6378137 +units=m +type=crs",
+            "stere.forward.spherical.variant_b.north",
+        ),
+        (
+            "+proj=stere +lat_0=-90 +lat_ts=-70 +lon_0=37 +R=6378137 +units=m +type=crs",
+            "stere.forward.spherical.variant_b.south",
+        ),
         (28992, "sterea.forward.ellipsoidal.oblique"),
+        (
+            "+proj=sterea +lat_0=-37 +lon_0=143 +k=0.9987 +R=6378137 +units=m +type=crs",
+            "sterea.forward.spherical.oblique",
+        ),
     ],
 )
-def test_stereographic_method_identity_reaches_public_domain(epsg, expected):
-    target = CRS.from_epsg(epsg)
+def test_stereographic_method_identity_reaches_public_domain(target_input, expected):
+    target = CRS.from_user_input(target_input)
     params = resolve_projection_params(target)
     transformer = Transformer.from_crs(target.geodetic_crs, target, always_xy=True)
 

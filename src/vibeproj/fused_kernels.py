@@ -24,6 +24,7 @@ from vibeproj.transcendentals import (
     ORTHO_FORWARD_FIXED_Q62,
     ORTHO_INVERSE_GUARDED_REFRAME,
     SINU_FORWARD_FIXED_Q62,
+    STERE_INVERSE_FIXED_Q62,
     TMERC_FIXED_Q62,
 )
 
@@ -2235,6 +2236,7 @@ _PROJECTION_IMPLEMENTATION_TARGETS = {
     SINU_FORWARD_FIXED_Q62: ("sinu", "forward", "float64"),
     ORTHO_FORWARD_FIXED_Q62: ("ortho", "forward", "float64"),
     ORTHO_INVERSE_GUARDED_REFRAME: ("ortho", "inverse", "float64"),
+    STERE_INVERSE_FIXED_Q62: ("stere", "inverse", "float64"),
 }
 
 _GEOS_FORWARD_FIXED_Q62_FALLBACK_HELPERS = r"""
@@ -2281,6 +2283,29 @@ __device__ __noinline__ double2 vp_geos_forward_native_cold(
 """
 
 _PROJECTION_FIXED_Q62_REWRITES = {
+    STERE_INVERSE_FIXED_Q62: (
+        "stere_inverse_fixed_q62",
+        (
+            (
+                "__device__ inline double phi2(double ts, double e) {",
+                "__device__ inline double phi2(\n"
+                "    double ts, double e, bool fixed_is_qualified\n"
+                ") {",
+            ),
+            (
+                "double e_sin = e * sin(phi);",
+                "double e_sin = e * (fixed_is_qualified\n"
+                "            ? vp_fixed_sin_bounded(phi) : sin(phi));",
+            ),
+            (
+                "double phi = sign * phi2(ts, e);",
+                "double phi = sign * phi2(\n"
+                "        ts, e, e >= 0.05 && e <= 0.2\n"
+                "            && vp_projection_fixed_scale_is_qualified(a)\n"
+                "    );",
+            ),
+        ),
+    ),
     GEOS_FORWARD_FIXED_Q62: (
         "geos_forward_fixed_q62",
         (

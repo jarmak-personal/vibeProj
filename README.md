@@ -104,9 +104,11 @@ the transform and GPU are supported, and explicitly falls back to native math
 otherwise. Automatic acceleration currently covers bounded Helmert, forward
 UTM, sinusoidal-forward, orthographic-forward, and spherical-equatorial
 orthographic-inverse, GEOS-forward (sphere/ellipsoid and sweep x/y), and
-spherical-polar LAEA-forward operations on validated Ada `sm_89` consumer GPUs
+spherical-polar LAEA-forward, and ellipsoidal Polar Stereographic inverse
+operations on validated Ada `sm_89` consumer GPUs
 above their measured workload-size crossovers. GEOS forward starts at 2,097,152
-coordinates and spherical-polar LAEA forward at 1,048,576; the canonical policy
+coordinates, spherical-polar LAEA forward at 1,048,576, and Polar
+Stereographic inverse at 1,000,000; the canonical policy
 matrix lists every threshold. Hopper and unmeasured devices remain native. A selected
 accelerated kernel may still take its guarded native branch for individual
 out-of-domain coordinates or a uniformly unsupported physical scale. See the

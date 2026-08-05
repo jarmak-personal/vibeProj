@@ -48,6 +48,8 @@ from vibeproj.transcendentals import (
     PROJECTION_FIXED_Q62_MAX_SCALE_M,
     SINU_FORWARD_FIXED_Q62,
     SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+    STERE_INVERSE_FIXED_Q62,
+    STERE_INVERSE_FIXED_Q62_MIN_ELEMENTS,
     TMERC_FIXED_Q62,
     TMERC_FIXED_Q62_MIN_ELEMENTS,
 )
@@ -179,6 +181,24 @@ QUALIFICATION_SPECS = {
         for geometry in ("spherical",)
         for pole in ("north", "south")
     },
+    **{
+        f"stere-inverse-{variant}-{hemisphere}": QualificationSpec(
+            implementation_id=STERE_INVERSE_FIXED_Q62,
+            operation="projection",
+            domain=f"stere.inverse.ellipsoidal.{variant}.{hemisphere}",
+            direction="inverse",
+            min_elements=STERE_INVERSE_FIXED_Q62_MIN_ELEMENTS,
+            coordinate_contract_m=1e-8,
+            max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+        )
+        for variant, hemisphere in (
+            ("variant_a", "north"),
+            ("variant_a", "south"),
+            ("variant_b", "north"),
+            ("variant_b", "south"),
+            ("variant_c", "south"),
+        )
+    },
 }
 CASES = tuple(QUALIFICATION_SPECS)
 WORKLOAD_GRID_CASES = tuple(
@@ -256,6 +276,7 @@ class BenchmarkCase:
     oracle_from_crs: str
     oracle_to_crs: str
     qualification: QualificationSpec
+    geographic_scale_m: float = EARTH_RADIUS_M
 
 
 def _device_metadata(cp: Any, device_id: int) -> dict[str, Any]:
@@ -891,6 +912,102 @@ def _prepare_laea_polar_forward(
     )
 
 
+_STERE_INVERSE_EPSG = {
+    ("variant_a", "north"): 32661,
+    ("variant_a", "south"): 32761,
+    ("variant_b", "north"): 3413,
+    ("variant_b", "south"): 3031,
+    ("variant_c", "south"): 2985,
+}
+
+
+def _prepare_stere_inverse(
+    cp: Any,
+    n: int,
+    rng: np.random.Generator,
+    *,
+    variant: str,
+    hemisphere: str,
+) -> BenchmarkCase:
+    """Prepare realistic polar timing plus separate full/log-plane edges."""
+    from pyproj import CRS
+
+    from vibeproj import Transformer
+
+    epsg = _STERE_INVERSE_EPSG[(variant, hemisphere)]
+    projected = CRS.from_epsg(epsg)
+    oracle_projected = projected
+    if variant == "variant_c":
+        oracle_projected = CRS.from_user_input(
+            "+proj=stere +lat_0=-90 +lat_ts=-67 +lon_0=140 "
+            "+x_0=300000 +y_0=200000 +a=6378388 +rf=297 +units=m +type=crs"
+        )
+    transformer = Transformer.from_crs(projected, projected.geodetic_crs, always_xy=True)
+    computed = transformer._pipeline_for_direction("FORWARD").computed
+    sign = computed["sign"]
+    latitude = sign * np.deg2rad(rng.uniform(45.0, 90.0, n))
+    longitude = rng.uniform(-math.pi, math.pi, n)
+    phi_adjusted = sign * latitude
+    sin_phi = np.sin(phi_adjusted)
+    e_sin = computed["e"] * sin_phi
+    t = np.tan(0.5 * (math.pi / 2.0 - phi_adjusted)) / ((1.0 - e_sin) / (1.0 + e_sin)) ** (
+        0.5 * computed["e"]
+    )
+    rho = computed["akm1"] * t
+    easting = computed["x0"] + computed["a"] * rho * np.sin(longitude)
+    northing = computed["y0"] - sign * computed["a"] * rho * np.cos(longitude)
+
+    log_rho = np.power(10.0, np.linspace(-15.0, 140.0, 96))
+    edge_azimuth = np.linspace(-math.pi, math.pi, log_rho.size, endpoint=False)
+    edge_easting = computed["x0"] + computed["a"] * log_rho * np.cos(edge_azimuth)
+    edge_northing = computed["y0"] + computed["a"] * log_rho * np.sin(edge_azimuth)
+    edge_easting = np.concatenate(
+        (
+            [computed["x0"], np.nextafter(computed["x0"], math.inf)],
+            edge_easting,
+            [1e300, -1e300, math.inf, -math.inf, math.nan],
+        )
+    ).astype(np.float64)
+    edge_northing = np.concatenate(
+        (
+            [computed["y0"], computed["y0"]],
+            edge_northing,
+            [-1e300, 1e300, 0.0, 0.0, math.nan],
+        )
+    ).astype(np.float64)
+    name = f"stere-inverse-{variant}-{hemisphere}"
+    return BenchmarkCase(
+        name=name,
+        family="stere",
+        direction="FORWARD",
+        transformer=transformer,
+        input_x=cp.asarray(easting),
+        input_y=cp.asarray(northing),
+        host_x=easting,
+        host_y=northing,
+        edge_host_x=edge_easting,
+        edge_host_y=edge_northing,
+        domain={
+            "crs": f"EPSG:{epsg} -> its geodetic CRS",
+            "timed_distribution": "full longitude, polar latitude magnitude uniform [45, 90] degrees",
+            "adversarial_accuracy_only": "normalized radius logspace 1e-15 through 1e140",
+            "geometry": "ellipsoidal",
+            "variant": variant,
+            "hemisphere": hemisphere,
+            "eccentricity_guard": "0.05 <= e <= 0.2",
+        },
+        edges={
+            "easting_m": _json_edge_values(edge_easting),
+            "northing_m": _json_edge_values(edge_northing),
+        },
+        output_is_geographic=True,
+        oracle_from_crs=oracle_projected,
+        oracle_to_crs=oracle_projected.geodetic_crs,
+        qualification=QUALIFICATION_SPECS[name],
+        geographic_scale_m=float(computed["a"]),
+    )
+
+
 def _prepare_case(cp: Any, name: str, n: int, seed: int) -> BenchmarkCase:
     rng = np.random.default_rng(seed)
     if name == "tmerc-forward":
@@ -913,6 +1030,9 @@ def _prepare_case(cp: Any, name: str, n: int, seed: int) -> BenchmarkCase:
     if name.startswith("laea-forward-"):
         _, _, geometry, pole = name.split("-")
         return _prepare_laea_polar_forward(cp, n, rng, geometry=geometry, pole=pole)
+    if name.startswith("stere-inverse-"):
+        _, _, variant, hemisphere = name.split("-")
+        return _prepare_stere_inverse(cp, n, rng, variant=variant, hemisphere=hemisphere)
     raise ValueError(f"Unknown benchmark case: {name}")
 
 
@@ -1299,6 +1419,7 @@ def _coordinate_error(
     reference_y: np.ndarray,
     *,
     geographic: bool,
+    geographic_scale_m: float = EARTH_RADIUS_M,
 ) -> dict[str, Any]:
     nonfinite_match = bool(
         np.array_equal(np.isnan(actual_x), np.isnan(reference_x))
@@ -1319,10 +1440,12 @@ def _coordinate_error(
     reference_x_finite = reference_x[finite]
     reference_y_finite = reference_y[finite]
     if geographic:
-        dlat_m = np.deg2rad(actual_y_finite - reference_y_finite) * EARTH_RADIUS_M
+        dlat_m = np.deg2rad(actual_y_finite - reference_y_finite) * geographic_scale_m
         delta_longitude = (actual_x_finite - reference_x_finite + 180.0) % 360.0 - 180.0
         dlon_m = (
-            np.deg2rad(delta_longitude) * EARTH_RADIUS_M * np.cos(np.deg2rad(reference_y_finite))
+            np.deg2rad(delta_longitude)
+            * geographic_scale_m
+            * np.cos(np.deg2rad(reference_y_finite))
         )
         values = np.hypot(dlat_m, dlon_m)
     else:
@@ -1389,6 +1512,7 @@ def _edge_accuracy(cp: Any, case: BenchmarkCase, precision: str) -> dict[str, An
         native_x,
         native_y,
         geographic=case.output_is_geographic,
+        geographic_scale_m=case.geographic_scale_m,
     )
 
 
@@ -1401,7 +1525,12 @@ def _scale_guard_behavior(cp: Any, case: BenchmarkCase, precision: str) -> dict[
     from vibeproj import Transformer
 
     probes = []
-    for raw_scale in (np.nextafter(maximum_scale, math.inf), 1e12):
+    raw_scales = (
+        (maximum_scale, np.nextafter(maximum_scale, math.inf), 1e12)
+        if case.family == "stere"
+        else (np.nextafter(maximum_scale, math.inf), 1e12)
+    )
+    for raw_scale in raw_scales:
         physical_scale = float(raw_scale)
         source_crs = f"+proj=longlat +R={physical_scale:.17g} +type=crs"
         projection_parameters = f"+proj={case.family} +lon_0=0"
@@ -1413,8 +1542,17 @@ def _scale_guard_behavior(cp: Any, case: BenchmarkCase, precision: str) -> dict[
         elif case.family == "geos":
             sweep = case.name.rsplit("-", maxsplit=1)[1]
             projection_parameters += f" +h=35785831 +sweep={sweep}"
-        target_crs = f"{projection_parameters} +R={physical_scale:.17g} +units=m +type=crs"
-        if case.name == "ortho-inverse":
+        elif case.family == "stere":
+            latitude_origin = -90 if case.name.endswith("-south") else 90
+            projection_parameters += f" +lat_0={latitude_origin} +k_0=0.994"
+            source_crs = f"+proj=longlat +a={physical_scale:.17g} +rf=298.257223563 +type=crs"
+        earth = (
+            f"+a={physical_scale:.17g} +rf=298.257223563"
+            if case.family == "stere"
+            else f"+R={physical_scale:.17g}"
+        )
+        target_crs = f"{projection_parameters} {earth} +units=m +type=crs"
+        if case.name == "ortho-inverse" or case.family == "stere":
             transformer = Transformer.from_crs(target_crs, source_crs, always_xy=True)
             first_host = (
                 np.asarray([0.1, -0.3, 0.7, 0.0, np.inf, np.nan], dtype=np.float64) * physical_scale
@@ -1447,6 +1585,15 @@ def _scale_guard_behavior(cp: Any, case: BenchmarkCase, precision: str) -> dict[
             np.array_equal(accelerated_x.view(np.uint64), native_x.view(np.uint64))
             and np.array_equal(accelerated_y.view(np.uint64), native_y.view(np.uint64))
         )
+        error = _coordinate_error(
+            accelerated_x,
+            accelerated_y,
+            native_x,
+            native_y,
+            geographic=case.output_is_geographic,
+            geographic_scale_m=physical_scale,
+        )
+        native_expected = physical_scale > maximum_scale
         strategy = _resolved_strategy(
             transformer,
             "accelerated",
@@ -1463,6 +1610,15 @@ def _scale_guard_behavior(cp: Any, case: BenchmarkCase, precision: str) -> dict[
                 "strategy": strategy,
                 "strategy_remains_selected": strategy_remains_selected,
                 "bitwise_native_outputs": bitwise_native,
+                "native_expected": native_expected,
+                "error_vs_native_m": error,
+                "behavior_pass": bitwise_native
+                if native_expected
+                else (
+                    error["max_m"] is not None
+                    and error["max_m"] <= case.qualification.coordinate_contract_m
+                    and error["nonfinite_match"]
+                ),
             }
         )
     return {
@@ -1470,8 +1626,93 @@ def _scale_guard_behavior(cp: Any, case: BenchmarkCase, precision: str) -> dict[
         "maximum_qualified_scale_m": maximum_scale,
         "probes": probes,
         "qualification_pass": all(
-            probe["strategy_remains_selected"] and probe["bitwise_native_outputs"]
-            for probe in probes
+            probe["strategy_remains_selected"] and probe["behavior_pass"] for probe in probes
+        ),
+    }
+
+
+def _stere_inverse_e_guard_behavior(
+    cp: Any,
+    case: BenchmarkCase,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    """Prove native fallback and wall no-regression outside the eccentricity band."""
+    if case.name != "stere-inverse-variant_a-north":
+        return {"required": False, "qualification_pass": True, "probes": []}
+
+    from pyproj import CRS
+
+    from vibeproj import Transformer
+
+    n = min(args.n, 1_000_000)
+    rng = np.random.default_rng(args.seed + 90_000)
+    probes = []
+    for eccentricity in (np.nextafter(0.05, 0.0), np.nextafter(0.2, math.inf)):
+        target = CRS.from_user_input(
+            "+proj=stere +lat_0=90 +k_0=0.994 +lon_0=0 "
+            f"+a=6378137 +es={eccentricity * eccentricity:.17g} +units=m +type=crs"
+        )
+        transformer = Transformer.from_crs(target, target.geodetic_crs, always_xy=True)
+        radius = np.sqrt(rng.random(n)) * 0.5 * 6_378_137.0
+        angle = rng.uniform(-math.pi, math.pi, n)
+        input_x = cp.asarray(radius * np.cos(angle))
+        input_y = cp.asarray(radius * np.sin(angle))
+        outputs = {
+            policy: (cp.empty(n, dtype=cp.float64), cp.empty(n, dtype=cp.float64))
+            for policy in ("native", "accelerated")
+        }
+
+        def invoke(policy: str) -> None:
+            transformer.transform_buffers(
+                input_x,
+                input_y,
+                out_x=outputs[policy][0],
+                out_y=outputs[policy][1],
+                precision=args.precision,
+                transcendentals=policy,
+            )
+
+        timing = _time_synchronized_wall_interleaved(
+            cp,
+            {policy: lambda policy=policy: invoke(policy) for policy in outputs},
+            n=n,
+            warmup=min(args.warmup, 5),
+            iterations=min(args.iterations, 20),
+            repeats=args.repeats,
+        )
+        for policy in outputs:
+            invoke(policy)
+        cp.cuda.get_current_stream().synchronize()
+        native_x, native_y = (cp.asnumpy(value) for value in outputs["native"])
+        accelerated_x, accelerated_y = (cp.asnumpy(value) for value in outputs["accelerated"])
+        bitwise_native = bool(
+            np.array_equal(accelerated_x.view(np.uint64), native_x.view(np.uint64))
+            and np.array_equal(accelerated_y.view(np.uint64), native_y.view(np.uint64))
+        )
+        strategy = _resolved_strategy(
+            transformer,
+            "accelerated",
+            "FORWARD",
+            precision=args.precision,
+            workload_size=n,
+        )
+        repeat_speedups = timing["accelerated"]["repeat_speedups_vs_native"]
+        probes.append(
+            {
+                "eccentricity": float(eccentricity),
+                "strategy": strategy,
+                "bitwise_native_outputs": bitwise_native,
+                "wall_timing": timing,
+                "no_wall_regression_pass": timing["accelerated"]["speedup_vs_native"] >= 0.98
+                and all(speedup >= 0.95 for speedup in repeat_speedups),
+            }
+        )
+    return {
+        "required": True,
+        "qualified_eccentricity_interval": "[0.05, 0.2]",
+        "probes": probes,
+        "qualification_pass": all(
+            probe["bitwise_native_outputs"] and probe["no_wall_regression_pass"] for probe in probes
         ),
     }
 
@@ -1551,6 +1792,7 @@ def _run_case(cp: Any, case: BenchmarkCase, args: argparse.Namespace) -> dict[st
             native_x,
             native_y,
             geographic=case.output_is_geographic,
+            geographic_scale_m=case.geographic_scale_m,
         )
         for policy, (out_x, out_y) in host_outputs.items()
     }
@@ -1564,11 +1806,13 @@ def _run_case(cp: Any, case: BenchmarkCase, args: argparse.Namespace) -> dict[st
             oracle_x,
             oracle_y,
             geographic=case.output_is_geographic,
+            geographic_scale_m=case.geographic_scale_m,
         )
         for policy, (out_x, out_y) in host_outputs.items()
     }
     edge_error_vs_native = _edge_accuracy(cp, case, args.precision)
     scale_guard = _scale_guard_behavior(cp, case, args.precision)
+    parameter_guard = _stere_inverse_e_guard_behavior(cp, case, args)
     kernel_resources = _kernel_resources(cp, case)
     fallback_sweep = _ortho_inverse_fallback_sweep(cp, case, args)
 
@@ -1646,6 +1890,7 @@ def _run_case(cp: Any, case: BenchmarkCase, args: argparse.Namespace) -> dict[st
         and edge_error_vs_native["max_m"] <= coordinate_contract_m
         and edge_error_vs_native["nonfinite_match"],
         "scale_guard_native_behavior_pass": scale_guard["qualification_pass"],
+        "parameter_guard_native_behavior_pass": parameter_guard["qualification_pass"],
         "no_pyproj_regression": accelerated_pyproj_error is not None
         and native_pyproj_error is not None
         and accelerated_pyproj_error <= native_pyproj_error + coordinate_contract_m
@@ -1670,6 +1915,7 @@ def _run_case(cp: Any, case: BenchmarkCase, args: argparse.Namespace) -> dict[st
         "native_coordinate_contract_pass",
         "edge_coordinate_contract_pass",
         "scale_guard_native_behavior_pass",
+        "parameter_guard_native_behavior_pass",
         "no_pyproj_regression",
     )
     gates["qualification_pass"] = all(bool(gates[name]) for name in required_gate_names)
@@ -1691,6 +1937,7 @@ def _run_case(cp: Any, case: BenchmarkCase, args: argparse.Namespace) -> dict[st
         "error_vs_native_m": errors_vs_native,
         "edge_error_vs_native_m": edge_error_vs_native,
         "scale_guard": scale_guard,
+        "parameter_guard": parameter_guard,
         "error_vs_pyproj_m": errors_vs_pyproj,
         "instrumentation": instrumentation,
         "kernel_resources": kernel_resources,
