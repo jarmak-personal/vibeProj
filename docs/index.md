@@ -37,7 +37,7 @@
   </div>
   <div class="cp-card cp-reveal">
     <h3>Precision Control</h3>
-    <p>fp64 by default. Experimental double-single (ds) mode pairs two fp32 values for fp64-equivalent accuracy at fp32 throughput on consumer GPUs.</p>
+    <p>fp64 arithmetic and I/O by default, with guarded device-specific transcendental strategies. Experimental double-single (ds) mode remains available for TM research.</p>
   </div>
   <div class="cp-card cp-reveal">
     <h3>CPU Fallback</h3>

@@ -32,7 +32,14 @@ GPU-accelerated coordinate projection library. 24 projections, each with a fused
   Helmert (if available) + SVD (if baked pair exists); if neither, warning.
   Fitting tool: `tools/fit_datum_corrections.py`.
 - **GPU detection** (`src/vibeproj/gpu_detect.py`) — queries `SingleToDoublePrecisionPerfRatio` to classify
-  consumer (1:64) vs datacenter (1:2) GPU. Auto precision always uses fp64 (projection math is SFU-bound).
+  consumer (1:64) vs datacenter (1:2) GPU. Projection arithmetic remains fp64. Helmert trig and
+  guarded forward-UTM transcendentals auto-dispatch to bounded Q1.62 INT64 only on validated Ada
+  `sm_89` consumer GPUs; all other GPUs conservatively use paired native fp64 `sincos`.
+- **Fixed-point trig** (`src/vibeproj/_fixed_trig_device_fns.py`) — table-free Q1.62 `sin`/`cos` for
+  bounded Helmert and forward-TM angles, using nearest-quadrant reduction and degree-17/18
+  polynomials. Forward TM additionally reframes `atan2` as a tiny correction and uses a bounded
+  degree-11 `asinh` series inside a normal zone. Non-finite, out-of-domain, wide-TM, and near-pole
+  Helmert work falls back to native fp64.
 - **Double-single arithmetic** (`src/vibeproj/_ds_device_fns.py`) — experimental ds fp32 pair arithmetic
   for fp64-equivalent accuracy at fp32 throughput. Available via `precision="ds"`.
 - **Chunked pipeline** (`Transformer.transform_chunked()`) — double-buffered H<->D transfer pipeline

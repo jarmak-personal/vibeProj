@@ -15,9 +15,9 @@ import warnings
 
 import numpy as np
 
-# Kernel cache: (projection_name, direction, dtype_name) -> RawKernel
+# Kernel cache: (projection_name, direction, dtype_name, strategy) -> RawKernel
 # Protected by _kernel_cache_lock for thread-safe compilation.
-_kernel_cache: dict[tuple[str, str, str], object] = {}
+_kernel_cache: dict[tuple[str, str, str, str], object] = {}
 _kernel_cache_lock = threading.RLock()
 
 # Projections with fused kernel support
@@ -83,6 +83,7 @@ def can_fuse(projection_name: str, direction: str) -> bool:
 # ===================================================================
 
 from vibeproj._ds_device_fns import DS_DEVICE_FNS as _DS_ARITH  # noqa: E402
+from vibeproj._fixed_trig_device_fns import FIXED_TRIG_DEVICE_FNS as _FIXED_TRIG  # noqa: E402
 
 # ds gatg + ds clenshaw_complex for TM
 _DS_TM_DEVICE_FNS = (
@@ -475,6 +476,149 @@ _TM_FORWARD_SOURCE = (
 """
     + _FWD_POSTAMBLE
     + "}}"
+)
+
+# Dedicated fp64 TM forward source. Native sine/cosine is paired on every GPU;
+# validated Ada consumer GPUs can instead use bounded Q1.62 trig and replace
+# general atan2/asinh with UTM-domain correction polynomials. All other TM
+# arithmetic and kernel I/O remain fp64.
+_TM_FORWARD_FP64_BODY = (
+    r"""
+#ifndef VP_TM_FORWARD_KERNEL_NAME
+#define VP_TM_FORWARD_KERNEL_NAME tm_forward_fp64
+#endif
+#ifndef VP_TM_SINCOS
+#define VP_TM_SINCOS(angle, lam, sin_out, cos_out) \
+    sincos(angle, sin_out, cos_out)
+#endif
+#ifndef VP_TM_LATITUDE
+#define VP_TM_LATITUDE(gaussian_lat, sin_lat, cos_lat, cos_lon, product, lam) \
+    atan2(sin_lat, product)
+#endif
+#ifndef VP_TM_ASINH
+#define VP_TM_ASINH(value) asinh(value)
+#endif
+"""
+    + _FWD_SIGNATURE.format(func="VP_TM_FORWARD_KERNEL_NAME", real_t="double")
+    + """
+    double cbg0, double cbg1, double cbg2, double cbg3, double cbg4, double cbg5,
+    double gtu0, double gtu1, double gtu2, double gtu3, double gtu4, double gtu5,
+    double Qn, double Zb, double lam0, double a, double x0, double y0,
+    int src_north_first, int dst_north_first, int n
+) {"""
+    + _FWD_PREAMBLE.format(real_t="double")
+    + r"""
+    double sin_two_phi, cos_two_phi;
+    VP_TM_SINCOS(2.0 * phi, lam, &sin_two_phi, &cos_two_phi);
+    double Cn = gatg(
+        cbg0, cbg1, cbg2, cbg3, cbg4, cbg5,
+        phi, cos_two_phi, sin_two_phi
+    );
+    const double gaussian_lat = Cn;
+    double sin_Cn, cos_Cn;
+    VP_TM_SINCOS(Cn, lam, &sin_Cn, &cos_Cn);
+    double sin_Ce, cos_Ce;
+    VP_TM_SINCOS(lam, lam, &sin_Ce, &cos_Ce);
+    double cos_Cn_cos_Ce = cos_Cn * cos_Ce;
+    Cn = VP_TM_LATITUDE(
+        gaussian_lat, sin_Cn, cos_Cn, cos_Ce, cos_Cn_cos_Ce, lam
+    );
+    double inv_denom = rsqrt(
+        sin_Cn * sin_Cn + cos_Cn_cos_Ce * cos_Cn_cos_Ce
+    );
+    double tan_Ce = sin_Ce * cos_Cn * inv_denom;
+    double Ce = VP_TM_ASINH(tan_Ce);
+    double two_inv = 2.0 * inv_denom;
+    double two_inv_sq = two_inv * inv_denom;
+    double tmp_r = cos_Cn_cos_Ce * two_inv_sq;
+    double sin_arg_r = sin_Cn * tmp_r;
+    double cos_arg_r = cos_Cn_cos_Ce * tmp_r - 1.0;
+    double sinh_arg_i = tan_Ce * two_inv;
+    double cosh_arg_i = two_inv_sq - 1.0;
+    double dCn, dCe;
+    clenshaw_complex(
+        gtu0, gtu1, gtu2, gtu3, gtu4, gtu5,
+        sin_arg_r, cos_arg_r, sinh_arg_i, cosh_arg_i, &dCn, &dCe
+    );
+    Cn += dCn;
+    Ce += dCe;
+    double easting = Qn * Ce * a + x0;
+    double northing = (Qn * Cn + Zb) * a + y0;
+"""
+    + _FWD_POSTAMBLE.format()
+    + "}"
+)
+
+_TM_FORWARD_FP64_SOURCE = _TM_DEVICE_FNS.format(real_t="double") + _TM_FORWARD_FP64_BODY
+
+_TM_FORWARD_FAST_HELPERS = r"""
+__device__ __forceinline__ void vp_tm_fast_sincos(
+    double angle, double longitude_offset, double* sin_out, double* cos_out
+) {
+    if (fabs(longitude_offset) <= 0.06) {
+        vp_fixed_sincos_bounded(angle, sin_out, cos_out);
+    } else {
+        sincos(angle, sin_out, cos_out);
+    }
+}
+
+__device__ __forceinline__ double vp_tm_fast_latitude(
+    double gaussian_lat,
+    double sin_lat,
+    double cos_lat,
+    double cos_lon,
+    double native_denominator,
+    double longitude_offset
+) {
+    if (!(fabs(longitude_offset) <= 0.06)) {
+        return atan2(sin_lat, native_denominator);
+    }
+
+    // atan2(sin(B), cos(B)cos(L)) = B + atan(delta). In a normal UTM
+    // zone |delta| < 6.9e-4, so the odd degree-5 correction is fp64-accurate.
+    const double denominator = fma(
+        cos_lon * cos_lat, cos_lat, sin_lat * sin_lat
+    );
+    double reciprocal = (double)__frcp_rn((float)denominator);
+    reciprocal *= fma(-denominator, reciprocal, 2.0);
+    const double correction =
+        sin_lat * cos_lat * (1.0 - cos_lon) * reciprocal;
+    const double correction_sq = correction * correction;
+    return gaussian_lat + correction * fma(
+        correction_sq, fma(correction_sq, 0.2, -1.0 / 3.0), 1.0
+    );
+}
+
+__device__ __forceinline__ double vp_tm_fast_asinh(double value) {
+    if (!(fabs(value) <= 0.06)) {
+        return asinh(value);
+    }
+
+    // Odd asinh series through x^11. The next term is below one ulp over the
+    // fast domain; normal UTM inputs are bounded by tan(3 degrees) < 0.053.
+    const double x2 = value * value;
+    double polynomial = -63.0 / 2816.0;
+    polynomial = fma(polynomial, x2, 35.0 / 1152.0);
+    polynomial = fma(polynomial, x2, -5.0 / 112.0);
+    polynomial = fma(polynomial, x2, 3.0 / 40.0);
+    polynomial = fma(polynomial, x2, -1.0 / 6.0);
+    return value * fma(polynomial, x2, 1.0);
+}
+"""
+
+_TM_FORWARD_FAST_SOURCE = (
+    _FIXED_TRIG
+    + _TM_FORWARD_FAST_HELPERS
+    + _TM_DEVICE_FNS.format(real_t="double")
+    + r"""
+#define VP_TM_FORWARD_KERNEL_NAME tm_forward_fast
+#define VP_TM_SINCOS(angle, lam, sin_out, cos_out) \
+    vp_tm_fast_sincos(angle, lam, sin_out, cos_out)
+#define VP_TM_LATITUDE(gaussian_lat, sin_lat, cos_lat, cos_lon, product, lam) \
+    vp_tm_fast_latitude(gaussian_lat, sin_lat, cos_lat, cos_lon, product, lam)
+#define VP_TM_ASINH(value) vp_tm_fast_asinh(value)
+"""
+    + _TM_FORWARD_FP64_BODY
 )
 
 _TM_INVERSE_SOURCE = (
@@ -1836,7 +1980,23 @@ _TYPE_MAP = {
 }
 
 
-def _get_kernel(projection_name: str, direction: str, compute_dtype: str):
+def _resolve_tmerc_forward_mode(mode: str) -> str:
+    if mode == "auto":
+        from vibeproj.gpu_detect import select_tmerc_forward_mode
+
+        return select_tmerc_forward_mode()
+    if mode not in ("fp64", "int64"):
+        raise ValueError(f"Invalid TM forward mode: {mode!r}. Must be 'auto', 'fp64', or 'int64'.")
+    return mode
+
+
+def _get_kernel(
+    projection_name: str,
+    direction: str,
+    compute_dtype: str,
+    *,
+    tmerc_mode: str = "auto",
+):
     """Get or compile a fused kernel (thread-safe).
 
     Uses double-checked locking: the fast path (cache hit) is lock-free.
@@ -1847,7 +2007,10 @@ def _get_kernel(projection_name: str, direction: str, compute_dtype: str):
     """
     import cupy as cp
 
-    key = (projection_name, direction, compute_dtype)
+    strategy = "default"
+    if (projection_name, direction, compute_dtype) == ("tmerc", "forward", "float64"):
+        strategy = _resolve_tmerc_forward_mode(tmerc_mode)
+    key = (projection_name, direction, compute_dtype, strategy)
     # Fast path: lock-free read (dict reads are thread-safe in CPython)
     if key in _kernel_cache:
         return _kernel_cache[key]
@@ -1858,7 +2021,19 @@ def _get_kernel(projection_name: str, direction: str, compute_dtype: str):
         if key in _kernel_cache:
             return _kernel_cache[key]
 
-        if compute_dtype == "ds":
+        if (projection_name, direction, compute_dtype) == (
+            "tmerc",
+            "forward",
+            "float64",
+        ):
+            if strategy == "int64":
+                source = _TM_FORWARD_FAST_SOURCE
+                func_name = "tm_forward_fast"
+            else:
+                source = _TM_FORWARD_FP64_SOURCE
+                func_name = "tm_forward_fp64"
+            source = _inject_linear_unit_args(source)
+        elif compute_dtype == "ds":
             ds_key = (projection_name, direction)
             if ds_key in _DS_SOURCE_MAP:
                 source, func_name = _DS_SOURCE_MAP[ds_key]
@@ -1899,7 +2074,7 @@ _DS_SOURCE_MAP = {
 # ===================================================================
 
 
-def compile_kernels(projections=None, *, precision="auto"):
+def compile_kernels(projections=None, *, precision="auto", tmerc_mode="auto"):
     """Pre-compile fused NVRTC kernels to eliminate first-call latency.
 
     Parameters
@@ -1909,6 +2084,8 @@ def compile_kernels(projections=None, *, precision="auto"):
         If None, compiles all supported projections.
     precision : str
         Compute precision: "auto"/"fp64"/"fp32"/"ds".
+    tmerc_mode : str
+        Internal forward-TM strategy override used by Transformer warm-up.
     """
     try:
         import cupy  # noqa: F401
@@ -1924,7 +2101,12 @@ def compile_kernels(projections=None, *, precision="auto"):
             (p, d) for p in projections for d in ("forward", "inverse") if (p, d) in _SUPPORTED
         ]
     for proj_name, direction in targets:
-        _get_kernel(proj_name, direction, compute_dtype)
+        _get_kernel(
+            proj_name,
+            direction,
+            compute_dtype,
+            tmerc_mode=tmerc_mode,
+        )
 
 
 def fused_transform(
@@ -1941,6 +2123,7 @@ def fused_transform(
     out_y=None,
     precision: str = "auto",
     stream=None,
+    tmerc_mode: str = "auto",
 ) -> tuple | None:
     """Execute a fused GPU kernel for the full transform pipeline.
 
@@ -1951,7 +2134,11 @@ def fused_transform(
     precision : str
         "fp64" = full double precision (default for fp64 input).
         "fp32" = fp32 compute with fp64 I/O (ADR-0002 mixed precision).
-        "auto" = fp64 (projection math is trig-dominated / SFU-bound).
+        "auto" = fp64 arithmetic with validated internal device strategies.
+    tmerc_mode : str
+        Internal forward-TM strategy override. ``"auto"`` selects the guarded
+        fixed-point path only on validated consumer GPUs; ``"fp64"`` and
+        ``"int64"`` force a strategy for testing and benchmarking.
 
     Mixed precision (fp32 compute, fp64 I/O) is ADR-0002 compliant:
     - Input/output arrays are always fp64 (canonical storage precision)
@@ -1984,7 +2171,7 @@ def fused_transform(
     # Determine compute precision
     # Normalize: external names (fp64/fp32/ds/auto) → internal dtype keys (float64/float32/ds)
     if precision == "auto":
-        compute_dtype = "float64"  # fp64 always — trig-dominated; see gpu_detect.py
+        compute_dtype = "float64"  # Internal bounded strategies preserve full accuracy.
     elif precision == "fp32":
         compute_dtype = "float32"  # raw fp32 (lossy — expert opt-in)
     elif precision == "ds":
@@ -2006,7 +2193,20 @@ def fused_transform(
 
     # ds kernels take double params (the ds arithmetic is internal)
     real_t = np.float64 if compute_dtype in ("float64", "ds") else np.float32
-    kernel = _get_kernel(projection_name, direction, compute_dtype)
+    effective_tmerc_mode = tmerc_mode
+    if (
+        tmerc_mode == "auto"
+        and projection_name == "tmerc"
+        and direction == "forward"
+        and not computed.get("is_utm", False)
+    ):
+        effective_tmerc_mode = "fp64"
+    kernel = _get_kernel(
+        projection_name,
+        direction,
+        compute_dtype,
+        tmerc_mode=effective_tmerc_mode,
+    )
     if out_x is None:
         out_x = cp.empty(n, dtype=io_dtype)
     elif out_x.dtype != np.float64:
@@ -2296,8 +2496,18 @@ def fused_transform(
 # Helmert datum shift kernel
 # ===================================================================
 
-_HELMERT_SHIFT_SOURCE = """\
-extern "C" __global__ void __launch_bounds__(256) helmert_shift(
+_HELMERT_SHIFT_BODY = """\
+#ifndef VP_HELMERT_KERNEL_NAME
+#define VP_HELMERT_KERNEL_NAME helmert_shift
+#endif
+#ifndef VP_HELMERT_SINCOS
+#define VP_HELMERT_SINCOS(angle, sin_out, cos_out) sincos(angle, sin_out, cos_out)
+#endif
+#ifndef VP_HELMERT_SIN
+#define VP_HELMERT_SIN(angle) sin(angle)
+#endif
+
+extern "C" __global__ void __launch_bounds__(256) VP_HELMERT_KERNEL_NAME(
     const double* __restrict__ in_lat,
     const double* __restrict__ in_lon,
     double* __restrict__ out_lat,
@@ -2319,8 +2529,9 @@ extern "C" __global__ void __launch_bounds__(256) helmert_shift(
     double lon = in_lon[idx] * 0.017453292519943295;
 
     /* Geodetic -> ECEF on source ellipsoid */
-    double sin_lat = sin(lat), cos_lat = cos(lat);
-    double sin_lon = sin(lon), cos_lon = cos(lon);
+    double sin_lat, cos_lat, sin_lon, cos_lon;
+    VP_HELMERT_SINCOS(lat, &sin_lat, &cos_lat);
+    VP_HELMERT_SINCOS(lon, &sin_lon, &cos_lon);
     double N = src_a / sqrt(1.0 - src_es * sin_lat * sin_lat);
 
     double X, Y, Z;
@@ -2346,7 +2557,7 @@ extern "C" __global__ void __launch_bounds__(256) helmert_shift(
     double lat_out = atan2(Z2, p * (1.0 - dst_es));
 
     for (int i = 0; i < 10; i++) {
-        double sin_lat_i = sin(lat_out);
+        double sin_lat_i = VP_HELMERT_SIN(lat_out);
         double N_i = dst_a / sqrt(1.0 - dst_es * sin_lat_i * sin_lat_i);
         double lat_new = atan2(Z2 + dst_es * N_i * sin_lat_i, p);
         if (fabs(lat_new - lat_out) < 1e-14) { lat_out = lat_new; break; }
@@ -2358,8 +2569,8 @@ extern "C" __global__ void __launch_bounds__(256) helmert_shift(
 
     if (has_z) {
         /* Recover ellipsoidal height on destination ellipsoid */
-        double sin_lat_f = sin(lat_out);
-        double cos_lat_f = cos(lat_out);
+        double sin_lat_f, cos_lat_f;
+        VP_HELMERT_SINCOS(lat_out, &sin_lat_f, &cos_lat_f);
         double N_f = dst_a / sqrt(1.0 - dst_es * sin_lat_f * sin_lat_f);
         double h_out_val;
         if (fabs(cos_lat_f) < 1e-10) {
@@ -2373,37 +2584,95 @@ extern "C" __global__ void __launch_bounds__(256) helmert_shift(
 }
 """
 
-_helmert_kernel_cache = None  # Reset on source change (z-dimension support added)
+_HELMERT_SHIFT_SOURCE = _HELMERT_SHIFT_BODY
+_HELMERT_SHIFT_FIXED_TRIG_SOURCE = (
+    _FIXED_TRIG
+    + """
+// Height recovery is ill-conditioned near a pole: p/cos(lat) amplifies even
+// sub-ULP cosine differences. Keep those uncommon coordinates entirely native.
+__device__ __forceinline__ void vp_helmert_fixed_sincos(
+    double angle, double* sin_out, double* cos_out
+) {
+    if (fabs(fabs(angle) - 1.5707963267948966192313216916397514) < 0.02) {
+        sincos(angle, sin_out, cos_out);
+        return;
+    }
+    vp_fixed_sincos_bounded(angle, sin_out, cos_out);
+}
+
+__device__ __forceinline__ double vp_helmert_fixed_sin(double angle) {
+    if (fabs(fabs(angle) - 1.5707963267948966192313216916397514) < 0.02) {
+        return sin(angle);
+    }
+    return vp_fixed_sin_bounded(angle);
+}
+
+#define VP_HELMERT_KERNEL_NAME helmert_shift_fixed_trig
+#define VP_HELMERT_SINCOS(angle, sin_out, cos_out) \\
+    vp_helmert_fixed_sincos(angle, sin_out, cos_out)
+#define VP_HELMERT_SIN(angle) vp_helmert_fixed_sin(angle)
+"""
+    + _HELMERT_SHIFT_BODY
+)
+
+_helmert_kernel_cache: dict[str, object] = {}
 _helmert_kernel_lock = threading.Lock()
 
 
-def _get_helmert_kernel():
-    """Get or compile the Helmert datum shift kernel (thread-safe)."""
-    global _helmert_kernel_cache
-    if _helmert_kernel_cache is not None:
-        return _helmert_kernel_cache
+def _resolve_helmert_trig_mode(trig_mode: str) -> str:
+    if trig_mode == "auto":
+        from vibeproj.gpu_detect import select_helmert_trig_mode
+
+        return select_helmert_trig_mode()
+    if trig_mode not in ("fp64", "int64"):
+        raise ValueError(
+            f"Invalid Helmert trig mode: {trig_mode!r}. Must be 'auto', 'fp64', or 'int64'."
+        )
+    return trig_mode
+
+
+def _get_helmert_kernel(trig_mode: str = "auto"):
+    """Get or compile a Helmert datum shift kernel (thread-safe)."""
+    resolved_mode = _resolve_helmert_trig_mode(trig_mode)
+    if resolved_mode in _helmert_kernel_cache:
+        return _helmert_kernel_cache[resolved_mode]
 
     import cupy as cp
 
     with _helmert_kernel_lock:
-        if _helmert_kernel_cache is not None:
-            return _helmert_kernel_cache
-        kernel = cp.RawKernel(_HELMERT_SHIFT_SOURCE, "helmert_shift")
-        _helmert_kernel_cache = kernel
+        if resolved_mode in _helmert_kernel_cache:
+            return _helmert_kernel_cache[resolved_mode]
+        if resolved_mode == "int64":
+            source = _HELMERT_SHIFT_FIXED_TRIG_SOURCE
+            function_name = "helmert_shift_fixed_trig"
+        else:
+            source = _HELMERT_SHIFT_SOURCE
+            function_name = "helmert_shift"
+        kernel = cp.RawKernel(source, function_name)
+        _helmert_kernel_cache[resolved_mode] = kernel
         return kernel
 
 
-def compile_helmert_kernel():
-    """Pre-compile the Helmert datum shift kernel."""
+def compile_helmert_kernel(*, trig_mode: str = "auto"):
+    """Pre-compile the selected Helmert datum shift kernel."""
     try:
         import cupy  # noqa: F401
     except (ImportError, ModuleNotFoundError):
         return
-    _get_helmert_kernel()
+    _get_helmert_kernel(trig_mode)
 
 
 def fused_helmert_shift(
-    lat, lon, helmert_params, xp, h=None, out_lat=None, out_lon=None, out_h=None, stream=None
+    lat,
+    lon,
+    helmert_params,
+    xp,
+    h=None,
+    out_lat=None,
+    out_lon=None,
+    out_h=None,
+    stream=None,
+    trig_mode="auto",
 ):
     """Execute the Helmert datum shift on GPU.
 
@@ -2423,6 +2692,10 @@ def fused_helmert_shift(
         Pre-allocated output height array (only used when h is not None).
     stream : cupy.cuda.Stream, optional
         CUDA stream for async execution.
+    trig_mode : str, optional
+        Internal kernel strategy: ``"auto"`` selects fixed-point trig only on
+        validated consumer GPUs, ``"fp64"`` uses native paired sine/cosine,
+        and ``"int64"`` forces bounded Q1.62 trig with fp64 fallback.
 
     Returns
     -------
@@ -2436,7 +2709,7 @@ def fused_helmert_shift(
     if xp is not cp:
         return None
 
-    kernel = _get_helmert_kernel()
+    kernel = _get_helmert_kernel(trig_mode)
 
     from vibeproj.exceptions import CoordinateValidationError
 

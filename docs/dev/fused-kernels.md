@@ -90,8 +90,8 @@ are always `double*` regardless of compute precision.
 Compiled kernels are cached in `_kernel_cache`:
 
 ```python
-_kernel_cache: dict[tuple[str, str, str], RawKernel] = {}
-# key: (projection_name, direction, compute_dtype)
+_kernel_cache: dict[tuple[str, str, str, str], RawKernel] = {}
+# key: (projection_name, direction, compute_dtype, strategy)
 ```
 
 The first call to a kernel compiles it via NVRTC (~100ms). Subsequent
@@ -115,6 +115,30 @@ elif projection_name == "webmerc":
 Parameters are cast to the compute dtype (`np.float64` or `np.float32`)
 and passed as kernel arguments.
 
+## Guarded forward Transverse Mercator
+
+The fp64 forward-TM kernel has two separately cached strategies. Native fp64
+uses paired CUDA `sincos`; the validated Ada `sm_89` strategy keeps fp64 I/O,
+series evaluation, scale, and offset while accelerating three bounded pieces:
+
+- Table-free Q1.62 paired sine/cosine.
+- `atan2(sin(B), cos(B)cos(L))` reframed as `B + atan(delta)`. For
+  `|L| <= 0.06`, `|delta| < 6.9e-4`, so a degree-5 odd correction reaches
+  fp64 accuracy.
+- A degree-11 odd `asinh` series for `|x| <= 0.06`.
+
+Every guard is per-coordinate. Wider TM coordinates, non-finite values, and
+unknown devices use paired native fp64 behavior. Automatic selection is
+restricted to UTM forward transforms on validated Ada consumer GPUs; generic
+TM CRSs, Hopper, and other architectures use the native strategy pending
+independent benchmarks. An internal
+`tmerc_mode="fp64"|"int64"` override supports accuracy and A/B testing.
+
+On the validation RTX 4090, `benchmarks/bench_tmerc_int64.py` measured 5M
+normal-zone forward points at 2.315 ms for the pre-branch fp64 kernel, 2.042 ms
+for paired native fp64, and 1.305 ms for the guarded production strategy
+(1.77x versus the pre-branch kernel). Maximum radial difference was 4.66 nm.
+
 ## Helmert datum shift kernel
 
 The `helmert_shift` kernel in `_HELMERT_SHIFT_SOURCE` runs the full
@@ -131,6 +155,18 @@ The Helmert kernel is separate from the fused projection kernels —
 projections are inherently 2D. For cross-datum transforms, the pipeline
 runs the Helmert kernel first (or after inverse projection), then the
 projection kernel. z passes through the projection kernel unchanged.
+
+Adjacent native fp64 sine/cosine calls use CUDA's paired `sincos`. On
+validated Ada consumer GPUs (`sm_89` with weak native-fp64 throughput),
+automatic dispatch instead uses table-free signed Q1.62 trig for bounded
+Helmert angles. It reduces to `[-pi/4, pi/4]` and evaluates degree-17 sine
+and degree-18 cosine polynomials with full-width INT64 products. Kernel I/O,
+ECEF math, the Helmert matrix, and Bowring iteration remain fp64. Unknown,
+datacenter, out-of-domain, non-finite, and near-pole cases use native fp64.
+
+The two Helmert variants are cached separately under `"fp64"` and `"int64"`
+strategy keys. `fused_helmert_shift(..., trig_mode=...)` exposes an internal
+override for testing; Transformer dispatch uses `"auto"`.
 
 ## SVD datum correction kernel
 

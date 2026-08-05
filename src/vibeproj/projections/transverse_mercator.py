@@ -212,6 +212,7 @@ class TransverseMercator(Projection):
             "x0": x0,
             "y0": y0,
             "a": e.a,
+            "is_utm": params.utm_zone > 0,
         }
 
     def forward(self, lam, phi, params, computed, xp):

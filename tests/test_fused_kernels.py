@@ -230,7 +230,7 @@ def test_tmerc_ds_fp64_equivalent():
 
 
 def test_auto_precision_uses_fp64():
-    """Auto mode always uses fp64 (trig-dominated — SFU, not ALU bound)."""
+    """Auto retains fp64 arithmetic even when kernels use bounded strategies."""
     from vibeproj.gpu_detect import select_compute_precision
 
     assert select_compute_precision() == "fp64"

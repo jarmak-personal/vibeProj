@@ -311,11 +311,22 @@ class Transformer:
             return
 
         pipeline = self._pipeline
+        tmerc_mode = "auto"
+        if pipeline.mode == "forward" and pipeline.projection.name == "tmerc":
+            if not pipeline.computed.get("is_utm", False):
+                tmerc_mode = "fp64"
+        elif pipeline.mode == "proj_to_proj" and pipeline.dst_projection.name == "tmerc":
+            if not pipeline.dst_computed.get("is_utm", False):
+                tmerc_mode = "fp64"
         if pipeline.mode in ("forward", "inverse"):
-            compile_kernels([pipeline.projection.name], precision=precision)
+            compile_kernels(
+                [pipeline.projection.name],
+                precision=precision,
+                tmerc_mode=tmerc_mode,
+            )
         elif pipeline.mode == "proj_to_proj":
             names = [pipeline.src_projection.name, pipeline.dst_projection.name]
-            compile_kernels(names, precision=precision)
+            compile_kernels(names, precision=precision, tmerc_mode=tmerc_mode)
         if self._helmert is not None:
             from vibeproj.fused_kernels import compile_helmert_kernel
 
