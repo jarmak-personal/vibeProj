@@ -267,6 +267,24 @@ __device__ inline {real_t} phi_from_q(
 }}
 """
 
+# -- Ellipsoidal meridional-distance helpers (Sinusoidal and future users) --
+_MERIDIONAL_DEVICE_FNS = """
+__device__ inline {real_t} vp_meridional_arc(
+    {real_t} phi,
+    {real_t} c0, {real_t} c1, {real_t} c2, {real_t} c3,
+    {real_t} c4, {real_t} c5, {real_t} c6, {real_t} c7
+) {{
+    return c0 * phi
+        + c1 * sin(({real_t})2.0 * phi)
+        + c2 * sin(({real_t})4.0 * phi)
+        + c3 * sin(({real_t})6.0 * phi)
+        + c4 * sin(({real_t})8.0 * phi)
+        + c5 * sin(({real_t})10.0 * phi)
+        + c6 * sin(({real_t})12.0 * phi)
+        + c7 * sin(({real_t})14.0 * phi);
+}}
+"""
+
 # ===================================================================
 # Forward/inverse preamble/postamble macros (reduce repetition)
 # ===================================================================
@@ -381,30 +399,67 @@ _EQC_INVERSE_SOURCE = (
 # ===================================================================
 
 _SINU_FORWARD_SOURCE = (
-    _FWD_SIGNATURE.format(func="sinu_forward", real_t="{real_t}")
+    _MERIDIONAL_DEVICE_FNS
+    + _FWD_SIGNATURE.format(func="sinu_forward", real_t="{real_t}")
     + """
+    {real_t} es,
+    {real_t} c0, {real_t} c1, {real_t} c2, {real_t} c3,
+    {real_t} c4, {real_t} c5, {real_t} c6, {real_t} c7,
     {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
     int src_north_first, int dst_north_first, int n
 ) {{"""
     + _FWD_PREAMBLE
     + """
-    double easting  = (double)(lam * cos(phi)) * (double)a + (double)x0;
-    double northing = (double)phi * (double)a + (double)y0;
+    {real_t} cos_phi = cos(phi);
+    {real_t} x_proj = lam * cos_phi;
+    {real_t} y_proj = phi;
+    if (es != ({real_t})0.0) {{
+        {real_t} sin_phi = sin(phi);
+        x_proj /= sqrt(({real_t})1.0 - es * sin_phi * sin_phi);
+        y_proj = vp_meridional_arc(phi, c0, c1, c2, c3, c4, c5, c6, c7);
+    }}
+    double easting  = (double)x_proj * (double)a + (double)x0;
+    double northing = (double)y_proj * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
     + "}}"
 )
 
 _SINU_INVERSE_SOURCE = (
-    _INV_SIGNATURE.format(func="sinu_inverse", real_t="{real_t}")
+    _MERIDIONAL_DEVICE_FNS
+    + _INV_SIGNATURE.format(func="sinu_inverse", real_t="{real_t}")
     + """
+    {real_t} es,
+    {real_t} c0, {real_t} c1, {real_t} c2, {real_t} c3,
+    {real_t} c4, {real_t} c5, {real_t} c6, {real_t} c7,
     {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
     int src_north_first, int dst_north_first, int n
 ) {{"""
     + _INV_PREAMBLE
     + """
     {real_t} phi = cy;
-    {real_t} lam = cx / cos(phi);
+    {real_t} lam;
+    if (es == ({real_t})0.0) {{
+        lam = cx / cos(phi);
+    }} else {{
+        const {real_t} pole = c0 * ({real_t})0.5 * {pi};
+        const bool invalid = fabs(cy) > pole;
+        const {real_t} target = invalid ? ({real_t})0.0 : cy;
+        phi = fmin(fmax(target / c0, ({real_t})-0.5 * {pi}), ({real_t})0.5 * {pi});
+        for (int i = 0; i < 10; i++) {{
+            const {real_t} sin_phi = sin(phi);
+            const {real_t} one_minus = ({real_t})1.0 - es * sin_phi * sin_phi;
+            const {real_t} derivative = (({real_t})1.0 - es)
+                / (one_minus * sqrt(one_minus));
+            phi -= (vp_meridional_arc(phi, c0, c1, c2, c3, c4, c5, c6, c7) - target)
+                / derivative;
+        }}
+        const {real_t} sin_phi = sin(phi);
+        const {real_t} denominator = cos(phi)
+            / sqrt(({real_t})1.0 - es * sin_phi * sin_phi);
+        lam = cx / denominator;
+        if (invalid) {{ lam = phi = ({real_t})1.0 / ({real_t})0.0; }}
+    }}
 """
     + _INV_POSTAMBLE
     + "}}"
@@ -417,15 +472,19 @@ _SINU_INVERSE_SOURCE = (
 _MERC_FORWARD_SOURCE = (
     _FWD_SIGNATURE.format(func="merc_forward", real_t="{real_t}")
     + """
-    {real_t} e, {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
+    {real_t} e, {real_t} k0, {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
     int src_north_first, int dst_north_first, int n
 ) {{"""
     + _FWD_PREAMBLE
     + """
+    if (!isnan(phi)) {{
+        const {real_t} max_lat = ({real_t})1.5707788735023767;
+        phi = fmin(fmax(phi, -max_lat), max_lat);
+    }}
     {real_t} e_sin_phi = e * sin(phi);
-    {real_t} y_proj = log(tan(({real_t})0.25 * {pi} + ({real_t})0.5 * phi)
+    {real_t} y_proj = k0 * log(tan(({real_t})0.25 * {pi} + ({real_t})0.5 * phi)
                      * pow((({real_t})1.0 - e_sin_phi) / (({real_t})1.0 + e_sin_phi), ({real_t})0.5 * e));
-    double easting  = (double)lam * (double)a + (double)x0;
+    double easting  = (double)(k0 * lam) * (double)a + (double)x0;
     double northing = (double)y_proj * (double)a + (double)y0;
 """
     + _FWD_POSTAMBLE
@@ -435,12 +494,13 @@ _MERC_FORWARD_SOURCE = (
 _MERC_INVERSE_SOURCE = (
     _INV_SIGNATURE.format(func="merc_inverse", real_t="{real_t}")
     + """
-    {real_t} e, {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
+    {real_t} e, {real_t} k0, {real_t} lam0, {real_t} a, {real_t} x0, {real_t} y0,
     int src_north_first, int dst_north_first, int n
 ) {{"""
     + _INV_PREAMBLE
     + """
-    {real_t} lam = cx;
+    {real_t} lam = cx / k0;
+    cy /= k0;
     {real_t} phi = ({real_t})2.0 * atan(exp(cy)) - ({real_t})0.5 * {pi};
     for (int i = 0; i < 15; i++) {{
         {real_t} e_sin = e * sin(phi);
@@ -465,6 +525,10 @@ _WEBMERC_FORWARD_SOURCE = (
 ) {{"""
     + _FWD_PREAMBLE
     + """
+    if (!isnan(phi)) {{
+        const {real_t} max_lat = ({real_t})1.5707788735023767;
+        phi = fmin(fmax(phi, -max_lat), max_lat);
+    }}
     double easting  = (double)lam * (double)a + (double)x0;
     double northing = (double)log(tan(({real_t})0.25 * {pi} + ({real_t})0.5 * phi)) * (double)a + (double)y0;
 """
@@ -2888,8 +2952,18 @@ def fused_transform(
         return base + (*params, *unit_args, snf, dnf, nn)
 
     try:
-        if projection_name in ("webmerc", "sinu"):
+        if projection_name == "webmerc":
             args = _with_units(
+                real_t(computed["lam0"]),
+                real_t(computed["a"]),
+                real_t(computed["x0"]),
+                real_t(computed["y0"]),
+            )
+
+        elif projection_name == "sinu":
+            args = _with_units(
+                real_t(computed["es"]),
+                *(real_t(value) for value in computed["meridional_coefficients"]),
                 real_t(computed["lam0"]),
                 real_t(computed["a"]),
                 real_t(computed["x0"]),
@@ -2908,6 +2982,7 @@ def fused_transform(
         elif projection_name == "merc":
             args = _with_units(
                 real_t(computed["e"]),
+                real_t(computed["k0"]),
                 real_t(computed["lam0"]),
                 real_t(computed["a"]),
                 real_t(computed["x0"]),

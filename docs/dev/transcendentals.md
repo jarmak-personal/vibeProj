@@ -37,8 +37,8 @@ shared native pairing helper (or the equivalent double-single helper).
 |---|---|---|---|---|---|---|---|
 | `eqc` | forward | none | n/a | none | arithmetic only | none | T0 |
 | `eqc` | inverse | none | n/a | none | arithmetic only | none | T0 |
-| `sinu` | forward | `cos(phi)` | kernel-boundary `phi`: unknown; accelerated guard requires finite `|phi| <= pi/2`, wrapped `|lambda| <= pi`, and `0 < scale <= 6,400,000 m` | none | `native.libdevice`, or `sinu.forward.fixed_q62` | qualified guarded implementation; native otherwise | T2 |
-| `sinu` | inverse | `cos(phi)` | inverse `phi`: unknown | none | `native.libdevice` | native only | T3 |
+| `sinu` | forward | `cos(phi)` plus ellipsoidal meridional series | kernel-boundary `phi`: unknown; spherical accelerated guard requires finite `|phi| <= pi/2`, wrapped `|lambda| <= pi`, and `0 < scale <= 6,400,000 m`; all setup requires finite `0 < a <= 6,400,000 m`, and ellipsoidal setup additionally requires finite `0 < es <= 0.012` | none | `native.libdevice`, or spherical-only `sinu.forward.fixed_q62` | qualified guarded spherical implementation; supported ellipsoidal domains native; larger/more-eccentric custom bodies rejected during setup | T2 |
+| `sinu` | inverse | `cos(phi)` plus ellipsoidal meridional inverse | inverse `phi`: unknown; setup requires finite `0 < a <= 6,400,000 m` and `0 <= es <= 0.012` | none | `native.libdevice` | native only for supported ellipsoids; larger/more-eccentric custom bodies rejected during setup | T3 |
 | `merc` | forward | `sin`, `tan`, `pow`, `log` | `phi` and singular distance to poles: unknown | none | `native.libdevice` | native only | T3 |
 | `merc` | inverse | `exp`, `atan`, iterative `sin`/`pow` | normalized northing and exponent: unbounded | none | `native.libdevice` | native only | T3 |
 | `webmerc` | forward | `tan`, `log` | `phi` and singular distance to poles: unknown | none | `native.libdevice` | native only | T3 |
@@ -100,7 +100,7 @@ The user-facing coverage matrix is intentionally narrower than the inventory:
 | `native.libdevice` | `*` | forward/inverse/Helmert | all supported | universal fallback | 0 | all special math |
 | `helmert.fixed_q62` | `helmert` | datum shift | all public modes (Helmert kernel stays fp64) | Ada `sm_89`, weak-native-fp64 consumer class | 131,072 | `sin`, `cos`; `|angle| <= pi`, near-pole native guard |
 | `tmerc.forward.fixed_q62` | `tmerc` | forward UTM | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 256 | paired `sin`/`cos`, TM `atan2` correction, `asinh`; per-operation guards above |
-| `sinu.forward.fixed_q62` | `sinu` | forward | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 524,288 | Q1.62 `cos(phi)`; valid latitude/wrapped longitude and `0 < scale <= 6,400,000 m`, native otherwise |
+| `sinu.forward.fixed_q62` | `sinu` | spherical forward | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 524,288 | Q1.62 `cos(phi)`; valid latitude/wrapped longitude and `0 < scale <= 6,400,000 m`, native otherwise |
 | `ortho.forward.fixed_q62` | `ortho` | forward | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 262,144 | Q1.62 paired `sin`/`cos`; atomic argument guard and `0 < scale <= 6,400,000 m`, native otherwise |
 | `ortho.inverse.guarded_reframe` | `ortho` | inverse, spherical equatorial only | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 524,288 | guarded algebraic reframe for normalized `1e-16 < rho^2 <= 0.99`; center/near-center, axes, horizon/outside, non-finite, scale, and conditioning failures call the exact native expression |
 | `stere.inverse.fixed_q62` | `stere` | inverse, ellipsoidal A/B north/south and C south | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 1,000,000 | Q1.62 sine inside `phi2`; CRS setup proves positive `akm1` and sign, uniform `0.05 <= e <= 0.2` and `a <= 6,400,000 m` guards, per-angle native fallback |
@@ -295,8 +295,12 @@ CUDA-graph topology, threshold-boundary, and full-grid gate.
 | orthographic forward | 0.703488 / 0.520192 ms | 1.352x | 0.661692 / 0.493275 ms | 1.341x | 2.033 / 1.397 nm |
 
 Sinusoidal's initial 262,144 candidate threshold had one randomized wall repeat
-below 1.05x. The final 524,288 threshold passed at 1.069x, 1.065x, and 1.066x;
-`auto` remained native at 524,287. Orthographic passed at 262,144 with 1.204x,
+below 1.05x. After adding its exact ellipsoidal baseline, the spherical cos-only
+branch was formally requalified at 524,288 with 10 warm-ups, 30 iterations, and
+three repeats: `auto` wall speedups were 1.055536x, 1.057237x, and 1.055013x;
+`auto` remained native at 524,287. The accelerated kernel used 31 registers,
+40 bytes local memory, zero shared memory, and retained 100% occupancy.
+Orthographic passed at 262,144 with 1.204x,
 1.206x, and 1.194x wall speedups; `auto` remained native at 262,143. Every
 larger tested grid size through 5,000,000 passed all three repeats. Companion
 inverse paths remain `native.libdevice`.
@@ -306,6 +310,15 @@ dense proof measured 3.725290298 nm maximum error for sinusoidal and
 2.832507030 nm across orthographic origins `{-90, -45, 0, 45, 90}`. The exact
 ceiling and its nextafter-below value retain Q1.62; nextafter-above, `1e12`,
 zero, negative, infinity, and NaN scales execute bitwise-native uniformly.
+
+Ellipsoidal Sinusoidal uses a seventh-order meridional series only for finite
+`0 < es <= 0.012` and finite `0 < a <= 6,400,000 m`; setup rejects larger or
+malformed bodies before CPU/GPU dispatch. A 16,385-latitude dense PROJ comparison
+at the inclusive `es=0.012`, `a=6,400,000 m` boundary measured 5.588/2.945 nm forward maximum/p99
+coordinate error and 9.241/4.649 nm inverse physical maximum/p99 error.
+`nextafter(0.012, +inf)`, `nextafter(6,400,000 m, +inf)`, nonpositive or
+non-finite scale, negative/non-finite eccentricity squared, and representative
+large or high-eccentricity custom bodies raise `UnsupportedProjectionError`.
 
 ### Wave 2A Orthographic inverse qualification evidence
 

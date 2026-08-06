@@ -73,7 +73,7 @@ The initial accelerated coverage is deliberately small:
 | `native.libdevice` | Every fused family/direction and Helmert | CUDA native special math, including paired native `sincos` where implemented | All devices and CPU/no-GPU fallback | n/a |
 | `helmert.fixed_q62` | Helmert datum shift | Bounded sine/cosine only; ECEF, square root, and `atan2` remain native fp64 | Ada `sm_89` consumer GPUs | 131,072 |
 | `tmerc.forward.fixed_q62` | Forward UTM only | Bounded sine/cosine, the TM latitude correction, and bounded `asinh`; remaining math stays fp64 | Ada `sm_89` consumer GPUs | 256 |
-| `sinu.forward.fixed_q62` | Sinusoidal forward only | Guarded Q1.62 cosine; remaining arithmetic stays fp64 | Ada `sm_89` consumer GPUs | 524,288 |
+| `sinu.forward.fixed_q62` | Spherical Sinusoidal forward only | Guarded Q1.62 cosine; remaining arithmetic stays fp64 | Ada `sm_89` consumer GPUs | 524,288 |
 | `ortho.forward.fixed_q62` | Orthographic forward only | Atomically guarded Q1.62 sine/cosine pairs; remaining arithmetic stays fp64 | Ada `sm_89` consumer GPUs | 262,144 |
 | `ortho.inverse.guarded_reframe` | Spherical equatorial Orthographic inverse only (after CRS setup canonicalization) | Guarded algebraic reframe removes one `asin` and one `sincos`; ill-conditioned inputs use native fp64 | Ada `sm_89` consumer GPUs | 524,288 |
 | `stere.inverse.fixed_q62` | Polar Stereographic inverse, public ellipsoidal A/B north/south and C south modes | Q1.62 sine inside the conformal-latitude iteration; scale, eccentricity, and iterative-angle guard failures use native fp64 | Ada `sm_89` consumer GPUs | 1,000,000 |
@@ -119,7 +119,7 @@ against native policy. The current release gates are:
   error `2.3e-16 rad` over the full guard. (The tighter `6.9e-4` correction
   bound applies to normal UTM's `+/-3 degree` zone.) The complete projected
   result must differ from native by `< 1e-8 m`.
-- Sinusoidal forward: Q1.62 cosine is used only at physical scale
+- Spherical Sinusoidal forward: Q1.62 cosine is used only at physical scale
   `0 < scale <= 6,400,000 m`, for finite latitude in
   `[-pi/2, pi/2]` with wrapped longitude in `[-pi, pi]`. Other coordinates use
   native cosine. The complete projected result must differ from native by

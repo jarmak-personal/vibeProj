@@ -38,7 +38,7 @@ instruction sequences, which are expensive on consumer GPUs with weak fp64
 throughput.
 
 On validated Ada `sm_89` consumer GPUs, auto dispatch accelerates bounded
-Helmert, forward UTM, sinusoidal-forward, and orthographic-forward
+Helmert, forward UTM, spherical-sinusoidal-forward, and orthographic-forward
 transcendentals with table-free Q1.62 trig. Forward UTM also uses bounded
 fp64-accurate correction polynomials for `atan2` and `asinh`. Sinusoidal and
 orthographic remain fp64-only and use native math above the qualified

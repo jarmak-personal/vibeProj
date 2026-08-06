@@ -352,7 +352,7 @@ def test_resolver_uses_priority_then_rejects_equal_priority_overlap(monkeypatch)
         ),
         (
             TranscendentalOperation.PROJECTION,
-            "sinu.forward",
+            "sinu.forward.spherical",
             SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
             SINU_FORWARD_FIXED_Q62,
         ),
@@ -419,7 +419,11 @@ def test_auto_strategy_uses_exact_workload_crossover(operation, domain, threshol
     [
         (TranscendentalOperation.HELMERT, "global", HELMERT_FIXED_Q62),
         (TranscendentalOperation.TMERC_FORWARD, "utm", TMERC_FIXED_Q62),
-        (TranscendentalOperation.PROJECTION, "sinu.forward", SINU_FORWARD_FIXED_Q62),
+        (
+            TranscendentalOperation.PROJECTION,
+            "sinu.forward.spherical",
+            SINU_FORWARD_FIXED_Q62,
+        ),
         (TranscendentalOperation.PROJECTION, ORTHO_FORWARD_DOMAIN, ORTHO_FORWARD_FIXED_Q62),
         (
             TranscendentalOperation.PROJECTION,
@@ -477,7 +481,7 @@ def test_wave1_public_policy_precision_and_size_matrix(
     assert explanation.workload_size == workload_size
     assert len(explanation.decisions) == 1
     decision = explanation.decisions[0]
-    expected_domain = ORTHO_FORWARD_DOMAIN if projection == "ortho" else f"{projection}.forward"
+    expected_domain = ORTHO_FORWARD_DOMAIN if projection == "ortho" else "sinu.forward.spherical"
     assert decision.domain == expected_domain
     assert decision.implementation_id == (accelerated_id if accelerated else NATIVE_LIBDEVICE)
     assert decision.fallback is (policy == "accelerated" and not accelerated)
@@ -487,16 +491,21 @@ def test_wave1_public_policy_precision_and_size_matrix(
 @pytest.mark.parametrize(
     ("domain", "device", "precision", "reason"),
     [
-        ("sinu.inverse", ADA, "fp64", "domain 'sinu.inverse' is not accuracy-qualified"),
+        (
+            "sinu.inverse.ellipsoidal",
+            ADA,
+            "fp64",
+            "domain 'sinu.inverse.ellipsoidal' is not accuracy-qualified",
+        ),
         (
             "ortho.inverse.spherical.oblique",
             ADA,
             "fp64",
             "domain 'ortho.inverse.spherical.oblique' is not accuracy-qualified",
         ),
-        ("sinu.forward", CPU, "fp64", "cpu backend"),
+        ("sinu.forward.spherical", CPU, "fp64", "cpu backend"),
         (ORTHO_FORWARD_DOMAIN, HOPPER, "fp64", "compute capability"),
-        ("sinu.forward", WEAK_ADA, "fp64", "fp32:fp64 ratio"),
+        ("sinu.forward.spherical", WEAK_ADA, "fp64", "fp32:fp64 ratio"),
         (ORTHO_FORWARD_DOMAIN, ADA, "fp32", "compute precision 'fp32'"),
         (ORTHO_FORWARD_DOMAIN, ADA, "ds", "compute precision 'ds'"),
     ],
@@ -568,10 +577,10 @@ def test_non_tmerc_accelerated_request_is_observable_native_fallback():
     assert len(explanation.decisions) == 1
     decision = explanation.decisions[0]
     assert decision.operation is TranscendentalOperation.PROJECTION
-    assert decision.domain == "webmerc.forward"
+    assert decision.domain == "webmerc.forward.spherical.pseudo"
     assert decision.implementation_id == NATIVE_LIBDEVICE
     assert decision.fallback is True
-    assert "domain 'webmerc.forward' is not accuracy-qualified" in decision.reason
+    assert "domain 'webmerc.forward.spherical.pseudo' is not accuracy-qualified" in decision.reason
 
 
 def test_utm_explanation_resolves_by_policy_without_array_materialization():
@@ -588,7 +597,7 @@ def test_proj_to_proj_inverse_explanation_includes_each_projection_stage():
         transcendentals="accelerated", direction="INVERSE", device=ADA
     )
     assert [decision.domain for decision in explanation.decisions] == [
-        "webmerc.inverse",
+        "webmerc.inverse.spherical.pseudo",
         "utm",
     ]
     assert explanation.decisions[0].fallback is True

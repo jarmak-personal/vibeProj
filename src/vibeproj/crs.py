@@ -321,7 +321,15 @@ def resolve_projection_params(crs: CRS) -> ProjectionParams:
             ),
         ),
     )
-    lat_1 = _get_param(pl, "Latitude of 1st standard parallel", 0.0)
+    lat_1 = _get_param(
+        pl,
+        "Latitude of 1st standard parallel",
+        _get_param(
+            pl,
+            "Latitude of standard parallel",
+            _get_param(pl, "Latitude of true scale", 0.0),
+        ),
+    )
     lat_2 = _get_param(pl, "Latitude of 2nd standard parallel", 0.0)
     k_0 = _get_param(
         pl,
@@ -336,6 +344,12 @@ def resolve_projection_params(crs: CRS) -> ProjectionParams:
             ),
         ),
     )
+    if proj_name == "merc" and method_name in ("Mercator (variant B)", "Mercator (2SP)"):
+        latitude_standard_parallel = math.radians(lat_1)
+        sin_latitude = math.sin(latitude_standard_parallel)
+        k_0 = math.cos(latitude_standard_parallel) / math.sqrt(
+            1.0 - ellipsoid.es * sin_latitude * sin_latitude
+        )
     x_0 = _get_linear_param(
         pl,
         "False easting",

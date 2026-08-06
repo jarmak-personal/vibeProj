@@ -73,6 +73,18 @@ pipe = TransformPipeline(src, params)
 x, y = pipe.transform(lat_array, lon_array, np)  # or cp for GPU
 ```
 
+Sinusoidal supports both explicit spherical definitions and ellipsoidal CRS
+definitions such as `ESRI:54008`; the ellipsoidal path uses meridional distance
+and the ellipsoidal prime-vertical radius in both CPU and fused CUDA execution.
+The seventh-order meridional series is supported for finite eccentricity squared
+in the inclusive range `0 <= es <= 0.012` and finite positive semi-major axes
+no larger than `6,400,000 m`. This covers terrestrial Earth and Mars ellipsoids.
+More eccentric or larger custom bodies raise `UnsupportedProjectionError`
+during projection setup instead of returning an unqualified approximation.
+Mercator honors the declared scale factor for variant A and derives the scale
+at the natural origin from the standard parallel for variant B (for example,
+EPSG:3994 and EPSG:3388).
+
 Spherical Azimuthal Equidistant is available with an explicit radius, for
 example `+proj=aeqd +lat_0=45 +lon_0=0 +R=6378137 +type=crs`. Ellipsoidal
 Azimuthal Equidistant, Modified Azimuthal Equidistant, and Guam Projection are

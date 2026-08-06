@@ -102,7 +102,7 @@ print(t.explain_strategy(transcendentals="accelerated"))
 `transcendentals="accelerated"` uses an accuracy-qualified implementation when
 the transform and GPU are supported, and explicitly falls back to native math
 otherwise. Automatic acceleration currently covers bounded Helmert, forward
-UTM, sinusoidal-forward, orthographic-forward, and spherical-equatorial
+UTM, spherical-sinusoidal-forward, orthographic-forward, and spherical-equatorial
 orthographic-inverse, GEOS-forward (sphere/ellipsoid and sweep x/y), and
 spherical-polar LAEA-forward, and ellipsoidal Polar Stereographic inverse
 operations on validated Ada `sm_89` consumer GPUs

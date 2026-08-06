@@ -36,7 +36,9 @@ STERE_INVERSE_FIXED_Q62_MIN_ELEMENTS = 1_000_000
 GEOS_FORWARD_FIXED_Q62_MIN_ELEMENTS = 2_097_152
 LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS = 1_048_576
 
-_EXACT_DOMAIN_FAMILIES = frozenset({"aeqd", "geos", "laea", "ortho", "stere", "sterea"})
+_EXACT_DOMAIN_FAMILIES = frozenset(
+    {"aeqd", "geos", "laea", "merc", "ortho", "sinu", "stere", "sterea", "webmerc"}
+)
 
 
 def attach_projection_strategy_metadata(
@@ -75,6 +77,19 @@ def projection_strategy_domain(projection: str, direction: str, computed: dict) 
 
     geometry = str(computed.get("_strategy_geometry", "unspecified"))
     method = computed.get("_strategy_operation_method")
+    if projection == "sinu":
+        return f"sinu.{direction}.{geometry}"
+    if projection == "merc":
+        variants = {
+            "Mercator (variant A)": "variant_a",
+            "Mercator (1SP)": "variant_a",
+            "Mercator (variant B)": "variant_b",
+            "Mercator (2SP)": "variant_b",
+        }
+        variant = variants.get(method, "custom")
+        return f"merc.{direction}.{geometry}.{variant}"
+    if projection == "webmerc":
+        return f"webmerc.{direction}.{geometry}.pseudo"
     if projection == "laea":
         mode = str(computed.get("mode", _origin_mode(computed)))
         return f"laea.{direction}.{geometry}.{mode}"
@@ -280,13 +295,13 @@ _REGISTRY = (
         min_fp32_to_fp64_ratio=16,
         supported_compute_precisions=("auto", "fp64"),
         min_elements=SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
-        domains=("sinu.forward",),
+        domains=("sinu.forward.spherical",),
         accuracy=AccuracyContract(
             reference=NATIVE_LIBDEVICE,
             max_horizontal_error_m=1e-8,
             max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
             notes=(
-                "Qualified sinusoidal-forward Q1.62 cosine over finite latitude "
+                "Qualified spherical sinusoidal-forward Q1.62 cosine over finite latitude "
                 "[-pi/2, pi/2] and wrapped longitude [-pi, pi], with native fallback "
                 "outside the guarded domain or above 6,400,000 m physical scale. "
                 "Final public WGS84 maximum/p99 horizontal error: 3.725/1.863 nm."

@@ -28,11 +28,20 @@ class Mercator(Projection):
 
     def setup(self, params: ProjectionParams) -> dict:
         e = params.ellipsoid
+        variant = _mercator_variant(params.operation_method)
+        k0 = params.k_0
+        if variant == "variant_b":
+            latitude_standard_parallel = math.radians(params.lat_1)
+            sin_latitude = math.sin(latitude_standard_parallel)
+            k0 = math.cos(latitude_standard_parallel) / math.sqrt(
+                1.0 - e.es * sin_latitude * sin_latitude
+            )
         return {
             "a": e.a,
             "e": e.e,
             "es": e.es,
-            "k0": params.k_0,
+            "k0": k0,
+            "mercator_variant": variant,
             "lam0": math.radians(params.lon_0),
             "x0": params.x_0,
             "y0": params.y_0,
@@ -49,15 +58,16 @@ class Mercator(Projection):
                 stacklevel=2,
             )
         phi = xp.clip(phi, -_MAX_LAT_RAD, _MAX_LAT_RAD)
+        k0 = computed["k0"]
         if e == 0:
             # Spherical case
-            x = lam
-            y = xp.log(xp.tan(math.pi / 4.0 + phi * 0.5))
+            x = k0 * lam
+            y = k0 * xp.log(xp.tan(math.pi / 4.0 + phi * 0.5))
         else:
             # Ellipsoidal Mercator
             e_sin_phi = e * xp.sin(phi)
-            x = lam
-            y = xp.log(
+            x = k0 * lam
+            y = k0 * xp.log(
                 xp.tan(math.pi / 4.0 + phi * 0.5)
                 * ((1.0 - e_sin_phi) / (1.0 + e_sin_phi)) ** (e / 2.0)
             )
@@ -65,7 +75,9 @@ class Mercator(Projection):
 
     def inverse(self, x, y, params, computed, xp):
         e = computed["e"]
-        lam = x
+        k0 = computed["k0"]
+        lam = x / k0
+        y = y / k0
         if e == 0:
             phi = 2.0 * xp.arctan(xp.exp(y)) - math.pi / 2.0
         else:
@@ -79,6 +91,16 @@ class Mercator(Projection):
                     - math.pi / 2.0
                 )
         return lam, phi
+
+
+def _mercator_variant(operation_method: str | None) -> str:
+    variants = {
+        "Mercator (variant A)": "variant_a",
+        "Mercator (1SP)": "variant_a",
+        "Mercator (variant B)": "variant_b",
+        "Mercator (2SP)": "variant_b",
+    }
+    return variants.get(operation_method, "custom")
 
 
 class WebMercator(Projection):

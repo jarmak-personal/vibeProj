@@ -131,7 +131,7 @@ QUALIFICATION_SPECS = {
     "sinu-forward": QualificationSpec(
         implementation_id=SINU_FORWARD_FIXED_Q62,
         operation="projection",
-        domain="sinu.forward",
+        domain="sinu.forward.spherical",
         direction="forward",
         min_elements=SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
         coordinate_contract_m=1e-8,

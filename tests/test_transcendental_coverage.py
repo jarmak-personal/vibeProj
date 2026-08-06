@@ -106,7 +106,7 @@ EXPECTED_REGISTRY_MATRIX = frozenset(
         (
             SINU_FORWARD_FIXED_Q62,
             TranscendentalOperation.PROJECTION,
-            ("sinu.forward",),
+            ("sinu.forward.spherical",),
             ((8, 9),),
             ("auto", "fp64"),
             SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
@@ -215,9 +215,12 @@ def _context(family: str, direction: str) -> tuple[TranscendentalOperation, str]
         "aeqd": "spherical.oblique",
         "geos": "ellipsoidal.sweep_y",
         "laea": "ellipsoidal.oblique",
+        "merc": "ellipsoidal.variant_a",
         "ortho": "spherical.oblique",
+        "sinu": "spherical",
         "stere": "ellipsoidal.variant_b.north",
         "sterea": "ellipsoidal.oblique",
+        "webmerc": "spherical.pseudo",
     }.get(family)
     if representative is not None:
         return (
@@ -421,7 +424,7 @@ def test_resolver_reuses_decisions_but_keys_cache_by_complete_device_context():
         ),
         (
             TranscendentalOperation.PROJECTION,
-            "sinu.forward",
+            "sinu.forward.spherical",
             SINU_FORWARD_FIXED_Q62,
             SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
         ),
@@ -596,16 +599,31 @@ def test_ada_qualified_helmert_resolves_accelerated(policy):
         (TranscendentalOperation.TMERC_FORWARD, "utm", "fp64", CPU),
         (TranscendentalOperation.TMERC_FORWARD, "global", "fp64", ADA_4090),
         (TranscendentalOperation.TMERC_FORWARD, "utm", "fp32", ADA_4090),
-        (TranscendentalOperation.PROJECTION, "sinu.inverse", "fp64", ADA_4090),
+        (
+            TranscendentalOperation.PROJECTION,
+            "sinu.inverse.ellipsoidal",
+            "fp64",
+            ADA_4090,
+        ),
         (
             TranscendentalOperation.PROJECTION,
             "ortho.inverse.spherical.oblique",
             "fp64",
             ADA_4090,
         ),
-        (TranscendentalOperation.PROJECTION, "sinu.forward", "fp32", ADA_4090),
+        (
+            TranscendentalOperation.PROJECTION,
+            "sinu.forward.spherical",
+            "fp32",
+            ADA_4090,
+        ),
         (TranscendentalOperation.PROJECTION, ORTHO_FORWARD_DOMAIN, "ds", ADA_4090),
-        (TranscendentalOperation.PROJECTION, "sinu.forward", "fp64", HOPPER_H100),
+        (
+            TranscendentalOperation.PROJECTION,
+            "sinu.forward.spherical",
+            "fp64",
+            HOPPER_H100,
+        ),
         (TranscendentalOperation.PROJECTION, ORTHO_FORWARD_DOMAIN, "fp64", CPU),
     ],
 )
@@ -804,6 +822,7 @@ def test_wave1_benchmark_specs_enforce_complete_public_qualification_surface():
         assert specification.operation == TranscendentalOperation.PROJECTION.value
         expected_domain = {
             "ortho-forward": ORTHO_FORWARD_DOMAIN,
+            "sinu-forward": "sinu.forward.spherical",
         }.get(case_name, f"{case_name.removesuffix('-forward')}.forward")
         assert specification.domain == expected_domain
         assert specification.direction == "forward"
