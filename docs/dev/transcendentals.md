@@ -38,7 +38,7 @@ shared native pairing helper (or the equivalent double-single helper).
 | `eqc` | forward | none | n/a | none | arithmetic only | none | T0 |
 | `eqc` | inverse | none | n/a | none | arithmetic only | none | T0 |
 | `sinu` | forward | `cos(phi)` plus ellipsoidal meridional series | kernel-boundary `phi`: unknown; spherical accelerated guard requires finite `|phi| <= pi/2`, wrapped `|lambda| <= pi`, and `0 < scale <= 6,400,000 m`; all setup requires finite `0 < a <= 6,400,000 m`, and ellipsoidal setup additionally requires finite `0 < es <= 0.012` | none | `native.libdevice`, or spherical-only `sinu.forward.fixed_q62` | qualified guarded spherical implementation; supported ellipsoidal domains native; larger/more-eccentric custom bodies rejected during setup | T2 |
-| `sinu` | inverse | `cos(phi)` plus ellipsoidal meridional inverse | inverse `phi`: unknown; setup requires finite `0 < a <= 6,400,000 m` and `0 <= es <= 0.012` | none | `native.libdevice` | native only for supported ellipsoids; larger/more-eccentric custom bodies rejected during setup | T3 |
+| `sinu` | inverse | `cos(phi)` plus ellipsoidal meridional inverse | qualified ellipsoidal setup requires eight finite coefficients with `c0>0`, finite nonzero signed units, `0<es<=0.012`, and `0<a<=6,400,000 m`; explicit recurrence additionally requires finite raw/normalized coordinates, `|cy|<=M(89.9°)`, recovered `|phi|<=89.9°`, positive finite denominator, and `|lambda|<=pi` | final paired `sin`/`cos` in recurrence variant | `native.libdevice`, automatic `sinu.inverse.convergent_newton`, or explicit `sinu.inverse.meridional_recurrence` | convergence break preserves the complete native coordinate domain; recurrence guard failure is complete-warp exact native | T2 |
 | `merc` | forward | `sin`, `tan`, `pow`, `log` | spherical automatic path requires `e=0`; ellipsoidal explicit path requires `0<e<=0.1` and hot `|phi|<=89.9 degrees`; both require finite raw/derived coordinates, nonzero units, `0<k0<=1`, and `0<a<=6,400,000 m` | none | `native.libdevice`, `merc.forward.spherical.product_poly`, or explicit-only `merc.forward.ellipsoidal.product_poly` | spherical zero-exponent `pow` removal is exact; ellipsoidal product polynomial has complete-warp exact native fallback | T2 |
 | `merc` | inverse | `exp`, `atan`, iterative `sin`/`pow` | accelerated setup requires finite nonzero units, `0 <= e <= 0.1`, finite `k0 > 0`, and `0 < a <= 6,400,000 m`; raw and normalized coordinates, longitude, and series coefficients finite | none | `native.libdevice`, or `merc.inverse.exp_series` in spherical/ellipsoidal A/B domains | shared sixth-order conformal-to-geodetic series; complete-warp exact native fallback | T2 |
 | `webmerc` | forward | `tan`, `log` | `phi` and singular distance to poles: unknown | none | `native.libdevice` | native only | T3 |
@@ -101,6 +101,8 @@ The user-facing coverage matrix is intentionally narrower than the inventory:
 | `helmert.fixed_q62` | `helmert` | datum shift | all public modes (Helmert kernel stays fp64) | Ada `sm_89`, weak-native-fp64 consumer class | 131,072 | `sin`, `cos`; `|angle| <= pi`, near-pole native guard |
 | `tmerc.forward.fixed_q62` | `tmerc` | forward UTM | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 256 | paired `sin`/`cos`, TM `atan2` correction, `asinh`; per-operation guards above |
 | `sinu.forward.fixed_q62` | `sinu` | spherical forward | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 524,288 | Q1.62 `cos(phi)`; valid latitude/wrapped longitude and `0 < scale <= 6,400,000 m`, native otherwise |
+| `sinu.inverse.convergent_newton` | `sinu` | ellipsoidal inverse | fp64 | Ada `sm_89`, weak-native-fp64 consumer class; `auto` only | 1 | native meridional/derivative expressions and ten-step cap with `fabs(delta)<1e-14` convergence termination; full native coordinate and sentinel domain |
+| `sinu.inverse.meridional_recurrence` | `sinu` | ellipsoidal inverse hot domain | fp64 | Ada `sm_89`, weak-native-fp64 consumer class; explicit `accelerated` only | n/a | two `sincos(2phi)` recurrence steps, one native-shaped correction, final paired `sincos`; exact setup and ±89.9°/wrapped-longitude complete-warp guards |
 | `ortho.forward.fixed_q62` | `ortho` | forward | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 262,144 | Q1.62 paired `sin`/`cos`; atomic argument guard and `0 < scale <= 6,400,000 m`, native otherwise |
 | `ortho.inverse.guarded_reframe` | `ortho` | inverse, spherical equatorial only | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 524,288 | guarded algebraic reframe for normalized `1e-16 < rho^2 <= 0.99`; center/near-center, axes, horizon/outside, non-finite, scale, and conditioning failures call the exact native expression |
 | `gnom.inverse.guarded_rsqrt_reframe` | `gnom` | inverse, spherical equatorial/bounded-oblique only | fp64 | Ada `sm_89`, weak-native-fp64 consumer class; explicit `accelerated` only | n/a | guarded reciprocal-square-root reframe for `1e-24 < rho^2 <= 0.02`; `auto` is intentionally native because a random 10% cold mixture regresses to about 0.92x, while hot-only explicit workloads measure about 1.31-1.47x |
@@ -520,6 +522,63 @@ flock /tmp/vibeproj-wave3-gpu.lock -c 'uv run python \
   --oracle-n 100000 --precision fp64 --seed 42 --enforce-gates \
   --json /tmp/wave3c_lcc_public_qualification.json'
 ```
+
+### Wave 3D ellipsoidal Sinusoidal inverse evidence
+
+Wave 3D assigns two implementations to the same exact ellipsoidal inverse setup
+domain through disjoint policies. `auto` selects
+`sinu.inverse.convergent_newton`, which leaves every native meridional arc,
+derivative, final longitude, invalid-image, pole, and non-finite expression in
+place and adds only a break after an applied Newton correction falls below
+`1e-14`. Because it has no coordinate guard, it covers the complete native
+inverse image. The exact automatic threshold is one coordinate: public 3x30
+screens at N=1 passed for WGS84 and the closed `es=.012`, `a=6,400,000 m`
+boundary, with N=2 retained as adjacent confirmation.
+
+Explicit `accelerated` selects `sinu.inverse.meridional_recurrence`. Its first
+two Newton steps evaluate the seven meridional harmonics from one
+`sincos(2*phi)` call and a sine recurrence; one direct native-shaped correction
+then restores the production meridional expression, followed by paired final
+`sincos`. The pre-recurrence warp vote requires finite raw/normalized values and
+`|cy|<=M(89.9 degrees)`. A second vote requires recovered
+`|phi|<=89.9 degrees`, a positive finite longitude denominator, and wrapped
+`|lambda|<=pi`. Failure at either vote sends the complete warp through an
+outlined copy of the exact native ellipsoidal inverse.
+
+On the RTX 4090, the final public qualification covered both WGS84 and the exact
+`es=.012`, `a=6,400,000 m` boundary. At five million coordinates, the automatic
+kernel measured 3.026x wall / 3.034x device speedup in both domains. The
+recurrence hybrid measured 4.621x wall / 4.643x device on WGS84 and 4.623x /
+4.644x at the boundary. At the exact N=1 endpoint, the minimum wall repeats
+across both domains were 1.6435x and 1.8215x respectively. Qualification also
+included 0%, 0.1%, 1%, 10%, 50%, and 100% randomized
+pole/non-finite/off-image mixtures; finite classes matched, and the formal
+suite's maximum/p99 native-relative horizontal error was 6.583/0 nm. The exact
+boundary maximum was 6.582903846 nm. In the WGS84 fallback sweep, random 10%
+cold and all-cold recurrence workloads had median wall speedups of only 1.0238x
+and 1.0032x, below the automatic 1.05 contract; these retained negative results
+are why only explicit callers can select the recurrence ID.
+
+Both kernels compile to 38 registers and zero shared memory on the qualification
+toolchain. The automatic kernel uses 40 bytes of local memory and the recurrence
+kernel 56 bytes. Native source and ABI remain byte-for-byte unchanged. The
+automatic accelerated ABI matches native; only the recurrence source adds its
+setup-derived `M(89.9 degrees)` scalar. Both remain one fused kernel launch with
+preallocated-buffer, independent-stream, allocation, and CUDA-graph residency
+coverage.
+
+Replay the scoped public qualification with:
+
+```console
+flock /tmp/vibeproj-wave3-gpu.lock -c 'uv run python \
+  benchmarks/bench_transcendental_policy.py --case sinu-inverse --n 5000000 \
+  --workload-sizes 1,2,5000000 --warmup 10 --iterations 30 --repeats 3 \
+  --oracle-n 100000 --precision fp64 --seed 42 --enforce-gates \
+  --json /tmp/wave3d_sinu_inverse_public_qualification.json'
+```
+
+The final formal artifact has SHA-256
+`62e9db49f7a3fcac9f99a1aa6c64861f0ebd27eba5d2552bdd7d204368c82937`.
 
 ### Go/no-go gates
 

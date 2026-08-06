@@ -21,6 +21,8 @@ NATIVE_LIBDEVICE = "native.libdevice"
 HELMERT_FIXED_Q62 = "helmert.fixed_q62"
 TMERC_FIXED_Q62 = "tmerc.forward.fixed_q62"
 SINU_FORWARD_FIXED_Q62 = "sinu.forward.fixed_q62"
+SINU_INVERSE_CONVERGENT_NEWTON = "sinu.inverse.convergent_newton"
+SINU_INVERSE_MERIDIONAL_RECURRENCE = "sinu.inverse.meridional_recurrence"
 ORTHO_FORWARD_FIXED_Q62 = "ortho.forward.fixed_q62"
 ORTHO_INVERSE_GUARDED_REFRAME = "ortho.inverse.guarded_reframe"
 GNOM_INVERSE_GUARDED_RSQRT_REFRAME = "gnom.inverse.guarded_rsqrt_reframe"
@@ -36,6 +38,7 @@ PROJECTION_FIXED_Q62_MAX_SCALE_M = 6_400_000.0
 TMERC_FIXED_Q62_MIN_ELEMENTS = 256
 HELMERT_FIXED_Q62_MIN_ELEMENTS = 131_072
 SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS = 524_288
+SINU_INVERSE_CONVERGENT_NEWTON_MIN_ELEMENTS = 1
 ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS = 262_144
 ORTHO_INVERSE_GUARDED_REFRAME_MIN_ELEMENTS = 524_288
 STERE_INVERSE_FIXED_Q62_MIN_ELEMENTS = 1_000_000
@@ -100,6 +103,34 @@ def projection_strategy_domain(projection: str, direction: str, computed: dict) 
     geometry = str(computed.get("_strategy_geometry", "unspecified"))
     method = computed.get("_strategy_operation_method")
     if projection == "sinu":
+        if direction == "inverse" and geometry == "ellipsoidal":
+            coefficients = computed.get("meridional_coefficients", ())
+            setup_names = (
+                "es",
+                "lam0",
+                "a",
+                "x0",
+                "y0",
+                "x_unit_to_m",
+                "y_unit_to_m",
+            )
+            setup = tuple(computed.get(name) for name in setup_names)
+            setup_finite = all(value is not None and math.isfinite(float(value)) for value in setup)
+            coefficients_finite = (
+                isinstance(coefficients, (tuple, list))
+                and len(coefficients) == 8
+                and all(math.isfinite(float(value)) for value in coefficients)
+            )
+            if not (
+                setup_finite
+                and coefficients_finite
+                and 0.0 < float(computed["es"]) <= 0.012
+                and float(coefficients[0]) > 0.0
+                and 0.0 < float(computed["a"]) <= PROJECTION_FIXED_Q62_MAX_SCALE_M
+                and float(computed["x_unit_to_m"]) != 0.0
+                and float(computed["y_unit_to_m"]) != 0.0
+            ):
+                return "sinu.inverse.ellipsoidal.invalid_setup"
         return f"sinu.{direction}.{geometry}"
     if projection == "merc":
         variants = {
@@ -212,6 +243,12 @@ def projection_strategy_domains(projection: str, direction: str) -> tuple[str, .
             else ("equatorial", "north_pole", "oblique", "south_pole")
         )
         return tuple(f"gnom.{direction}.spherical.{mode}" for mode in modes)
+    if projection == "sinu" and direction == "inverse":
+        return (
+            "sinu.inverse.ellipsoidal",
+            "sinu.inverse.ellipsoidal.invalid_setup",
+            "sinu.inverse.spherical",
+        )
     if projection == "lcc":
         domains = []
         for geometry in ("spherical", "ellipsoidal"):
@@ -409,6 +446,60 @@ _REGISTRY = (
                 "[-pi/2, pi/2] and wrapped longitude [-pi, pi], with native fallback "
                 "outside the guarded domain or above 6,400,000 m physical scale. "
                 "Final public WGS84 maximum/p99 horizontal error: 3.725/1.863 nm."
+            ),
+        ),
+        native_fallback=True,
+    ),
+    StrategyImplementation(
+        implementation_id=SINU_INVERSE_CONVERGENT_NEWTON,
+        operation=TranscendentalOperation.PROJECTION,
+        family="qualified_sinu_inverse_convergent_newton",
+        supported_policies=("auto",),
+        supported_backends=("cuda",),
+        supported_compute_capabilities=((8, 9),),
+        min_fp32_to_fp64_ratio=16,
+        supported_compute_precisions=("auto", "fp64"),
+        min_elements=SINU_INVERSE_CONVERGENT_NEWTON_MIN_ELEMENTS,
+        domains=("sinu.inverse.ellipsoidal",),
+        accuracy=AccuracyContract(
+            reference=NATIVE_LIBDEVICE,
+            max_horizontal_error_m=1e-8,
+            max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+            notes=(
+                "Ellipsoidal Sinusoidal inverse retains the native meridional arc, "
+                "derivative, ten-step cap, sentinel behavior, and final longitude "
+                "expression, but stops when the just-applied Newton correction is "
+                "below 1e-14. It is the automatic full-coordinate-domain strategy "
+                "for finite setup with 0<es<=0.012 and 0<a<=6,400,000 m. RTX 4090 "
+                "research maximum/p99 native-relative horizontal error: 5.710/0 nm."
+            ),
+        ),
+        native_fallback=False,
+    ),
+    StrategyImplementation(
+        implementation_id=SINU_INVERSE_MERIDIONAL_RECURRENCE,
+        operation=TranscendentalOperation.PROJECTION,
+        family="qualified_sinu_inverse_meridional_recurrence",
+        supported_policies=("accelerated",),
+        supported_backends=("cuda",),
+        supported_compute_capabilities=((8, 9),),
+        min_fp32_to_fp64_ratio=16,
+        supported_compute_precisions=("auto", "fp64"),
+        min_elements=0,
+        domains=("sinu.inverse.ellipsoidal",),
+        accuracy=AccuracyContract(
+            reference=NATIVE_LIBDEVICE,
+            max_horizontal_error_m=1e-8,
+            max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+            notes=(
+                "Expert hot-workload Sinusoidal inverse: two Newton steps evaluate "
+                "all seven meridional harmonics from one sincos(2*phi) recurrence, "
+                "followed by one native-shaped correction and final paired sincos. "
+                "Finite coordinates recovered within +/-89.9 degrees and wrapped "
+                "longitude are qualified; one cold lane sends the complete warp "
+                "through the exact native expression. Explicit accelerated only: "
+                "a random 10% cold mixture reaches about 1.023x and misses the AUTO "
+                "1.05 gate. RTX 4090 hot maximum/p99 error: 5.710/0 nm."
             ),
         ),
         native_fallback=True,
@@ -1189,6 +1280,9 @@ __all__ = [
     "ProjectionImplementation",
     "SINU_FORWARD_FIXED_Q62",
     "SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS",
+    "SINU_INVERSE_CONVERGENT_NEWTON",
+    "SINU_INVERSE_CONVERGENT_NEWTON_MIN_ELEMENTS",
+    "SINU_INVERSE_MERIDIONAL_RECURRENCE",
     "STERE_INVERSE_FIXED_Q62",
     "STERE_INVERSE_FIXED_Q62_MIN_ELEMENTS",
     "StrategyDecision",

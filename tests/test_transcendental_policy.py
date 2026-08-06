@@ -34,6 +34,9 @@ from vibeproj.transcendentals import (
     ORTHO_INVERSE_GUARDED_REFRAME_MIN_ELEMENTS,
     SINU_FORWARD_FIXED_Q62,
     SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+    SINU_INVERSE_CONVERGENT_NEWTON,
+    SINU_INVERSE_CONVERGENT_NEWTON_MIN_ELEMENTS,
+    SINU_INVERSE_MERIDIONAL_RECURRENCE,
     STERE_INVERSE_FIXED_Q62,
     TMERC_FIXED_Q62,
     TMERC_FIXED_Q62_MIN_ELEMENTS,
@@ -41,6 +44,7 @@ from vibeproj.transcendentals import (
     _resolve_transcendental_strategy_cached,
     list_transcendental_strategies,
     projection_strategy_domain,
+    projection_strategy_domains,
     resolve_transcendental_strategy,
 )
 
@@ -134,6 +138,8 @@ def test_registry_is_immutable_and_contains_stable_ids():
         ORTHO_FORWARD_FIXED_Q62,
         ORTHO_INVERSE_GUARDED_REFRAME,
         SINU_FORWARD_FIXED_Q62,
+        SINU_INVERSE_CONVERGENT_NEWTON,
+        SINU_INVERSE_MERIDIONAL_RECURRENCE,
         STERE_INVERSE_FIXED_Q62,
         TMERC_FIXED_Q62,
     }
@@ -283,6 +289,111 @@ def test_resolver_filters_disjoint_hardware_candidates_before_ambiguity(monkeypa
             assert at.implementation_id == variant.implementation_id
     finally:
         _resolve_transcendental_strategy_cached.cache_clear()
+
+
+def test_sinu_inverse_disjoint_policies_select_distinct_exact_implementations():
+    domain = "sinu.inverse.ellipsoidal"
+    below = resolve_transcendental_strategy(
+        TranscendentalOperation.PROJECTION,
+        "auto",
+        device=ADA,
+        domain=domain,
+        workload_size=0,
+    )
+    automatic = resolve_transcendental_strategy(
+        TranscendentalOperation.PROJECTION,
+        "auto",
+        device=ADA,
+        domain=domain,
+        workload_size=SINU_INVERSE_CONVERGENT_NEWTON_MIN_ELEMENTS,
+    )
+    explicit = resolve_transcendental_strategy(
+        TranscendentalOperation.PROJECTION,
+        "accelerated",
+        device=ADA,
+        domain=domain,
+        workload_size=1,
+    )
+
+    assert below.implementation_id == NATIVE_LIBDEVICE
+    assert automatic.implementation_id == SINU_INVERSE_CONVERGENT_NEWTON
+    assert explicit.implementation_id == SINU_INVERSE_MERIDIONAL_RECURRENCE
+    assert automatic.family != explicit.family
+
+
+def test_sinu_inverse_warmup_domains_include_native_exact_domains():
+    assert projection_strategy_domains("sinu", "inverse") == (
+        "sinu.inverse.ellipsoidal",
+        "sinu.inverse.ellipsoidal.invalid_setup",
+        "sinu.inverse.spherical",
+    )
+    for domain in (
+        "sinu.inverse.ellipsoidal.invalid_setup",
+        "sinu.inverse.spherical",
+    ):
+        for policy in ("auto", "accelerated"):
+            decision = resolve_transcendental_strategy(
+                TranscendentalOperation.PROJECTION,
+                policy,
+                device=ADA,
+                domain=domain,
+                workload_size=5_000_000,
+            )
+            assert decision.implementation_id == NATIVE_LIBDEVICE
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("es", 0.0),
+        ("es", math.nextafter(0.012, math.inf)),
+        ("a", 0.0),
+        ("a", math.nextafter(6_400_000.0, math.inf)),
+        ("lam0", math.inf),
+        ("x0", math.nan),
+        ("y0", math.inf),
+        ("x_unit_to_m", 0.0),
+        ("y_unit_to_m", math.nan),
+        ("meridional_coefficients", None),
+        ("meridional_coefficients", (0.0,) * 8),
+        ("meridional_coefficients", (1.0,) * 7 + (math.nan,)),
+    ],
+)
+def test_sinu_inverse_host_setup_domain_is_exact(field, value):
+    from pyproj import CRS
+
+    target = CRS.from_user_input("ESRI:54008")
+    transformer = Transformer.from_crs(target.geodetic_crs, target, always_xy=True)
+    computed = dict(transformer._pipeline.computed)
+    assert projection_strategy_domain("sinu", "inverse", computed) == ("sinu.inverse.ellipsoidal")
+    computed[field] = value
+    assert projection_strategy_domain("sinu", "inverse", computed) == (
+        "sinu.inverse.ellipsoidal.invalid_setup"
+    )
+
+
+@pytest.mark.parametrize(
+    ("policy", "device", "precision"),
+    [
+        ("auto", HOPPER, "fp64"),
+        ("accelerated", HOPPER, "fp64"),
+        ("auto", CPU, "fp64"),
+        ("accelerated", ADA, "fp32"),
+        ("accelerated", ADA, "ds"),
+        ("auto", WEAK_ADA, "fp64"),
+    ],
+)
+def test_sinu_inverse_unqualified_hardware_and_precision_remain_native(policy, device, precision):
+    decision = resolve_transcendental_strategy(
+        TranscendentalOperation.PROJECTION,
+        policy,
+        device=device,
+        domain="sinu.inverse.ellipsoidal",
+        precision=precision,
+        workload_size=5_000_000,
+    )
+    assert decision.implementation_id == NATIVE_LIBDEVICE
+    assert decision.fallback is (policy == "accelerated")
 
 
 def test_resolver_uses_priority_then_rejects_equal_priority_overlap(monkeypatch):
@@ -506,10 +617,10 @@ def test_wave1_public_policy_precision_and_size_matrix(
     ("domain", "device", "precision", "reason"),
     [
         (
-            "sinu.inverse.ellipsoidal",
+            "sinu.inverse.spherical",
             ADA,
             "fp64",
-            "domain 'sinu.inverse.ellipsoidal' is not accuracy-qualified",
+            "domain 'sinu.inverse.spherical' is not accuracy-qualified",
         ),
         (
             "ortho.inverse.spherical.oblique",
@@ -874,12 +985,20 @@ def test_warm_up_resolves_every_requested_projection_direction(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("precision", "policy", "expected_sinu", "expected_ortho", "expected_ortho_inverse"),
+    (
+        "precision",
+        "policy",
+        "expected_sinu",
+        "expected_sinu_inverse",
+        "expected_ortho",
+        "expected_ortho_inverse",
+    ),
     [
         (
             "auto",
             "auto",
             SINU_FORWARD_FIXED_Q62,
+            (NATIVE_LIBDEVICE, SINU_INVERSE_CONVERGENT_NEWTON),
             ORTHO_FORWARD_FIXED_Q62,
             ORTHO_INVERSE_GUARDED_REFRAME,
         ),
@@ -887,19 +1006,42 @@ def test_warm_up_resolves_every_requested_projection_direction(monkeypatch):
             "fp64",
             "accelerated",
             SINU_FORWARD_FIXED_Q62,
+            (NATIVE_LIBDEVICE, SINU_INVERSE_MERIDIONAL_RECURRENCE),
             ORTHO_FORWARD_FIXED_Q62,
             ORTHO_INVERSE_GUARDED_REFRAME,
         ),
-        ("fp32", "accelerated", NATIVE_LIBDEVICE, NATIVE_LIBDEVICE, NATIVE_LIBDEVICE),
-        ("ds", "accelerated", NATIVE_LIBDEVICE, NATIVE_LIBDEVICE, NATIVE_LIBDEVICE),
-        ("fp64", "native", NATIVE_LIBDEVICE, NATIVE_LIBDEVICE, NATIVE_LIBDEVICE),
+        (
+            "fp32",
+            "accelerated",
+            NATIVE_LIBDEVICE,
+            (NATIVE_LIBDEVICE,),
+            NATIVE_LIBDEVICE,
+            NATIVE_LIBDEVICE,
+        ),
+        (
+            "ds",
+            "accelerated",
+            NATIVE_LIBDEVICE,
+            (NATIVE_LIBDEVICE,),
+            NATIVE_LIBDEVICE,
+            NATIVE_LIBDEVICE,
+        ),
+        (
+            "fp64",
+            "native",
+            NATIVE_LIBDEVICE,
+            (NATIVE_LIBDEVICE,),
+            NATIVE_LIBDEVICE,
+            NATIVE_LIBDEVICE,
+        ),
     ],
 )
-def test_wave1_warm_up_matrix_keeps_companion_inverses_native(
+def test_warm_up_matrix_resolves_policy_specific_sinu_inverse(
     monkeypatch,
     precision,
     policy,
     expected_sinu,
+    expected_sinu_inverse,
     expected_ortho,
     expected_ortho_inverse,
 ):
@@ -921,7 +1063,7 @@ def test_wave1_warm_up_matrix_keeps_companion_inverses_native(
             ("ortho", "forward", expected_ortho),
             ("ortho", "inverse", expected_ortho_inverse),
             ("sinu", "forward", expected_sinu),
-            ("sinu", "inverse", NATIVE_LIBDEVICE),
+            *(("sinu", "inverse", implementation) for implementation in expected_sinu_inverse),
         )
     ]
 

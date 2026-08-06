@@ -102,16 +102,25 @@ print(t.explain_strategy(transcendentals="accelerated"))
 `transcendentals="accelerated"` uses an accuracy-qualified implementation when
 the transform and GPU are supported, and explicitly falls back to native math
 otherwise. Automatic acceleration currently covers bounded Helmert, forward
-UTM, spherical-sinusoidal-forward, orthographic-forward, and spherical-equatorial
+UTM, spherical-sinusoidal-forward, ellipsoidal-sinusoidal-inverse,
+orthographic-forward, and spherical-equatorial
 orthographic-inverse, GEOS-forward (sphere/ellipsoid and sweep x/y), and
 spherical-polar LAEA-forward, ellipsoidal Polar Stereographic inverse,
 spherical regular-Mercator forward, and regular-Mercator inverse
 plus spherical/ellipsoidal Lambert Conformal Conic 1SP/2SP in both directions
-operations on validated Ada `sm_89` consumer GPUs
+on validated Ada `sm_89` consumer GPUs
 above their measured workload-size crossovers. GEOS forward starts at 2,097,152
 coordinates, spherical-polar LAEA forward at 1,048,576, Polar Stereographic
 inverse at 1,000,000, spherical Mercator forward at 262,144, and Mercator inverse at
-65,536. LCC forward starts at 65,536 for regular cones and LCC inverse at 128;
+65,536. Ellipsoidal Sinusoidal inverse uses its convergence-aware native-shaped
+kernel for every nonempty workload. Its final RTX 4090 public qualification at
+five million coordinates covered WGS84 and the exact `es=.012`,
+`a=6,400,000 m` boundary. `"auto"` measured 3.026x wall / 3.034x device
+speedup on both; the explicit recurrence kernel measured 4.621x / 4.643x on
+WGS84 and 4.623x / 4.644x at the boundary. Suite-wide maximum/p99
+native-relative horizontal error was 6.583/0 nm. LCC
+forward starts at 65,536 for regular
+cones and LCC inverse at 128;
 near-equator LCC forward remains native. The canonical policy matrix lists every threshold. Hopper and
 unmeasured devices remain native. A selected
 accelerated kernel may still take its warp-atomic native branch when any lane
@@ -126,6 +135,12 @@ inspect coordinate values before dispatch.
 Ellipsoidal regular-Mercator forward is likewise an explicit accelerated
 option. Its polar cap falls back exactly to native math, but mixed polar-cap
 workloads can regress, so automatic policy remains native for that geometry.
+
+Ellipsoidal Sinusoidal inverse has two policy-specific implementations. `"auto"`
+uses the full-domain native-shaped Newton loop with convergence termination.
+Explicit `"accelerated"` selects the faster recurrence hybrid for callers whose
+inputs are concentrated inside the documented ±89.9°/wrapped-longitude hot
+domain; a cold lane sends its complete warp through exact native math.
 
 ### Cross-datum transforms (Helmert)
 

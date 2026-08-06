@@ -58,6 +58,9 @@ from vibeproj.transcendentals import (
     PROJECTION_FIXED_Q62_MAX_SCALE_M,
     SINU_FORWARD_FIXED_Q62,
     SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+    SINU_INVERSE_CONVERGENT_NEWTON,
+    SINU_INVERSE_CONVERGENT_NEWTON_MIN_ELEMENTS,
+    SINU_INVERSE_MERIDIONAL_RECURRENCE,
     STERE_INVERSE_FIXED_Q62,
     STERE_INVERSE_FIXED_Q62_MIN_ELEMENTS,
     TMERC_FIXED_Q62,
@@ -106,6 +109,9 @@ class QualificationSpec:
     auto_enabled: bool = True
     auto_disabled_reason: str | None = None
     explicit_performance_min_elements: int | None = None
+    auto_implementation_id: str | None = None
+    implementation_min_elements: int | None = None
+    representative_mixed_guard_sweep: bool = False
 
 
 QUALIFICATION_SPECS = {
@@ -149,6 +155,31 @@ QUALIFICATION_SPECS = {
         min_elements=SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
         coordinate_contract_m=1e-8,
         max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+    ),
+    "sinu-inverse": QualificationSpec(
+        implementation_id=SINU_INVERSE_MERIDIONAL_RECURRENCE,
+        auto_implementation_id=SINU_INVERSE_CONVERGENT_NEWTON,
+        operation="projection",
+        domain="sinu.inverse.ellipsoidal",
+        direction="inverse",
+        min_elements=SINU_INVERSE_CONVERGENT_NEWTON_MIN_ELEMENTS,
+        coordinate_contract_m=1e-8,
+        max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+        explicit_performance_min_elements=1,
+        implementation_min_elements=0,
+        representative_mixed_guard_sweep=True,
+    ),
+    "sinu-inverse-boundary": QualificationSpec(
+        implementation_id=SINU_INVERSE_MERIDIONAL_RECURRENCE,
+        auto_implementation_id=SINU_INVERSE_CONVERGENT_NEWTON,
+        operation="projection",
+        domain="sinu.inverse.ellipsoidal",
+        direction="inverse",
+        min_elements=SINU_INVERSE_CONVERGENT_NEWTON_MIN_ELEMENTS,
+        coordinate_contract_m=1e-8,
+        max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+        explicit_performance_min_elements=1,
+        implementation_min_elements=0,
     ),
     "ortho-forward": QualificationSpec(
         implementation_id=ORTHO_FORWARD_FIXED_Q62,
@@ -346,7 +377,12 @@ QUALIFICATION_SPECS = {
 CASES = tuple(QUALIFICATION_SPECS)
 MERC_CASES = tuple(name for name in CASES if name.startswith("merc-"))
 LCC_CASES = tuple(name for name in CASES if name.startswith("lcc-"))
-CASE_GROUPS = {"merc": MERC_CASES, "lcc": LCC_CASES}
+SINU_INVERSE_CASES = tuple(name for name in CASES if name.startswith("sinu-inverse"))
+CASE_GROUPS = {
+    "merc": MERC_CASES,
+    "lcc": LCC_CASES,
+    "sinu-inverse": SINU_INVERSE_CASES,
+}
 WORKLOAD_GRID_CASES = tuple(
     name
     for name, qualification in QUALIFICATION_SPECS.items()
@@ -424,10 +460,32 @@ def _qualification_workload_sizes(
         return ()
     sizes = set(requested_sizes)
     if qualification.auto_enabled:
-        sizes.update((qualification.min_elements - 1, qualification.min_elements))
+        if qualification.min_elements == 1:
+            # Public transforms are nonempty. N=1 is the exact lower endpoint;
+            # retain N=2 as its adjacent crossover confirmation instead of
+            # fabricating an unlaunchable N=0 workload.
+            sizes.update((1, 2))
+        else:
+            sizes.update((qualification.min_elements - 1, qualification.min_elements))
     if qualification.explicit_performance_min_elements is not None:
         sizes.add(qualification.explicit_performance_min_elements)
     return tuple(sorted(sizes))
+
+
+def _candidate_policy_ids(qualification: QualificationSpec) -> dict[str, str]:
+    """Return the exact implementation qualified by each candidate policy."""
+    return {
+        "accelerated": qualification.implementation_id,
+        "auto": qualification.auto_implementation_id or qualification.implementation_id,
+    }
+
+
+def _distinct_candidate_policies(qualification: QualificationSpec) -> tuple[str, ...]:
+    """Return candidate policies requiring independent qualification evidence."""
+    policy_ids = _candidate_policy_ids(qualification)
+    if qualification.auto_enabled and policy_ids["auto"] != policy_ids["accelerated"]:
+        return ("accelerated", "auto")
+    return ("accelerated",)
 
 
 @dataclass(frozen=True)
@@ -519,6 +577,7 @@ def _prepare_tmerc_forward(cp: Any, n: int, rng: np.random.Generator) -> Benchma
 
 def _prepare_tmerc_inverse(cp: Any, n: int, rng: np.random.Generator) -> BenchmarkCase:
     from pyproj import Transformer as PyProjTransformer
+
     from vibeproj import Transformer
 
     transformer = Transformer.from_crs("EPSG:4326", "EPSG:32631", always_xy=True)
@@ -715,6 +774,87 @@ def _prepare_sinu_forward(cp: Any, n: int, rng: np.random.Generator) -> Benchmar
         latitude_range=(-80.0, 80.0),
         edge_longitude=edge_longitude,
         edge_latitude=edge_latitude,
+    )
+
+
+def _prepare_sinu_inverse(
+    cp: Any,
+    n: int,
+    rng: np.random.Generator,
+    *,
+    name: str,
+) -> BenchmarkCase:
+    """Prepare the ellipsoidal inverse hot domain and exact meridional edges."""
+    from pyproj import CRS
+    from pyproj import Transformer as PyProjTransformer
+    from vibeproj import Transformer
+
+    target_crs = (
+        "+proj=sinu +lon_0=0 +a=6400000 +es=.012 +units=m +type=crs"
+        if name == "sinu-inverse-boundary"
+        else "ESRI:54008"
+    )
+    target = CRS.from_user_input(target_crs)
+    geographic_crs = target.geodetic_crs.to_string()
+    transformer = Transformer.from_crs(target, target.geodetic_crs, always_xy=True)
+    longitude = rng.uniform(-179.0, 179.0, n).astype(np.float64)
+    latitude = rng.uniform(-89.9, 89.9, n).astype(np.float64)
+    oracle_forward = PyProjTransformer.from_crs(target.geodetic_crs, target, always_xy=True)
+    easting, northing = oracle_forward.transform(longitude, latitude)
+    easting = np.asarray(easting, dtype=np.float64)
+    northing = np.asarray(northing, dtype=np.float64)
+    computed = transformer._pipeline.computed
+    pole = float(computed["y0"] + computed["a"] * computed["meridional_pole"])
+    edge_easting = np.asarray(
+        [0.0, 1.0, 1.0e7, 1.0, 1.0, math.inf, -math.inf, math.nan, 0.0],
+        dtype=np.float64,
+    )
+    edge_northing = np.asarray(
+        [
+            0.0,
+            math.nextafter(pole, 0.0),
+            pole,
+            math.nextafter(pole, math.inf),
+            -pole,
+            0.0,
+            0.0,
+            0.0,
+            math.nan,
+        ],
+        dtype=np.float64,
+    )
+    return BenchmarkCase(
+        name=name,
+        family="sinu",
+        direction="FORWARD",
+        transformer=transformer,
+        input_x=cp.asarray(easting),
+        input_y=cp.asarray(northing),
+        host_x=easting,
+        host_y=northing,
+        edge_host_x=edge_easting,
+        edge_host_y=edge_northing,
+        domain={
+            "crs": f"{target.to_string()} -> {geographic_crs}",
+            "setup": (
+                "exact qualified es=0.012, a=6400000m boundary"
+                if name == "sinu-inverse-boundary"
+                else "ESRI:54008 / WGS84 representative"
+            ),
+            "source_longitude_degrees": [-179.0, 179.0],
+            "source_latitude_degrees": [-89.9, 89.9],
+            "recurrence_hot_latitude_degrees": [-89.9, 89.9],
+            "auto_coordinate_domain": "complete native inverse image",
+        },
+        edges={
+            "easting_m": _json_edge_values(edge_easting),
+            "northing_m": _json_edge_values(edge_northing),
+        },
+        output_is_geographic=True,
+        oracle_from_crs=target.to_string(),
+        oracle_to_crs=geographic_crs,
+        qualification=QUALIFICATION_SPECS[name],
+        geographic_scale_m=float(computed["a"]),
     )
 
 
@@ -1675,6 +1815,8 @@ def _prepare_case(cp: Any, name: str, n: int, seed: int) -> BenchmarkCase:
         return _prepare_helmert(cp, n, rng, "INVERSE")
     if name == "sinu-forward":
         return _prepare_sinu_forward(cp, n, rng)
+    if name.startswith("sinu-inverse"):
+        return _prepare_sinu_inverse(cp, n, rng, name=name)
     if name == "ortho-forward":
         return _prepare_ortho_forward(cp, n, rng)
     if name == "ortho-inverse":
@@ -2009,10 +2151,14 @@ def _kernel_resources(cp: Any, case: BenchmarkCase) -> dict[str, Any]:
     device_properties = cp.cuda.runtime.getDeviceProperties(int(cp.cuda.Device().id))
     threads_per_sm = int(device_properties["maxThreadsPerMultiProcessor"])
     result = {}
-    for label, implementation_id in (
+    variants = [
         ("native", NATIVE_LIBDEVICE),
         ("accelerated", case.qualification.implementation_id),
-    ):
+    ]
+    auto_implementation_id = _candidate_policy_ids(case.qualification)["auto"]
+    if auto_implementation_id not in {NATIVE_LIBDEVICE, case.qualification.implementation_id}:
+        variants.append(("auto", auto_implementation_id))
+    for label, implementation_id in variants:
         if case.family == "helmert":
             kernel = _get_helmert_kernel(implementation_id)
         else:
@@ -2149,6 +2295,193 @@ def _merc_forward_polar_cap_sweep(
     }
 
 
+def _sinu_inverse_mixed_guard_sweep(
+    cp: Any,
+    case: BenchmarkCase,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    """Qualify explicit warp fallback and full-domain AUTO on identical mixtures."""
+    if not case.qualification.representative_mixed_guard_sweep:
+        return {"required": False, "qualification_pass": True, "rows": []}
+
+    from pyproj import Transformer as PyProjTransformer
+
+    n = max(args.n, 32_000)
+    rng = np.random.default_rng(args.seed + 110_000)
+    longitude = rng.uniform(-179.0, 179.0, n)
+    latitude = rng.uniform(-80.0, 80.0, n)
+    oracle_forward = PyProjTransformer.from_crs(
+        case.oracle_to_crs, case.oracle_from_crs, always_xy=True
+    )
+    hot_projected = oracle_forward.transform(longitude, latitude)
+    hot_x = np.asarray(hot_projected[0], dtype=np.float64)
+    hot_y = np.asarray(hot_projected[1], dtype=np.float64)
+    computed = case.transformer._pipeline_for_direction(case.direction).computed
+    pole = float(computed["y0"] + computed["a"] * computed["meridional_pole"])
+    cold_values = (
+        (1.0, pole),
+        (1.0, -pole),
+        (1.0, math.nextafter(pole, math.inf)),
+        (math.nan, float(computed["y0"])),
+    )
+    rows = []
+    fractions = (0.0, 0.001, 0.01, 0.10, 0.50, 1.0)
+    for fraction in fractions:
+        cold_count = round(fraction * n)
+        cold_mask = np.zeros(n, dtype=bool)
+        if cold_count:
+            selected = rng.choice(n, cold_count, replace=False)
+            cold_mask[selected] = True
+        input_x_host = hot_x.copy()
+        input_y_host = hot_y.copy()
+        for pattern_index, lane_index in enumerate(np.flatnonzero(cold_mask)):
+            input_x_host[lane_index], input_y_host[lane_index] = cold_values[
+                pattern_index % len(cold_values)
+            ]
+
+        cold_warp_lane_mask = np.zeros(n, dtype=bool)
+        for warp_start in range(0, n, 32):
+            warp_stop = min(warp_start + 32, n)
+            if bool(np.any(cold_mask[warp_start:warp_stop])):
+                cold_warp_lane_mask[warp_start:warp_stop] = True
+        cold_warp_count = sum(
+            bool(np.any(cold_mask[start : min(start + 32, n)])) for start in range(0, n, 32)
+        )
+
+        input_x = cp.asarray(input_x_host)
+        input_y = cp.asarray(input_y_host)
+        outputs = {
+            policy: (cp.empty(n, dtype=cp.float64), cp.empty(n, dtype=cp.float64))
+            for policy in POLICIES
+        }
+
+        def invoke(policy: str) -> None:
+            case.transformer.transform_buffers(
+                input_x,
+                input_y,
+                direction=case.direction,
+                out_x=outputs[policy][0],
+                out_y=outputs[policy][1],
+                precision=args.precision,
+                transcendentals=policy,
+            )
+
+        launches = {policy: lambda policy=policy: invoke(policy) for policy in POLICIES}
+        device_timing, _, _ = _time_interleaved(
+            cp,
+            launches,
+            n=n,
+            warmup=args.warmup,
+            iterations=args.iterations,
+            repeats=args.repeats,
+        )
+        wall_timing = _time_synchronized_wall_interleaved(
+            cp,
+            launches,
+            n=n,
+            warmup=args.warmup,
+            iterations=args.iterations,
+            repeats=args.repeats,
+        )
+        for policy in POLICIES:
+            invoke(policy)
+        cp.cuda.get_current_stream().synchronize()
+        host_outputs = {
+            policy: (cp.asnumpy(out_x), cp.asnumpy(out_y))
+            for policy, (out_x, out_y) in outputs.items()
+        }
+        native_x, native_y = host_outputs["native"]
+        errors = {
+            policy: _coordinate_error(
+                actual_x,
+                actual_y,
+                native_x,
+                native_y,
+                geographic=True,
+                geographic_scale_m=case.geographic_scale_m,
+            )
+            for policy, (actual_x, actual_y) in host_outputs.items()
+            if policy != "native"
+        }
+        accelerated_x, accelerated_y = host_outputs["accelerated"]
+        recurrence_fallback_bitwise = bool(
+            np.array_equal(
+                accelerated_x[cold_warp_lane_mask].view(np.uint64),
+                native_x[cold_warp_lane_mask].view(np.uint64),
+            )
+            and np.array_equal(
+                accelerated_y[cold_warp_lane_mask].view(np.uint64),
+                native_y[cold_warp_lane_mask].view(np.uint64),
+            )
+        )
+        rows.append(
+            {
+                "cold_fraction_requested": fraction,
+                "cold_lane_count": int(cold_count),
+                "cold_lane_fraction_achieved": cold_count / n,
+                "cold_warp_count": int(cold_warp_count),
+                "cold_warp_fraction_achieved": cold_warp_count / math.ceil(n / 32),
+                "fallback_lane_count_achieved": int(np.count_nonzero(cold_warp_lane_mask)),
+                "fallback_lane_fraction_achieved": float(np.mean(cold_warp_lane_mask)),
+                "cold_pattern": (
+                    "random lanes cycling north/south pole, outside pole, and NaN easting; "
+                    "explicit recurrence fallback is complete-warp"
+                ),
+                "device_timing": device_timing,
+                "wall_timing": wall_timing,
+                "error_vs_native_m": errors,
+                "recurrence_fallback_warp_lanes_bitwise_native": (recurrence_fallback_bitwise),
+            }
+        )
+
+    def timing_pass(row: dict[str, Any], policy: str) -> bool:
+        return all(
+            timing[policy]["speedup_vs_native"] >= 1.05
+            and all(speedup >= 1.05 for speedup in timing[policy]["repeat_speedups_vs_native"])
+            for timing in (row["device_timing"], row["wall_timing"])
+        )
+
+    correctness_pass = all(
+        row["recurrence_fallback_warp_lanes_bitwise_native"]
+        and all(
+            error["max_m"] is not None
+            and error["max_m"] <= case.qualification.coordinate_contract_m
+            and error["nonfinite_match"]
+            for error in row["error_vs_native_m"].values()
+        )
+        for row in rows
+    )
+    hot_row = next(row for row in rows if row["cold_fraction_requested"] == 0.0)
+    ten_percent_row = next(row for row in rows if row["cold_fraction_requested"] == 0.10)
+    all_cold_row = next(row for row in rows if row["cold_fraction_requested"] == 1.0)
+    all_cold_wall = all_cold_row["wall_timing"]["accelerated"]
+    all_cold_no_regression = all_cold_wall["speedup_vs_native"] >= 0.98 and all(
+        speedup >= 0.95 for speedup in all_cold_wall["repeat_speedups_vs_native"]
+    )
+    recurrence_ten_percent_misses_auto_gate = (
+        ten_percent_row["wall_timing"]["accelerated"]["speedup_vs_native"] < 1.05
+    )
+    auto_full_domain_performance = all(timing_pass(row, "auto") for row in rows)
+    return {
+        "required": True,
+        "n": n,
+        "fractions": list(fractions),
+        "rows": rows,
+        "recurrence_hot_performance_pass": timing_pass(hot_row, "accelerated"),
+        "recurrence_ten_percent_misses_auto_gate": (recurrence_ten_percent_misses_auto_gate),
+        "recurrence_all_cold_no_regression_pass": all_cold_no_regression,
+        "auto_full_domain_performance_pass": auto_full_domain_performance,
+        "all_recurrence_fallback_warp_lanes_bitwise_native": all(
+            row["recurrence_fallback_warp_lanes_bitwise_native"] for row in rows
+        ),
+        "qualification_pass": correctness_pass
+        and timing_pass(hot_row, "accelerated")
+        and recurrence_ten_percent_misses_auto_gate
+        and all_cold_no_regression
+        and auto_full_domain_performance,
+    }
+
+
 def _guarded_inverse_fallback_sweep(
     cp: Any,
     case: BenchmarkCase,
@@ -2157,6 +2490,8 @@ def _guarded_inverse_fallback_sweep(
     """Measure deliberately mixed per-lane native fallback percentages."""
     if case.name.startswith("merc-forward-ellipsoidal-"):
         return _merc_forward_polar_cap_sweep(cp, case, args)
+    if case.family == "sinu" and case.qualification.direction == "inverse":
+        return _sinu_inverse_mixed_guard_sweep(cp, case, args)
     if case.name != "ortho-inverse" and not case.name.startswith("gnom-inverse-"):
         return {"required": False, "rows": []}
 
@@ -2331,12 +2666,11 @@ def _edge_accuracy(cp: Any, case: BenchmarkCase, precision: str) -> dict[str, An
             )
             for first, second in zip(case.edge_host_x, case.edge_host_y, strict=True)
         )
-        if case.family in {"merc", "lcc"}
+        if case.family in {"merc", "lcc", "sinu"}
         else ((cp.asarray(case.edge_host_x), cp.asarray(case.edge_host_y)),)
     )
     host_groups: dict[str, list[tuple[np.ndarray, np.ndarray]]] = {
-        "native": [],
-        "accelerated": [],
+        policy: [] for policy in POLICIES
     }
     for policy in host_groups:
         for edge_x, edge_y in groups:
@@ -2360,15 +2694,21 @@ def _edge_accuracy(cp: Any, case: BenchmarkCase, precision: str) -> dict[str, An
         for policy, results in host_groups.items()
     }
     native_x, native_y = outputs["native"]
-    accelerated_x, accelerated_y = outputs["accelerated"]
-    return _coordinate_error(
-        accelerated_x,
-        accelerated_y,
-        native_x,
-        native_y,
-        geographic=case.output_is_geographic,
-        geographic_scale_m=case.geographic_scale_m,
-    )
+    by_policy = {
+        policy: _coordinate_error(
+            actual_x,
+            actual_y,
+            native_x,
+            native_y,
+            geographic=case.output_is_geographic,
+            geographic_scale_m=case.geographic_scale_m,
+        )
+        for policy, (actual_x, actual_y) in outputs.items()
+        if policy != "native"
+    }
+    # Retain the original accelerated summary fields for artifact consumers,
+    # while making disjoint explicit/AUTO implementations independently visible.
+    return {**by_policy["accelerated"], "by_policy": by_policy}
 
 
 def _scale_guard_behavior(cp: Any, case: BenchmarkCase, precision: str) -> dict[str, Any]:
@@ -2383,11 +2723,17 @@ def _scale_guard_behavior(cp: Any, case: BenchmarkCase, precision: str) -> dict[
     raw_scales = (
         (maximum_scale, np.nextafter(maximum_scale, math.inf), 1e12)
         if case.family in {"merc", "stere", "lcc"}
+        or (case.family == "sinu" and case.qualification.direction == "inverse")
         else (np.nextafter(maximum_scale, math.inf), 1e12)
     )
     for raw_scale in raw_scales:
         physical_scale = float(raw_scale)
-        source_crs = f"+proj=longlat +R={physical_scale:.17g} +type=crs"
+        definition_scale = (
+            maximum_scale
+            if case.family == "sinu" and physical_scale > maximum_scale
+            else physical_scale
+        )
+        source_crs = f"+proj=longlat +R={definition_scale:.17g} +type=crs"
         projection_parameters = f"+proj={case.family} +lon_0=0"
         if case.family in {"ortho", "gnom"}:
             equatorial_inverse = case.name == "ortho-inverse" or case.name.endswith("-equatorial")
@@ -2401,14 +2747,14 @@ def _scale_guard_behavior(cp: Any, case: BenchmarkCase, precision: str) -> dict[
         elif case.family == "stere":
             latitude_origin = -90 if case.name.endswith("-south") else 90
             projection_parameters += f" +lat_0={latitude_origin} +k_0=0.994"
-            source_crs = f"+proj=longlat +a={physical_scale:.17g} +rf=298.257223563 +type=crs"
+            source_crs = f"+proj=longlat +a={definition_scale:.17g} +rf=298.257223563 +type=crs"
         elif case.family == "merc":
             if case.name.endswith("variant-b"):
                 projection_parameters += " +lat_ts=33"
             else:
                 projection_parameters += " +k=0.87"
             if "ellipsoidal" in case.name:
-                source_crs = f"+proj=longlat +a={physical_scale:.17g} +rf=298.257223563 +type=crs"
+                source_crs = f"+proj=longlat +a={definition_scale:.17g} +rf=298.257223563 +type=crs"
         elif case.family == "lcc":
             if "near-equator" in case.name:
                 projection_parameters += " +lat_0=.1 +lat_1=.1"
@@ -2417,11 +2763,14 @@ def _scale_guard_behavior(cp: Any, case: BenchmarkCase, precision: str) -> dict[
             else:
                 projection_parameters += " +lat_0=23 +lat_1=33 +lat_2=45"
             if "ellipsoidal" in case.name:
-                source_crs = f"+proj=longlat +a={physical_scale:.17g} +rf=298.257223563 +type=crs"
+                source_crs = f"+proj=longlat +a={definition_scale:.17g} +rf=298.257223563 +type=crs"
+        elif case.family == "sinu" and case.qualification.direction == "inverse":
+            source_crs = f"+proj=longlat +a={definition_scale:.17g} +rf=298.257223563 +type=crs"
         earth = (
-            f"+a={physical_scale:.17g} +rf=298.257223563"
-            if case.family in {"merc", "stere", "lcc"} and "ellipsoidal" in case.name
-            else f"+R={physical_scale:.17g}"
+            f"+a={definition_scale:.17g} +rf=298.257223563"
+            if (case.family in {"merc", "stere", "lcc"} and "ellipsoidal" in case.name)
+            or (case.family == "sinu" and case.qualification.direction == "inverse")
+            else f"+R={definition_scale:.17g}"
         )
         target_crs = f"{projection_parameters} {earth} +units=m +type=crs"
         if (
@@ -2429,8 +2778,19 @@ def _scale_guard_behavior(cp: Any, case: BenchmarkCase, precision: str) -> dict[
             or case.family in {"gnom", "stere"}
             or (case.family == "merc" and case.qualification.direction == "inverse")
             or (case.family == "lcc" and case.qualification.direction == "inverse")
+            or (case.family == "sinu" and case.qualification.direction == "inverse")
         ):
             transformer = Transformer.from_crs(target_crs, source_crs, always_xy=True)
+            if (
+                case.family == "sinu"
+                and case.qualification.direction == "inverse"
+                and physical_scale > maximum_scale
+            ):
+                inverse_pipeline = transformer._pipeline_for_direction("FORWARD")
+                inverse_pipeline.computed = {
+                    **inverse_pipeline.computed,
+                    "a": physical_scale,
+                }
             first_host = (
                 np.asarray([0.1, -0.3, 0.7, 0.0, np.inf, np.nan], dtype=np.float64) * physical_scale
             )
@@ -2439,12 +2799,20 @@ def _scale_guard_behavior(cp: Any, case: BenchmarkCase, precision: str) -> dict[
             )
         else:
             transformer = Transformer.from_crs(source_crs, target_crs, always_xy=True)
+            if case.family == "sinu" and physical_scale > maximum_scale:
+                forward_pipeline = transformer._pipeline_for_direction("FORWARD")
+                forward_pipeline.computed = {
+                    **forward_pipeline.computed,
+                    "a": physical_scale,
+                }
             first_host = np.asarray([-180.0, -120.0, 0.0, 120.0, 180.0, np.inf, np.nan])
             second_host = np.asarray([-90.0, -45.0, 0.0, 45.0, 90.0, 40.0, 40.0])
         first = cp.asarray(first_host)
         second = cp.asarray(second_host)
+        candidate_policies = _distinct_candidate_policies(case.qualification)
+        evaluated_policies = ("native", *candidate_policies)
         outputs = {}
-        for policy in ("native", "accelerated"):
+        for policy in evaluated_policies:
             out_x = cp.empty(first.size, dtype=cp.float64)
             out_y = cp.empty(second.size, dtype=cp.float64)
             transformer.transform_buffers(
@@ -2456,51 +2824,69 @@ def _scale_guard_behavior(cp: Any, case: BenchmarkCase, precision: str) -> dict[
                 transcendentals=policy,
             )
             outputs[policy] = (cp.asnumpy(out_x), cp.asnumpy(out_y))
-        native_x, native_y = outputs["native"]
-        accelerated_x, accelerated_y = outputs["accelerated"]
-        bitwise_native = bool(
-            np.array_equal(accelerated_x.view(np.uint64), native_x.view(np.uint64))
-            and np.array_equal(accelerated_y.view(np.uint64), native_y.view(np.uint64))
-        )
-        error = _coordinate_error(
-            accelerated_x,
-            accelerated_y,
-            native_x,
-            native_y,
-            geographic=case.output_is_geographic,
-            geographic_scale_m=physical_scale,
-        )
         native_expected = physical_scale > maximum_scale
-        strategy = _resolved_strategy(
-            transformer,
-            "accelerated",
-            "FORWARD",
-            precision=precision,
-            workload_size=int(first.size),
-        )
-        expected_scale_implementation = (
-            NATIVE_LIBDEVICE
-            if case.family == "lcc" and native_expected
-            else case.qualification.implementation_id
-        )
-        strategy_remains_selected = strategy["implementation_ids"] == [
-            expected_scale_implementation
-        ]
-        probes.append(
-            {
-                "physical_scale_m": float(physical_scale),
-                "strategy": strategy,
-                "strategy_remains_selected": strategy_remains_selected,
-                "bitwise_native_outputs": bitwise_native,
-                "native_expected": native_expected,
-                "error_vs_native_m": error,
-                "behavior_pass": bitwise_native
+        native_x, native_y = outputs["native"]
+        policy_probes = {}
+        for policy in candidate_policies:
+            actual_x, actual_y = outputs[policy]
+            bitwise_native = bool(
+                np.array_equal(actual_x.view(np.uint64), native_x.view(np.uint64))
+                and np.array_equal(actual_y.view(np.uint64), native_y.view(np.uint64))
+            )
+            error = _coordinate_error(
+                actual_x,
+                actual_y,
+                native_x,
+                native_y,
+                geographic=case.output_is_geographic,
+                geographic_scale_m=physical_scale,
+            )
+            strategy = _resolved_strategy(
+                transformer,
+                policy,
+                case.direction,
+                precision=precision,
+                workload_size=int(first.size),
+            )
+            expected_scale_implementation = (
+                NATIVE_LIBDEVICE
+                if (
+                    case.family == "lcc"
+                    or (case.family == "sinu" and case.qualification.direction == "inverse")
+                )
+                and native_expected
+                else _candidate_policy_ids(case.qualification)[policy]
+            )
+            strategy_remains_selected = strategy["implementation_ids"] == [
+                expected_scale_implementation
+            ]
+            behavior_pass = (
+                bitwise_native
                 if native_expected
                 else (
                     error["max_m"] is not None
                     and error["max_m"] <= case.qualification.coordinate_contract_m
                     and error["nonfinite_match"]
-                ),
+                )
+            )
+            policy_probes[policy] = {
+                "strategy": strategy,
+                "strategy_remains_selected": strategy_remains_selected,
+                "bitwise_native_outputs": bitwise_native,
+                "error_vs_native_m": error,
+                "behavior_pass": behavior_pass,
+            }
+        accelerated_probe = policy_probes["accelerated"]
+        probes.append(
+            {
+                "physical_scale_m": float(physical_scale),
+                "strategy": accelerated_probe["strategy"],
+                "strategy_remains_selected": accelerated_probe["strategy_remains_selected"],
+                "bitwise_native_outputs": accelerated_probe["bitwise_native_outputs"],
+                "native_expected": native_expected,
+                "error_vs_native_m": accelerated_probe["error_vs_native_m"],
+                "behavior_pass": accelerated_probe["behavior_pass"],
+                "policies": policy_probes,
             }
         )
     return {
@@ -2508,7 +2894,9 @@ def _scale_guard_behavior(cp: Any, case: BenchmarkCase, precision: str) -> dict[
         "maximum_qualified_scale_m": maximum_scale,
         "probes": probes,
         "qualification_pass": all(
-            probe["strategy_remains_selected"] and probe["behavior_pass"] for probe in probes
+            policy_probe["strategy_remains_selected"] and policy_probe["behavior_pass"]
+            for probe in probes
+            for policy_probe in probe["policies"].values()
         ),
     }
 
@@ -2964,6 +3352,215 @@ def _lcc_parameter_guard_behavior(
     }
 
 
+def _sinu_inverse_parameter_guard_behavior(
+    cp: Any,
+    case: BenchmarkCase,
+    precision: str,
+) -> dict[str, Any]:
+    """Exercise the exact host setup domain for both Sinu inverse candidates."""
+    if case.family != "sinu" or case.qualification.direction != "inverse":
+        return {"required": False, "qualification_pass": True, "probes": []}
+
+    from pyproj import CRS
+    from pyproj import Transformer as PyProjTransformer
+
+    from vibeproj import Transformer
+
+    pipeline = case.transformer._pipeline_for_direction(case.direction)
+    original = pipeline.computed
+    candidate_policies = _distinct_candidate_policies(case.qualification)
+    policy_ids = _candidate_policy_ids(case.qualification)
+    longitude = np.linspace(-179.0, 179.0, 4_096, dtype=np.float64)
+    latitude = np.linspace(-89.8, 89.8, 4_096, dtype=np.float64)
+    oracle_forward = PyProjTransformer.from_crs(
+        case.oracle_to_crs, case.oracle_from_crs, always_xy=True
+    )
+    projected = oracle_forward.transform(longitude, latitude)
+    hot_first = cp.asarray(np.asarray(projected[0], dtype=np.float64))
+    hot_second = cp.asarray(np.asarray(projected[1], dtype=np.float64))
+
+    def execute(
+        transformer: Any = case.transformer,
+        input_first: Any = hot_first,
+        input_second: Any = hot_second,
+    ) -> dict[str, Any]:
+        active_pipeline = transformer._pipeline_for_direction(case.direction)
+        active_scale = float(active_pipeline.computed["a"])
+        error_scale = (
+            active_scale if math.isfinite(active_scale) and active_scale > 0.0 else EARTH_RADIUS_M
+        )
+        outputs = {}
+        strategies = {}
+        for policy in ("native", *candidate_policies):
+            out_x = cp.empty(input_first.size, dtype=cp.float64)
+            out_y = cp.empty(input_second.size, dtype=cp.float64)
+            transformer.transform_buffers(
+                input_first,
+                input_second,
+                direction=case.direction,
+                out_x=out_x,
+                out_y=out_y,
+                precision=precision,
+                transcendentals=policy,
+            )
+            outputs[policy] = (cp.asnumpy(out_x), cp.asnumpy(out_y))
+            strategies[policy] = _resolved_strategy(
+                transformer,
+                policy,
+                case.direction,
+                precision=precision,
+                workload_size=int(input_first.size),
+            )
+        native_x, native_y = outputs["native"]
+        policy_results = {}
+        for policy in candidate_policies:
+            actual_x, actual_y = outputs[policy]
+            policy_results[policy] = {
+                "strategy": strategies[policy],
+                "bitwise_native_outputs": bool(
+                    np.array_equal(actual_x.view(np.uint64), native_x.view(np.uint64))
+                    and np.array_equal(actual_y.view(np.uint64), native_y.view(np.uint64))
+                ),
+                "error_vs_native_m": _coordinate_error(
+                    actual_x,
+                    actual_y,
+                    native_x,
+                    native_y,
+                    geographic=True,
+                    geographic_scale_m=error_scale,
+                ),
+            }
+        return {"policies": policy_results}
+
+    hot_probe = execute()
+    for policy, result in hot_probe["policies"].items():
+        result["strategy_selected"] = result["strategy"]["implementation_ids"] == [
+            policy_ids[policy]
+        ]
+        result["nonvacuous_pass"] = (
+            result["strategy_selected"] and not result["bitwise_native_outputs"]
+        )
+
+    coefficients = tuple(original["meridional_coefficients"])
+    setup_mutations: list[tuple[str, dict[str, Any]]] = [
+        ("eccentricity_zero", {"es": 0.0}),
+        ("eccentricity_negative", {"es": math.nextafter(0.0, -math.inf)}),
+        ("eccentricity_nextabove", {"es": math.nextafter(0.012, math.inf)}),
+        ("eccentricity_nonfinite", {"es": math.nan}),
+        ("leading_coefficient_zero", {"meridional_coefficients": (0.0, *coefficients[1:])}),
+        (
+            "leading_coefficient_negative",
+            {
+                "meridional_coefficients": (
+                    math.nextafter(0.0, -math.inf),
+                    *coefficients[1:],
+                )
+            },
+        ),
+        ("central_meridian_nonfinite", {"lam0": math.inf}),
+        ("scale_zero", {"a": 0.0}),
+        ("scale_nonfinite", {"a": math.inf}),
+        (
+            "scale_nextabove",
+            {"a": math.nextafter(PROJECTION_FIXED_Q62_MAX_SCALE_M, math.inf)},
+        ),
+        ("x_offset_nonfinite", {"x0": math.inf}),
+        ("y_offset_nonfinite", {"y0": math.nan}),
+        ("x_unit_zero", {"x_unit_to_m": 0.0}),
+        ("x_unit_nonfinite", {"x_unit_to_m": math.inf}),
+        ("y_unit_zero", {"y_unit_to_m": 0.0}),
+        ("y_unit_nonfinite", {"y_unit_to_m": math.nan}),
+    ]
+    for index in range(8):
+        mutated = list(coefficients)
+        mutated[index] = math.nan
+        setup_mutations.append(
+            (f"coefficient_{index}_nonfinite", {"meridional_coefficients": tuple(mutated)})
+        )
+
+    setup_probes = []
+    try:
+        for label, mutation in setup_mutations:
+            pipeline.computed = {**original, **mutation}
+            result = execute()
+            for policy, policy_result in result["policies"].items():
+                policy_result["native_strategy_pass"] = policy_result["strategy"][
+                    "implementation_ids"
+                ] == [NATIVE_LIBDEVICE]
+                policy_result["behavior_pass"] = (
+                    policy_result["native_strategy_pass"]
+                    and policy_result["bitwise_native_outputs"]
+                )
+            setup_probes.append({"name": label, "mutated_fields": sorted(mutation), **result})
+    finally:
+        pipeline.computed = original
+
+    qualified_boundary_probes = []
+    for label, mutation in (
+        ("eccentricity_exact_upper", {"es": 0.012}),
+        ("scale_exact_upper", {"a": PROJECTION_FIXED_Q62_MAX_SCALE_M}),
+    ):
+        if label == "eccentricity_exact_upper":
+            target = CRS.from_user_input(
+                "+proj=sinu +lon_0=0 +a=6400000 +es=.012 +units=m +type=crs"
+            )
+            boundary_transformer = Transformer.from_crs(target, target.geodetic_crs, always_xy=True)
+            boundary_forward = PyProjTransformer.from_crs(
+                target.geodetic_crs, target, always_xy=True
+            )
+            boundary_projected = boundary_forward.transform(longitude, latitude)
+            result = execute(
+                boundary_transformer,
+                cp.asarray(np.asarray(boundary_projected[0], dtype=np.float64)),
+                cp.asarray(np.asarray(boundary_projected[1], dtype=np.float64)),
+            )
+        else:
+            pipeline.computed = {**original, **mutation}
+            try:
+                result = execute()
+            finally:
+                pipeline.computed = original
+        for policy, policy_result in result["policies"].items():
+            error = policy_result["error_vs_native_m"]
+            policy_result["strategy_selected"] = policy_result["strategy"][
+                "implementation_ids"
+            ] == [policy_ids[policy]]
+            policy_result["behavior_pass"] = (
+                policy_result["strategy_selected"]
+                and error["max_m"] is not None
+                and error["max_m"] <= case.qualification.coordinate_contract_m
+                and error["nonfinite_match"]
+            )
+        qualified_boundary_probes.append(
+            {"name": label, "mutated_fields": sorted(mutation), **result}
+        )
+
+    hot_pass = all(
+        result["nonvacuous_pass"]
+        and result["error_vs_native_m"]["max_m"] is not None
+        and result["error_vs_native_m"]["max_m"] <= case.qualification.coordinate_contract_m
+        and result["error_vs_native_m"]["nonfinite_match"]
+        for result in hot_probe["policies"].values()
+    )
+    return {
+        "required": True,
+        "hot_probe": hot_probe,
+        "probes": setup_probes,
+        "qualified_boundary_probes": qualified_boundary_probes,
+        "qualification_pass": hot_pass
+        and all(
+            result["behavior_pass"]
+            for probe in setup_probes
+            for result in probe["policies"].values()
+        )
+        and all(
+            result["behavior_pass"]
+            for probe in qualified_boundary_probes
+            for result in probe["policies"].values()
+        ),
+    }
+
+
 def _parameter_guard_behavior(
     cp: Any,
     case: BenchmarkCase,
@@ -2973,6 +3570,8 @@ def _parameter_guard_behavior(
         return _merc_parameter_guard_behavior(cp, case, args.precision)
     if case.family == "lcc":
         return _lcc_parameter_guard_behavior(cp, case, args.precision)
+    if case.family == "sinu" and case.qualification.direction == "inverse":
+        return _sinu_inverse_parameter_guard_behavior(cp, case, args.precision)
     return _stere_inverse_e_guard_behavior(cp, case, args)
 
 
@@ -3089,8 +3688,11 @@ def _run_case(cp: Any, case: BenchmarkCase, args: argparse.Namespace) -> dict[st
     qualification = case.qualification
     accelerated_is_native = qualification.implementation_id == NATIVE_LIBDEVICE
     expected_accelerated_ids = [qualification.implementation_id]
+    candidate_policy_ids = _candidate_policy_ids(qualification)
+    candidate_policies = _distinct_candidate_policies(qualification)
+    auto_implementation_id = candidate_policy_ids["auto"]
     expected_auto_id = (
-        qualification.implementation_id
+        auto_implementation_id
         if qualification.auto_enabled
         and not accelerated_is_native
         and args.n >= qualification.min_elements
@@ -3098,13 +3700,32 @@ def _run_case(cp: Any, case: BenchmarkCase, args: argparse.Namespace) -> dict[st
     )
     repeat_speedups = timing["accelerated"]["repeat_speedups_vs_native"]
     wall_repeat_speedups = wall_timing["accelerated"]["repeat_speedups_vs_native"]
+    auto_repeat_speedups = timing["auto"]["repeat_speedups_vs_native"]
+    auto_wall_repeat_speedups = wall_timing["auto"]["repeat_speedups_vs_native"]
     coordinate_contract_m = qualification.coordinate_contract_m
-    accelerated_native_error = errors_vs_native["accelerated"]["max_m"]
     accelerated_native_nonfinite_match = errors_vs_native["accelerated"]["nonfinite_match"]
     native_pyproj_error = errors_vs_pyproj["native"]["max_m"]
-    accelerated_pyproj_error = errors_vs_pyproj["accelerated"]["max_m"]
     native_pyproj_nonfinite_match = errors_vs_pyproj["native"]["nonfinite_match"]
     accelerated_pyproj_nonfinite_match = errors_vs_pyproj["accelerated"]["nonfinite_match"]
+    candidate_native_contract_passes = {
+        policy: errors_vs_native[policy]["max_m"] is not None
+        and errors_vs_native[policy]["max_m"] <= coordinate_contract_m
+        and errors_vs_native[policy]["nonfinite_match"]
+        for policy in candidate_policies
+    }
+    candidate_edge_contract_passes = {
+        policy: edge_error_vs_native["by_policy"][policy]["max_m"] is not None
+        and edge_error_vs_native["by_policy"][policy]["max_m"] <= coordinate_contract_m
+        and edge_error_vs_native["by_policy"][policy]["nonfinite_match"]
+        for policy in candidate_policies
+    }
+    candidate_pyproj_regression_passes = {
+        policy: errors_vs_pyproj[policy]["max_m"] is not None
+        and native_pyproj_error is not None
+        and errors_vs_pyproj[policy]["max_m"] <= native_pyproj_error + coordinate_contract_m
+        and (not native_pyproj_nonfinite_match or errors_vs_pyproj[policy]["nonfinite_match"])
+        for policy in candidate_policies
+    }
     allocators = [instrumentation[policy]["allocator"] for policy in POLICIES]
     graphs = [instrumentation[policy]["cuda_graph"] for policy in POLICIES]
     gates = {
@@ -3123,6 +3744,14 @@ def _run_case(cp: Any, case: BenchmarkCase, args: argparse.Namespace) -> dict[st
         or wall_timing["accelerated"]["speedup_vs_native"] >= 1.05,
         "wall_three_repeat_speedup_pass": accelerated_is_native
         or all(speedup >= 1.05 for speedup in wall_repeat_speedups),
+        "auto_median_speedup_pass": "auto" not in candidate_policies
+        or timing["auto"]["speedup_vs_native"] >= 1.05,
+        "auto_three_repeat_speedup_pass": "auto" not in candidate_policies
+        or all(speedup >= 1.05 for speedup in auto_repeat_speedups),
+        "auto_wall_median_speedup_pass": "auto" not in candidate_policies
+        or wall_timing["auto"]["speedup_vs_native"] >= 1.05,
+        "auto_wall_three_repeat_speedup_pass": "auto" not in candidate_policies
+        or all(speedup >= 1.05 for speedup in auto_wall_repeat_speedups),
         "no_steady_state_allocator_calls": all(
             count == 0
             for allocator in allocators
@@ -3143,25 +3772,21 @@ def _run_case(cp: Any, case: BenchmarkCase, args: argparse.Namespace) -> dict[st
             graph["captured"] and graph["memset_nodes"] == 0 for graph in graphs
         ),
         "native_coordinate_contract_m": coordinate_contract_m,
-        "native_coordinate_contract_pass": accelerated_native_error is not None
-        and accelerated_native_error <= coordinate_contract_m
-        and accelerated_native_nonfinite_match,
+        "native_coordinate_contract_pass": all(candidate_native_contract_passes.values()),
+        "candidate_native_coordinate_contract_passes": candidate_native_contract_passes,
         "accelerated_native_nonfinite_match": accelerated_native_nonfinite_match,
-        "edge_coordinate_contract_pass": edge_error_vs_native["max_m"] is not None
-        and edge_error_vs_native["max_m"] <= coordinate_contract_m
-        and edge_error_vs_native["nonfinite_match"],
+        "edge_coordinate_contract_pass": all(candidate_edge_contract_passes.values()),
+        "candidate_edge_coordinate_contract_passes": candidate_edge_contract_passes,
         "scale_guard_native_behavior_pass": scale_guard["qualification_pass"],
         "parameter_guard_native_behavior_pass": parameter_guard["qualification_pass"],
         "fallback_sweep_qualification_pass": not fallback_sweep.get("required", False)
         or bool(fallback_sweep.get("qualification_pass", False)),
-        "no_pyproj_regression": accelerated_pyproj_error is not None
-        and native_pyproj_error is not None
-        and accelerated_pyproj_error <= native_pyproj_error + coordinate_contract_m
-        and (not native_pyproj_nonfinite_match or accelerated_pyproj_nonfinite_match),
+        "no_pyproj_regression": all(candidate_pyproj_regression_passes.values()),
+        "candidate_pyproj_regression_passes": candidate_pyproj_regression_passes,
         "accelerated_pyproj_nonfinite_match": accelerated_pyproj_nonfinite_match,
         "native_pyproj_nonfinite_match": native_pyproj_nonfinite_match,
     }
-    required_gate_names = (
+    required_gate_names = [
         "median_speedup_pass",
         "three_repeat_speedup_pass",
         "wall_median_speedup_pass",
@@ -3181,7 +3806,16 @@ def _run_case(cp: Any, case: BenchmarkCase, args: argparse.Namespace) -> dict[st
         "parameter_guard_native_behavior_pass",
         "fallback_sweep_qualification_pass",
         "no_pyproj_regression",
-    )
+    ]
+    if "auto" in candidate_policies:
+        required_gate_names.extend(
+            (
+                "auto_median_speedup_pass",
+                "auto_three_repeat_speedup_pass",
+                "auto_wall_median_speedup_pass",
+                "auto_wall_three_repeat_speedup_pass",
+            )
+        )
     gates["qualification_pass"] = all(bool(gates[name]) for name in required_gate_names)
     return {
         "case": case.name,
@@ -3395,8 +4029,9 @@ def _run_workload_grid(
             accelerated_id = qualification.implementation_id
             min_elements = qualification.min_elements
             below_crossover = qualification.auto_enabled and n < min_elements
+            auto_implementation_id = qualification.auto_implementation_id or accelerated_id
             expected_auto_id = (
-                accelerated_id
+                auto_implementation_id
                 if qualification.auto_enabled and not below_crossover
                 else NATIVE_LIBDEVICE
             )
@@ -3464,9 +4099,10 @@ def _run_workload_grid(
                     "n": n,
                     "precision": args.precision,
                     "qualified_implementation_id": accelerated_id,
+                    "qualified_auto_implementation_id": auto_implementation_id,
                     "min_elements": min_elements,
                     "threshold_boundary": qualification.auto_enabled
-                    and n in {min_elements - 1, min_elements},
+                    and n in ({1, 2} if min_elements == 1 else {min_elements - 1, min_elements}),
                     "auto_enabled": qualification.auto_enabled,
                     "explicit_performance_required": explicit_performance_required,
                     "below_crossover": below_crossover,
@@ -3619,7 +4255,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
 def _requires_default_workload_grid(case: str) -> bool:
     """Whether enforced qualification requires the full historical 20-size grid."""
-    return case not in {"merc", "lcc"}
+    return case not in {"merc", "lcc"} and not case.startswith("sinu-inverse")
 
 
 def main() -> None:

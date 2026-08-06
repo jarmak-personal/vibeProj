@@ -44,6 +44,9 @@ class Sinusoidal(Projection):
             "es": es,
             "meridional_coefficients": meridional_coefficients,
             "meridional_pole": meridional_coefficients[0] * math.pi / 2.0,
+            "meridional_recurrence_hot_cy_limit": _meridional_arc(
+                _SINU_RECURRENCE_HOT_PHI, meridional_coefficients, math
+            ),
             "lam0": math.radians(params.lon_0),
             "x0": params.x_0,
             "y0": params.y_0,
@@ -96,6 +99,7 @@ class Sinusoidal(Projection):
 SINU_MAX_SEMI_MAJOR_AXIS_M = 6_400_000.0
 SINU_MAX_ECCENTRICITY_SQUARED = 0.012
 _MERIDIONAL_SERIES_ORDER = 7
+_SINU_RECURRENCE_HOT_PHI = math.radians(89.9)
 
 
 def _sine_power_fourier_coefficient(power: int, harmonic: int) -> float:

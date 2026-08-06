@@ -74,6 +74,8 @@ The initial accelerated coverage is deliberately small:
 | `helmert.fixed_q62` | Helmert datum shift | Bounded sine/cosine only; ECEF, square root, and `atan2` remain native fp64 | Ada `sm_89` consumer GPUs | 131,072 |
 | `tmerc.forward.fixed_q62` | Forward UTM only | Bounded sine/cosine, the TM latitude correction, and bounded `asinh`; remaining math stays fp64 | Ada `sm_89` consumer GPUs | 256 |
 | `sinu.forward.fixed_q62` | Spherical Sinusoidal forward only | Guarded Q1.62 cosine; remaining arithmetic stays fp64 | Ada `sm_89` consumer GPUs | 524,288 |
+| `sinu.inverse.convergent_newton` | Ellipsoidal Sinusoidal inverse | Native ten-step Newton expressions with a `1e-14` convergence break; full native coordinate/sentinel domain | Ada `sm_89` consumer GPUs; `auto` only | 1 |
+| `sinu.inverse.meridional_recurrence` | Ellipsoidal Sinusoidal inverse hot domain | Two recurrence Newton steps, one native-shaped correction, and paired final `sincos`; a cold lane makes the complete warp native | Ada `sm_89` consumer GPUs; explicit `accelerated` only | n/a |
 | `ortho.forward.fixed_q62` | Orthographic forward only | Atomically guarded Q1.62 sine/cosine pairs; remaining arithmetic stays fp64 | Ada `sm_89` consumer GPUs | 262,144 |
 | `ortho.inverse.guarded_reframe` | Spherical equatorial Orthographic inverse only (after CRS setup canonicalization) | Guarded algebraic reframe removes one `asin` and one `sincos`; ill-conditioned inputs use native fp64 | Ada `sm_89` consumer GPUs | 524,288 |
 | `gnom.inverse.guarded_rsqrt_reframe` | Spherical Gnomonic inverse, equatorial and bounded oblique origins | Guarded reciprocal-square-root reframe for finite non-axis `1e-24 < rho^2 <= 0.02`; every cold coordinate uses exact native fp64 | Ada `sm_89` consumer GPUs | n/a (explicit only) |
@@ -95,7 +97,7 @@ forward, and 6.328 nm for ellipsoidal inverse.
 On a qualified RTX 4090, `"auto"` resolves the specialized implementations at
 or above the listed sizes; below them it resolves native. Explicit
 `"accelerated"` can select the specialized implementation at any size. Generic
-Transverse Mercator, inverse UTM, sinusoidal inverse, Orthographic inverse
+Transverse Mercator, inverse UTM, spherical Sinusoidal inverse, Orthographic inverse
 outside the exact spherical-equatorial origin domain, LAEA outside spherical
 polar forward, Polar Stereographic outside the five listed inverse domains,
 GEOS inverse, Web Mercator in both directions, all other projection families, unsupported
@@ -114,6 +116,15 @@ normalized radius. A random 10% mixture outside the guard measured about 0.92x n
 on RTX 4090, so `"auto"` remains native at every size. Expert callers who know their
 inputs are concentrated in the documented hot domain may opt in with
 `transcendentals="accelerated"`; high-origin and polar CRS domains remain native.
+
+Ellipsoidal Sinusoidal inverse deliberately assigns different implementations
+to the two policies. `"auto"` uses `sinu.inverse.convergent_newton` for every
+nonempty qualified Ada fp64 workload. It preserves the native expressions and
+ten-step cap but stops after a correction smaller than `1e-14`, including for
+poles, off-image values, and non-finite inputs. Explicit `"accelerated"` instead
+selects `sinu.inverse.meridional_recurrence`. That hybrid is intended for hot
+inputs recovered within ±89.9° and wrapped relative longitude within ±π; any
+cold lane makes its complete warp execute the exact native inverse.
 
 H100, Hopper, and other datacenter GPUs remain native. Their much stronger
 native fp64 throughput changes the performance trade-off, and acceleration
@@ -207,6 +218,13 @@ against native policy. The current release gates are:
   longitude trig for finite wrapped longitude at
   `0 < scale <= 6,400,000 m`. Ellipsoidal polar, equatorial, oblique, and all
   inverse domains remain native.
+- Ellipsoidal Sinusoidal inverse: both implementations require finite setup,
+  nonzero signed unit factors, `0 < es <= 0.012`, and
+  `0 < a <= 6,400,000 m`. The automatic convergence implementation covers the
+  complete native coordinate domain. The explicit recurrence additionally
+  requires finite normalized inputs, recovered `|latitude| <= 89.9°`, finite
+  positive longitude denominator, and wrapped `|longitude| <= pi`; guard
+  failure is complete-warp and bitwise native.
 - Non-finite, out-of-domain, wide-TM, near-pole, and otherwise unsupported
 coordinates take the native branch per coordinate.
 
@@ -229,3 +247,17 @@ sinusoidal forward, 1.341x for orthographic forward, and a minimum 1.056x for
 Polar Stereographic inverse across its five exact domains. These measurements
 qualify the listed hardware and thresholds; they are not a performance promise
 for other devices or workloads.
+
+For ellipsoidal Sinusoidal inverse, the automatic convergence kernel was already
+above the 1.05 gate at the exact nonempty endpoint N=1, where its minimum wall
+speedup across WGS84 and the exact `es=.012`, `a=6,400,000 m` boundary was
+1.6435x, and remained above it at N=2 and 5,000,000, including randomized 0%,
+0.1%, 1%, 10%, 50%, and 100% cold mixtures. In the final public
+five-million-coordinate run, the automatic kernel measured 3.026x wall /
+3.034x device speedup in both domains. The explicit recurrence hybrid measured
+4.621x / 4.643x on WGS84 and 4.623x / 4.644x at the boundary. The formal
+suite's maximum/p99 native-relative horizontal error was 6.583/0 nm; the exact
+boundary maximum was 6.582903846 nm. At N=1 the recurrence hybrid's minimum
+wall repeat across both domains was 1.8215x, but the WGS84 random 10% cold and
+all-cold median wall speedups were only 1.0238x and 1.0032x. Those retained
+negative results are why the hybrid is not an AUTO choice.

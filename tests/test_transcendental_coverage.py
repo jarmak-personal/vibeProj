@@ -43,6 +43,9 @@ from vibeproj.transcendentals import (
     PROJECTION_FIXED_Q62_MAX_SCALE_M,
     SINU_FORWARD_FIXED_Q62,
     SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+    SINU_INVERSE_CONVERGENT_NEWTON,
+    SINU_INVERSE_CONVERGENT_NEWTON_MIN_ELEMENTS,
+    SINU_INVERSE_MERIDIONAL_RECURRENCE,
     STERE_INVERSE_FIXED_Q62,
     STERE_INVERSE_FIXED_Q62_MIN_ELEMENTS,
     TMERC_FIXED_Q62,
@@ -120,6 +123,22 @@ EXPECTED_REGISTRY_MATRIX = frozenset(
             ((8, 9),),
             ("auto", "fp64"),
             SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+        ),
+        (
+            SINU_INVERSE_CONVERGENT_NEWTON,
+            TranscendentalOperation.PROJECTION,
+            ("sinu.inverse.ellipsoidal",),
+            ((8, 9),),
+            ("auto", "fp64"),
+            SINU_INVERSE_CONVERGENT_NEWTON_MIN_ELEMENTS,
+        ),
+        (
+            SINU_INVERSE_MERIDIONAL_RECURRENCE,
+            TranscendentalOperation.PROJECTION,
+            ("sinu.inverse.ellipsoidal",),
+            ((8, 9),),
+            ("auto", "fp64"),
+            0,
         ),
         (
             ORTHO_FORWARD_FIXED_Q62,
@@ -417,6 +436,35 @@ def test_merc_forward_geometry_split_prevents_auto_leakage():
     assert ellipsoidal_explicit.implementation_id == MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY
 
 
+def test_sinu_inverse_policy_split_prevents_hybrid_auto_leakage():
+    registry = {entry.implementation_id: entry for entry in list_transcendental_strategies()}
+    automatic = registry[SINU_INVERSE_CONVERGENT_NEWTON]
+    explicit = registry[SINU_INVERSE_MERIDIONAL_RECURRENCE]
+    assert automatic.supported_policies == ("auto",)
+    assert automatic.min_elements == SINU_INVERSE_CONVERGENT_NEWTON_MIN_ELEMENTS
+    assert explicit.supported_policies == ("accelerated",)
+    assert explicit.min_elements == 0
+
+    auto_decision = resolve_transcendental_strategy(
+        TranscendentalOperation.PROJECTION,
+        "auto",
+        device=ADA_4090,
+        domain="sinu.inverse.ellipsoidal",
+        precision="fp64",
+        workload_size=SINU_INVERSE_CONVERGENT_NEWTON_MIN_ELEMENTS,
+    )
+    explicit_decision = resolve_transcendental_strategy(
+        TranscendentalOperation.PROJECTION,
+        "accelerated",
+        device=ADA_4090,
+        domain="sinu.inverse.ellipsoidal",
+        precision="fp64",
+        workload_size=1,
+    )
+    assert auto_decision.implementation_id == SINU_INVERSE_CONVERGENT_NEWTON
+    assert explicit_decision.implementation_id == SINU_INVERSE_MERIDIONAL_RECURRENCE
+
+
 def test_wave1_registry_entries_expose_exact_public_contracts():
     entries = {
         entry.implementation_id: entry
@@ -470,9 +518,10 @@ def test_every_accelerated_registry_domain_resolves_to_its_exact_entry():
     )
     for entry in accelerated:
         for domain in entry.domains:
+            policy = "accelerated" if "accelerated" in entry.supported_policies else "auto"
             decision = resolve_transcendental_strategy(
                 entry.operation,
-                "accelerated",
+                policy,
                 device=ADA_4090,
                 domain=domain,
                 precision="fp64",
@@ -789,7 +838,7 @@ def test_ada_qualified_helmert_resolves_accelerated(policy):
         (TranscendentalOperation.TMERC_FORWARD, "utm", "fp32", ADA_4090),
         (
             TranscendentalOperation.PROJECTION,
-            "sinu.inverse.ellipsoidal",
+            "sinu.inverse.ellipsoidal.invalid_setup",
             "fp64",
             ADA_4090,
         ),
@@ -1014,6 +1063,60 @@ def test_benchmark_native_identity_noise_gate_uses_only_same_id_wall_evidence():
             "wall_repeat_speedups": [math.nextafter(0.95, 0.0), 1.0, 1.0],
         }
     )
+
+
+def test_sinu_inverse_benchmark_keeps_explicit_and_auto_qualification_disjoint():
+    benchmark = _load_policy_benchmark_module()
+    expected_cases = {"sinu-inverse", "sinu-inverse-boundary"}
+    assert set(benchmark.SINU_INVERSE_CASES) == expected_cases
+    assert set(benchmark.CASE_GROUPS["sinu-inverse"]) == expected_cases
+    assert benchmark._requires_default_workload_grid("sinu-inverse") is False
+    assert benchmark._requires_default_workload_grid("sinu-inverse-boundary") is False
+
+    for index, case_name in enumerate(sorted(expected_cases)):
+        specification = benchmark.QUALIFICATION_SPECS[case_name]
+        assert specification.implementation_id == SINU_INVERSE_MERIDIONAL_RECURRENCE
+        assert specification.auto_implementation_id == SINU_INVERSE_CONVERGENT_NEWTON
+        assert specification.min_elements == SINU_INVERSE_CONVERGENT_NEWTON_MIN_ELEMENTS == 1
+        assert specification.implementation_min_elements == 0
+        assert specification.explicit_performance_min_elements == 1
+        assert specification.representative_mixed_guard_sweep is (case_name == "sinu-inverse")
+        assert benchmark._candidate_policy_ids(specification) == {
+            "accelerated": SINU_INVERSE_MERIDIONAL_RECURRENCE,
+            "auto": SINU_INVERSE_CONVERGENT_NEWTON,
+        }
+        assert benchmark._distinct_candidate_policies(specification) == (
+            "accelerated",
+            "auto",
+        )
+        workloads = benchmark._qualification_workload_sizes((5_000_000,), specification)
+        assert workloads == (1, 2, 5_000_000)
+        assert 0 not in workloads
+
+        case = benchmark._prepare_case(np, case_name, 128, 20260806 + index)
+        assert case.family == "sinu"
+        assert case.direction == "FORWARD"
+        assert case.qualification.direction == "inverse"
+        assert case.output_is_geographic is True
+        assert case.qualification is specification
+        assert np.all(np.isfinite(case.host_x))
+        assert np.all(np.isfinite(case.host_y))
+        assert np.any(~np.isfinite(case.edge_host_x))
+        assert np.any(~np.isfinite(case.edge_host_y))
+        computed = case.transformer._pipeline_for_direction("FORWARD").computed
+        if case_name == "sinu-inverse-boundary":
+            assert computed["es"] == 0.012
+            assert computed["a"] == PROJECTION_FIXED_Q62_MAX_SCALE_M
+
+    below = resolve_transcendental_strategy(
+        TranscendentalOperation.PROJECTION,
+        "auto",
+        device=ADA_4090,
+        domain="sinu.inverse.ellipsoidal",
+        precision="fp64",
+        workload_size=0,
+    )
+    assert below.implementation_id == NATIVE_LIBDEVICE
 
 
 def test_wave1_benchmark_specs_enforce_complete_public_qualification_surface():
@@ -1298,22 +1401,37 @@ def test_every_accelerated_registry_id_has_matching_benchmark_contract():
         if entry.implementation_id != NATIVE_LIBDEVICE
     )
 
-    assert {entry.implementation_id for entry in accelerated_entries} == {
-        specification.implementation_id
+    benchmark_ids = {
+        implementation_id
         for specification in specifications
-        if specification.implementation_id != NATIVE_LIBDEVICE
+        for implementation_id in (
+            specification.implementation_id,
+            specification.auto_implementation_id,
+        )
+        if implementation_id is not None and implementation_id != NATIVE_LIBDEVICE
     }
+    assert {entry.implementation_id for entry in accelerated_entries} == benchmark_ids
     for entry in accelerated_entries:
         matching = tuple(
             specification
             for specification in specifications
-            if specification.implementation_id == entry.implementation_id
+            if entry.implementation_id
+            in (specification.implementation_id, specification.auto_implementation_id)
         )
         assert matching
         for specification in matching:
             assert specification.operation == entry.operation.value
             assert specification.domain in entry.domains
-            assert specification.min_elements == entry.min_elements
+            expected_min_elements = (
+                specification.min_elements
+                if entry.implementation_id == specification.auto_implementation_id
+                else (
+                    specification.implementation_min_elements
+                    if specification.implementation_min_elements is not None
+                    else specification.min_elements
+                )
+            )
+            assert expected_min_elements == entry.min_elements
             assert specification.coordinate_contract_m == entry.accuracy.max_horizontal_error_m
             assert specification.max_physical_scale_m == entry.accuracy.max_physical_scale_m
             if entry.operation is TranscendentalOperation.PROJECTION:

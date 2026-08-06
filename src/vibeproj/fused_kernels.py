@@ -31,6 +31,8 @@ from vibeproj.transcendentals import (
     ORTHO_FORWARD_FIXED_Q62,
     ORTHO_INVERSE_GUARDED_REFRAME,
     SINU_FORWARD_FIXED_Q62,
+    SINU_INVERSE_CONVERGENT_NEWTON,
+    SINU_INVERSE_MERIDIONAL_RECURRENCE,
     STERE_INVERSE_FIXED_Q62,
     TMERC_FIXED_Q62,
 )
@@ -2355,6 +2357,8 @@ _PROJECTION_IMPLEMENTATION_TARGETS = {
     LCC_INVERSE_CONFORMAL_REFRAME: ("lcc", "inverse", "float64"),
     TMERC_FIXED_Q62: ("tmerc", "forward", "float64"),
     SINU_FORWARD_FIXED_Q62: ("sinu", "forward", "float64"),
+    SINU_INVERSE_CONVERGENT_NEWTON: ("sinu", "inverse", "float64"),
+    SINU_INVERSE_MERIDIONAL_RECURRENCE: ("sinu", "inverse", "float64"),
     ORTHO_FORWARD_FIXED_Q62: ("ortho", "forward", "float64"),
     ORTHO_INVERSE_GUARDED_REFRAME: ("ortho", "inverse", "float64"),
     GNOM_INVERSE_GUARDED_RSQRT_REFRAME: ("gnom", "inverse", "float64"),
@@ -2600,12 +2604,94 @@ _MERC_INVERSE_NATIVE_BODY = """\
         phi = phi_new;
     }}"""
 
+_SINU_INVERSE_NATIVE_BODY = """\
+    {real_t} phi = cy;
+    {real_t} lam;
+    if (es == ({real_t})0.0) {{
+        lam = cx / cos(phi);
+    }} else {{
+        const {real_t} pole = c0 * ({real_t})0.5 * {pi};
+        const bool invalid = fabs(cy) > pole;
+        const {real_t} target = invalid ? ({real_t})0.0 : cy;
+        phi = fmin(fmax(target / c0, ({real_t})-0.5 * {pi}), ({real_t})0.5 * {pi});
+        for (int i = 0; i < 10; i++) {{
+            const {real_t} sin_phi = sin(phi);
+            const {real_t} one_minus = ({real_t})1.0 - es * sin_phi * sin_phi;
+            const {real_t} derivative = (({real_t})1.0 - es)
+                / (one_minus * sqrt(one_minus));
+            phi -= (vp_meridional_arc(phi, c0, c1, c2, c3, c4, c5, c6, c7) - target)
+                / derivative;
+        }}
+        const {real_t} sin_phi = sin(phi);
+        const {real_t} denominator = cos(phi)
+            / sqrt(({real_t})1.0 - es * sin_phi * sin_phi);
+        lam = cx / denominator;
+        if (invalid) {{ lam = phi = ({real_t})1.0 / ({real_t})0.0; }}
+    }}"""
+
 _CONFORMAL_GUARDED_DEVICE_FNS = r"""
 __device__ __forceinline__ double vp_conformal_eccentricity_correction(
     double e,
     double sin_angle
 ) {
     return e * atanh(e * sin_angle);
+}
+"""
+
+_SINU_GUARDED_DEVICE_FNS = r"""
+#define VP_SINU_PI_D 3.141592653589793238462643383279502884
+#define VP_SINU_HOT_PHI_D 1.5690509975429023
+
+__device__ inline double vp_meridional_arc(
+    double phi,
+    double c0, double c1, double c2, double c3,
+    double c4, double c5, double c6, double c7
+);
+
+__device__ __forceinline__ bool vp_sinu_inverse_setup_is_qualified(
+    double es,
+    double c0, double c1, double c2, double c3,
+    double c4, double c5, double c6, double c7,
+    double hot_cy_limit,
+    double lam0, double a, double x0, double y0,
+    double x_unit_to_m, double y_unit_to_m
+) {
+    return isfinite(es) && es > 0.0 && es <= 0.012
+        && isfinite(c0) && c0 > 0.0
+        && isfinite(c1) && isfinite(c2) && isfinite(c3)
+        && isfinite(c4) && isfinite(c5) && isfinite(c6) && isfinite(c7)
+        && isfinite(hot_cy_limit) && hot_cy_limit > 0.0
+        && isfinite(lam0)
+        && isfinite(a) && a > 0.0 && a <= 6400000.0
+        && isfinite(x0) && isfinite(y0)
+        && isfinite(x_unit_to_m) && x_unit_to_m != 0.0
+        && isfinite(y_unit_to_m) && y_unit_to_m != 0.0;
+}
+
+__device__ __noinline__ void vp_sinu_inverse_native_ellipsoid(
+    double cx, double cy, double es,
+    double c0, double c1, double c2, double c3,
+    double c4, double c5, double c6, double c7,
+    double* lam_out, double* phi_out
+) {
+    const double pole = c0 * 0.5 * VP_SINU_PI_D;
+    const bool invalid = fabs(cy) > pole;
+    const double target = invalid ? 0.0 : cy;
+    double phi = fmin(fmax(target / c0, -0.5 * VP_SINU_PI_D), 0.5 * VP_SINU_PI_D);
+    for (int i = 0; i < 10; ++i) {
+        const double sin_phi = sin(phi);
+        const double one_minus = 1.0 - es * sin_phi * sin_phi;
+        const double derivative = (1.0 - es) / (one_minus * sqrt(one_minus));
+        phi -= (
+            vp_meridional_arc(phi, c0, c1, c2, c3, c4, c5, c6, c7) - target
+        ) / derivative;
+    }
+    const double sin_phi = sin(phi);
+    const double denominator = cos(phi) / sqrt(1.0 - es * sin_phi * sin_phi);
+    double lam = cx / denominator;
+    if (invalid) { lam = phi = 1.0 / 0.0; }
+    *lam_out = lam;
+    *phi_out = phi;
 }
 """
 
@@ -2901,6 +2987,121 @@ def _merc_forward_product_rewrite(
 
 
 _PROJECTION_GUARDED_REWRITES = {
+    SINU_INVERSE_CONVERGENT_NEWTON: (
+        "sinu_inverse_convergent_newton",
+        (
+            (
+                """\
+        for (int i = 0; i < 10; i++) {{
+            const {real_t} sin_phi = sin(phi);
+            const {real_t} one_minus = ({real_t})1.0 - es * sin_phi * sin_phi;
+            const {real_t} derivative = (({real_t})1.0 - es)
+                / (one_minus * sqrt(one_minus));
+            phi -= (vp_meridional_arc(phi, c0, c1, c2, c3, c4, c5, c6, c7) - target)
+                / derivative;
+        }}""",
+                """\
+        for (int i = 0; i < 10; i++) {{
+            const {real_t} sin_phi = sin(phi);
+            const {real_t} one_minus = ({real_t})1.0 - es * sin_phi * sin_phi;
+            const {real_t} derivative = (({real_t})1.0 - es)
+                / (one_minus * sqrt(one_minus));
+            const {real_t} delta =
+                (vp_meridional_arc(phi, c0, c1, c2, c3, c4, c5, c6, c7) - target)
+                / derivative;
+            phi -= delta;
+            if (fabs(delta) < {tol}) break;
+        }}""",
+            ),
+        ),
+    ),
+    SINU_INVERSE_MERIDIONAL_RECURRENCE: (
+        "sinu_inverse_meridional_recurrence",
+        (
+            (
+                _SINU_INVERSE_NATIVE_BODY,
+                """\
+    double phi = cy;
+    double lam;
+    if (es == 0.0) {
+        lam = cx / cos(phi);
+    } else {
+        const bool setup_qualified = vp_sinu_inverse_setup_is_qualified(
+            es, c0, c1, c2, c3, c4, c5, c6, c7, hot_cy_limit,
+            lam0, a, x0, y0, x_unit_to_m, y_unit_to_m
+        );
+        const bool coordinate_qualified = isfinite(d_arg1) && isfinite(d_arg2)
+            && isfinite(cx) && isfinite(cy) && fabs(cy) <= hot_cy_limit;
+        const bool prewarp_uses_native = __any_sync(
+            __activemask(), !(setup_qualified && coordinate_qualified)
+        );
+        if (prewarp_uses_native) {
+            vp_sinu_inverse_native_ellipsoid(
+                cx, cy, es, c0, c1, c2, c3, c4, c5, c6, c7, &lam, &phi
+            );
+        } else {
+            double candidate_phi = cy / c0;
+            #pragma unroll
+            for (int i = 0; i < 2; ++i) {
+                double sin_two, cos_two;
+                sincos(2.0 * candidate_phi, &sin_two, &cos_two);
+                double arc = c0 * candidate_phi + c1 * sin_two;
+                double previous = 0.0;
+                double current = sin_two;
+                const double two_cos = 2.0 * cos_two;
+                double next = fma(two_cos, current, -previous);
+                arc = fma(c2, next, arc); previous = current; current = next;
+                next = fma(two_cos, current, -previous);
+                arc = fma(c3, next, arc); previous = current; current = next;
+                next = fma(two_cos, current, -previous);
+                arc = fma(c4, next, arc); previous = current; current = next;
+                next = fma(two_cos, current, -previous);
+                arc = fma(c5, next, arc); previous = current; current = next;
+                next = fma(two_cos, current, -previous);
+                arc = fma(c6, next, arc); previous = current; current = next;
+                next = fma(two_cos, current, -previous);
+                arc = fma(c7, next, arc);
+                const double sin_phi_squared = fmax(0.0, 0.5 * (1.0 - cos_two));
+                const double one_minus = 1.0 - es * sin_phi_squared;
+                const double derivative = (1.0 - es)
+                    / (one_minus * sqrt(one_minus));
+                candidate_phi -= (arc - cy) / derivative;
+            }
+            const double correction_sin_phi = sin(candidate_phi);
+            const double correction_one_minus =
+                1.0 - es * correction_sin_phi * correction_sin_phi;
+            const double correction_derivative = (1.0 - es)
+                / (correction_one_minus * sqrt(correction_one_minus));
+            candidate_phi -= (
+                vp_meridional_arc(
+                    candidate_phi, c0, c1, c2, c3, c4, c5, c6, c7
+                ) - cy
+            ) / correction_derivative;
+            double final_sin_phi, final_cos_phi;
+            sincos(candidate_phi, &final_sin_phi, &final_cos_phi);
+            const double candidate_denominator = final_cos_phi
+                / sqrt(1.0 - es * final_sin_phi * final_sin_phi);
+            const double candidate_lam = cx / candidate_denominator;
+            const bool candidate_qualified = isfinite(candidate_phi)
+                && fabs(candidate_phi) <= VP_SINU_HOT_PHI_D
+                && isfinite(candidate_denominator) && candidate_denominator > 0.0
+                && isfinite(candidate_lam) && fabs(candidate_lam) <= VP_SINU_PI_D;
+            const bool candidate_warp_uses_native = __any_sync(
+                __activemask(), !candidate_qualified
+            );
+            if (candidate_warp_uses_native) {
+                vp_sinu_inverse_native_ellipsoid(
+                    cx, cy, es, c0, c1, c2, c3, c4, c5, c6, c7, &lam, &phi
+                );
+            } else {
+                phi = candidate_phi;
+                lam = candidate_lam;
+            }
+        }
+    }""",
+            ),
+        ),
+    ),
     LCC_FORWARD_CONFORMAL_REFRAME: (
         "lcc_forward_conformal_reframe",
         (
@@ -3181,6 +3382,15 @@ def _build_projection_guarded_source(
                 f"Expected one Mercator inverse parameter site while building {implementation_id!r}"
             )
         source = source.replace(native_parameters, accelerated_parameters)
+    if implementation_id == SINU_INVERSE_MERIDIONAL_RECURRENCE:
+        native_parameters = "    double es,\n"
+        accelerated_parameters = "    double es, double hot_cy_limit,\n"
+        if source.count(native_parameters) != 1:
+            raise RuntimeError(
+                "Expected one Sinusoidal inverse parameter site while building "
+                f"{implementation_id!r}"
+            )
+        source = source.replace(native_parameters, accelerated_parameters)
     if source.count(native_func_name) != 1:
         raise RuntimeError(
             f"Expected one {native_func_name!r} kernel while building {implementation_id!r}"
@@ -3188,6 +3398,8 @@ def _build_projection_guarded_source(
     source = source.replace(native_func_name, function_name)
     for native_expression, accelerated_expression in replacements:
         if implementation_id in (
+            SINU_INVERSE_CONVERGENT_NEWTON,
+            SINU_INVERSE_MERIDIONAL_RECURRENCE,
             LCC_FORWARD_CONFORMAL_REFRAME,
             LCC_INVERSE_CONFORMAL_REFRAME,
             MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY,
@@ -3202,12 +3414,18 @@ def _build_projection_guarded_source(
         else:
             native_expression = native_expression.replace("{real_t}", "double")
         accelerated_expression = accelerated_expression.replace("{real_t}", "double")
+        if implementation_id == SINU_INVERSE_CONVERGENT_NEWTON:
+            accelerated_expression = accelerated_expression.replace(
+                "{tol}", _TOL_LITERALS["float64"]
+            )
         if source.count(native_expression) != 1:
             raise RuntimeError(
                 f"Expected one {native_expression!r} site while building {implementation_id!r}"
             )
         source = source.replace(native_expression, accelerated_expression)
-    if implementation_id in (
+    if implementation_id == SINU_INVERSE_MERIDIONAL_RECURRENCE:
+        implementation_helpers = _SINU_GUARDED_DEVICE_FNS
+    elif implementation_id in (
         LCC_FORWARD_CONFORMAL_REFRAME,
         LCC_INVERSE_CONFORMAL_REFRAME,
     ):
@@ -3584,14 +3802,25 @@ def fused_transform(
             )
 
         elif projection_name == "sinu":
-            args = _with_units(
-                real_t(computed["es"]),
-                *(real_t(value) for value in computed["meridional_coefficients"]),
-                real_t(computed["lam0"]),
-                real_t(computed["a"]),
-                real_t(computed["x0"]),
-                real_t(computed["y0"]),
-            )
+            if direction == "inverse" and transcendental_impl == SINU_INVERSE_MERIDIONAL_RECURRENCE:
+                args = _with_units(
+                    real_t(computed["es"]),
+                    real_t(computed["meridional_recurrence_hot_cy_limit"]),
+                    *(real_t(value) for value in computed["meridional_coefficients"]),
+                    real_t(computed["lam0"]),
+                    real_t(computed["a"]),
+                    real_t(computed["x0"]),
+                    real_t(computed["y0"]),
+                )
+            else:
+                args = _with_units(
+                    real_t(computed["es"]),
+                    *(real_t(value) for value in computed["meridional_coefficients"]),
+                    real_t(computed["lam0"]),
+                    real_t(computed["a"]),
+                    real_t(computed["x0"]),
+                    real_t(computed["y0"]),
+                )
 
         elif projection_name == "eqc":
             args = _with_units(
