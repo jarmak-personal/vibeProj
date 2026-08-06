@@ -26,6 +26,10 @@ from vibeproj.transcendentals import (
     HELMERT_FIXED_Q62_MIN_ELEMENTS,
     LAEA_FORWARD_POLAR_FIXED_Q62,
     LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS,
+    LCC_FORWARD_CONFORMAL_REFRAME,
+    LCC_FORWARD_CONFORMAL_REFRAME_MIN_ELEMENTS,
+    LCC_INVERSE_CONFORMAL_REFRAME,
+    LCC_INVERSE_CONFORMAL_REFRAME_MIN_ELEMENTS,
     MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY,
     MERC_FORWARD_SPHERICAL_PRODUCT_POLY,
     MERC_FORWARD_SPHERICAL_PRODUCT_POLY_MIN_ELEMENTS,
@@ -216,6 +220,32 @@ EXPECTED_REGISTRY_MATRIX = frozenset(
             ((8, 9),),
             ("auto", "fp64"),
             MERC_INVERSE_EXP_SERIES_MIN_ELEMENTS,
+        ),
+        (
+            LCC_FORWARD_CONFORMAL_REFRAME,
+            TranscendentalOperation.PROJECTION,
+            (
+                "lcc.forward.spherical.1sp.regular_cone",
+                "lcc.forward.spherical.2sp.regular_cone",
+                "lcc.forward.ellipsoidal.1sp.regular_cone",
+                "lcc.forward.ellipsoidal.2sp.regular_cone",
+            ),
+            ((8, 9),),
+            ("auto", "fp64"),
+            LCC_FORWARD_CONFORMAL_REFRAME_MIN_ELEMENTS,
+        ),
+        (
+            LCC_INVERSE_CONFORMAL_REFRAME,
+            TranscendentalOperation.PROJECTION,
+            (
+                "lcc.inverse.spherical.1sp",
+                "lcc.inverse.spherical.2sp",
+                "lcc.inverse.ellipsoidal.1sp",
+                "lcc.inverse.ellipsoidal.2sp",
+            ),
+            ((8, 9),),
+            ("auto", "fp64"),
+            LCC_INVERSE_CONFORMAL_REFRAME_MIN_ELEMENTS,
         ),
         (
             HELMERT_FIXED_Q62,
@@ -919,6 +949,8 @@ def test_documented_auto_thresholds_match_registry_exactly():
         GEOS_FORWARD_FIXED_Q62: GEOS_FORWARD_FIXED_Q62_MIN_ELEMENTS,
         HELMERT_FIXED_Q62: HELMERT_FIXED_Q62_MIN_ELEMENTS,
         LAEA_FORWARD_POLAR_FIXED_Q62: LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS,
+        LCC_FORWARD_CONFORMAL_REFRAME: LCC_FORWARD_CONFORMAL_REFRAME_MIN_ELEMENTS,
+        LCC_INVERSE_CONFORMAL_REFRAME: LCC_INVERSE_CONFORMAL_REFRAME_MIN_ELEMENTS,
         MERC_FORWARD_SPHERICAL_PRODUCT_POLY: MERC_FORWARD_SPHERICAL_PRODUCT_POLY_MIN_ELEMENTS,
         MERC_INVERSE_EXP_SERIES: MERC_INVERSE_EXP_SERIES_MIN_ELEMENTS,
         ORTHO_FORWARD_FIXED_Q62: ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
@@ -964,7 +996,7 @@ def test_benchmark_enforced_grid_error_reports_current_default_bounds(monkeypatc
     assert "every default workload size from 1 to 5000000" in message
 
 
-def test_benchmark_native_identity_noise_gate_omits_only_event_aggregate():
+def test_benchmark_native_identity_noise_gate_uses_only_same_id_wall_evidence():
     benchmark_module = _load_policy_benchmark_module()
     gate = benchmark_module._native_identity_noise_pass
     passing = {
@@ -972,7 +1004,6 @@ def test_benchmark_native_identity_noise_gate_omits_only_event_aggregate():
         "native_implementation_ids": [NATIVE_LIBDEVICE],
         "wall_speedup": 0.98,
         "wall_repeat_speedups": [0.95, 1.0, 1.05],
-        "device_repeat_speedups": [0.95, 0.97, 1.0],
     }
     assert gate(**passing)
     assert not gate(**{**passing, "auto_implementation_ids": [MERC_INVERSE_EXP_SERIES]})
@@ -980,7 +1011,7 @@ def test_benchmark_native_identity_noise_gate_omits_only_event_aggregate():
     assert not gate(
         **{
             **passing,
-            "device_repeat_speedups": [math.nextafter(0.95, 0.0), 1.0, 1.0],
+            "wall_repeat_speedups": [math.nextafter(0.95, 0.0), 1.0, 1.0],
         }
     )
 

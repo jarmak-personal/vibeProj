@@ -83,6 +83,8 @@ The initial accelerated coverage is deliberately small:
 | `merc.forward.spherical.product_poly` | Spherical regular Mercator forward, variants A/B | Removes the zero-exponent `pow` while preserving the native clamp/log-tan result exactly | Ada `sm_89` consumer GPUs | 262,144 |
 | `merc.forward.ellipsoidal.product_poly` | Ellipsoidal regular Mercator forward, variants A/B | Native clamp/log-tan with a product reframe and degree-eight polynomial; polar cap uses exact native math | Ada `sm_89` consumer GPUs; explicit `accelerated` only | n/a |
 | `merc.inverse.exp_series` | Regular Mercator inverse, spherical/ellipsoidal variants A/B | Native conformal `exp`/`atan` seed followed by the shared sixth-order Poder/Engsager recovery series | Ada `sm_89` consumer GPUs | 65,536 |
+| `lcc.forward.conformal_reframe` | Lambert Conformal Conic forward, spherical/ellipsoidal 1SP/2SP regular cones | Spherical log/exp power reframe; ellipsoidal native outer power with stable `exp`/`atanh` conformal correction | Ada `sm_89` consumer GPUs | 65,536 |
+| `lcc.inverse.conformal_reframe` | Lambert Conformal Conic inverse, spherical/ellipsoidal 1SP/2SP | Spherical logarithmic latitude reconstruction; ellipsoidal native outer power with bounded six-step `exp`/`atanh` recovery and a final contraction correction when step six has not reached `1e-14` | Ada `sm_89` consumer GPUs | 128 |
 
 On the qualifying RTX 4090 at five million coordinates, spherical Mercator
 forward measured about 1.13x native, explicit ellipsoidal forward about 1.26x,
@@ -157,6 +159,21 @@ against native policy. The current release gates are:
   normalized coordinates, longitude, and all six conformal-series coefficients
   must remain finite. The complete geographic result must differ from native
   by `< 1e-8 m` after angular error is scaled by the ellipsoid radius.
+- Lambert Conformal Conic forward: spherical and ellipsoidal 1SP/2SP setups
+  require finite nonzero cone constants and units, exact `k0 == 1`,
+  `0 <= e <= 0.1`, `0 < a <= 6,400,000 m`, and `|n| >= 0.2`. Exact poles,
+  non-finite values, unbounded cone angles, and any cold lane make the complete
+  warp use native math. Near-equator cones remain native. Complete projected
+  output must differ from native by `< 1e-8 m` with no pyproj regression.
+- Lambert Conformal Conic inverse: the same setup bounds apply without the
+  forward `|n|` restriction. Exact apex, nonpositive radius ratios, and
+  non-finite raw or normalized inputs use complete-warp native math. Huge finite
+  coordinates whose ratio becomes positive infinity remain qualified and
+  converge to the finite pole limit. Angular error scaled by the ellipsoid
+  radius must be `< 1e-8 m`, with no pyproj regression. Ellipsoidal recovery
+  applies at most six fixed-point steps; only when the sixth delta remains at
+  least `1e-14`, that final delta receives a contraction correction. This adds
+  no seventh transcendental evaluation and closes the exact `e=0.1` boundary.
 - Orthographic forward: at physical scale `0 < scale <= 6,400,000 m`, both
   latitude and wrapped-longitude sine/cosine pairs use one atomic guard over
   `[-pi/2, pi/2]` and `[-pi, pi]`. If either argument is invalid, both pairs

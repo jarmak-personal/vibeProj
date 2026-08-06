@@ -106,11 +106,13 @@ UTM, spherical-sinusoidal-forward, orthographic-forward, and spherical-equatoria
 orthographic-inverse, GEOS-forward (sphere/ellipsoid and sweep x/y), and
 spherical-polar LAEA-forward, ellipsoidal Polar Stereographic inverse,
 spherical regular-Mercator forward, and regular-Mercator inverse
+plus spherical/ellipsoidal Lambert Conformal Conic 1SP/2SP in both directions
 operations on validated Ada `sm_89` consumer GPUs
 above their measured workload-size crossovers. GEOS forward starts at 2,097,152
 coordinates, spherical-polar LAEA forward at 1,048,576, Polar Stereographic
 inverse at 1,000,000, spherical Mercator forward at 262,144, and Mercator inverse at
-65,536; the canonical policy matrix lists every threshold. Hopper and
+65,536. LCC forward starts at 65,536 for regular cones and LCC inverse at 128;
+near-equator LCC forward remains native. The canonical policy matrix lists every threshold. Hopper and
 unmeasured devices remain native. A selected
 accelerated kernel may still take its warp-atomic native branch when any lane
 is out of domain or the physical scale is unsupported. See the

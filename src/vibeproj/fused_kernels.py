@@ -22,6 +22,8 @@ from vibeproj.transcendentals import (
     GNOM_INVERSE_GUARDED_RSQRT_REFRAME,
     HELMERT_FIXED_Q62,
     LAEA_FORWARD_POLAR_FIXED_Q62,
+    LCC_FORWARD_CONFORMAL_REFRAME,
+    LCC_INVERSE_CONFORMAL_REFRAME,
     MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY,
     MERC_FORWARD_SPHERICAL_PRODUCT_POLY,
     MERC_INVERSE_EXP_SERIES,
@@ -2349,6 +2351,8 @@ _TYPE_MAP = {
 _PROJECTION_IMPLEMENTATION_TARGETS = {
     GEOS_FORWARD_FIXED_Q62: ("geos", "forward", "float64"),
     LAEA_FORWARD_POLAR_FIXED_Q62: ("laea", "forward", "float64"),
+    LCC_FORWARD_CONFORMAL_REFRAME: ("lcc", "forward", "float64"),
+    LCC_INVERSE_CONFORMAL_REFRAME: ("lcc", "inverse", "float64"),
     TMERC_FIXED_Q62: ("tmerc", "forward", "float64"),
     SINU_FORWARD_FIXED_Q62: ("sinu", "forward", "float64"),
     ORTHO_FORWARD_FIXED_Q62: ("ortho", "forward", "float64"),
@@ -2556,6 +2560,26 @@ _GNOM_INVERSE_NATIVE_BODY = """\
         }
     }"""
 
+_LCC_FORWARD_NATIVE_BODY = """\
+    {real_t} sin_phi = sin(phi);
+    {real_t} ts = tsfn(phi, sin_phi, e);
+    {real_t} rho = F * pow(ts, nn) * k0;
+    {real_t} theta = nn * lam;
+    {real_t} sin_theta, cos_theta;
+    vp_native_sincos(theta, &sin_theta, &cos_theta);
+    double easting  = (double)(rho * sin_theta) * (double)a + (double)x0;
+    double northing = (double)(rho0 - rho * cos_theta) * (double)a + (double)y0;
+"""
+
+_LCC_INVERSE_NATIVE_BODY = """\
+    {real_t} dy = rho0 - cy;
+    {real_t} rho = sqrt(cx * cx + dy * dy);
+    if (nn < ({real_t})0.0) {{ rho = -rho; cx = -cx; dy = -dy; }}
+    {real_t} lam = atan2(cx, dy) / nn;
+    {real_t} ts = pow(rho / (F * k0), ({real_t})1.0 / nn);
+    {real_t} phi = phi2(ts, e);
+"""
+
 _MERC_FORWARD_NATIVE_BODY = """\
     if (!isnan(phi)) {{
         const {real_t} max_lat = ({real_t})1.5707788735023767;
@@ -2575,6 +2599,15 @@ _MERC_INVERSE_NATIVE_BODY = """\
         if (fabs(phi_new - phi) < {tol}) {{ phi = phi_new; break; }}
         phi = phi_new;
     }}"""
+
+_CONFORMAL_GUARDED_DEVICE_FNS = r"""
+__device__ __forceinline__ double vp_conformal_eccentricity_correction(
+    double e,
+    double sin_angle
+) {
+    return e * atanh(e * sin_angle);
+}
+"""
 
 _MERC_GUARDED_DEVICE_FNS = r"""
 #define VP_MERC_PI_D 3.141592653589793238462643383279502884
@@ -2666,6 +2699,87 @@ __device__ __noinline__ double vp_merc_inverse_native_cold(
         phi = phi_new;
     }
     return phi;
+}
+"""
+
+_LCC_GUARDED_DEVICE_FNS = r"""
+#define VP_LCC_PI_D 3.141592653589793238462643383279502884
+#define VP_LCC_HALF_PI_D 1.570796326794896619231321691639751442
+
+__device__ __forceinline__ bool vp_lcc_setup_is_qualified(
+    double nn,
+    double F,
+    double rho0,
+    double e,
+    double k0,
+    double lam0,
+    double a,
+    double x0,
+    double y0,
+    double x_unit_to_m,
+    double y_unit_to_m,
+    bool forward
+) {
+    return isfinite(nn) && nn != 0.0 && (!forward || fabs(nn) >= 0.2)
+        && isfinite(F) && F != 0.0 && isfinite(rho0)
+        && isfinite(e) && e >= 0.0 && e <= 0.1
+        && isfinite(k0) && k0 == 1.0 && isfinite(lam0)
+        && vp_projection_fixed_scale_is_qualified(a)
+        && isfinite(x0) && isfinite(y0)
+        && isfinite(x_unit_to_m) && x_unit_to_m != 0.0
+        && isfinite(y_unit_to_m) && y_unit_to_m != 0.0;
+}
+
+__device__ __noinline__ void vp_lcc_forward_native_cold(
+    double phi,
+    double lam,
+    double nn,
+    double F,
+    double rho0,
+    double e,
+    double k0,
+    double* projected_x,
+    double* projected_y
+) {
+    const double sin_phi = sin(phi);
+    const double e_sin_phi = e * sin_phi;
+    const double ts = tan(0.5 * (VP_LCC_HALF_PI_D - phi))
+        / pow((1.0 - e_sin_phi) / (1.0 + e_sin_phi), 0.5 * e);
+    const double rho = F * pow(ts, nn) * k0;
+    const double theta = nn * lam;
+    double sin_theta, cos_theta;
+    vp_native_sincos(theta, &sin_theta, &cos_theta);
+    *projected_x = rho * sin_theta;
+    *projected_y = rho0 - rho * cos_theta;
+}
+
+__device__ __noinline__ void vp_lcc_inverse_native_cold(
+    double cx,
+    double cy,
+    double nn,
+    double F,
+    double rho0,
+    double e,
+    double k0,
+    double* lam_out,
+    double* phi_out
+) {
+    double dy = rho0 - cy;
+    double rho = sqrt(cx * cx + dy * dy);
+    if (nn < 0.0) { rho = -rho; cx = -cx; dy = -dy; }
+    *lam_out = atan2(cx, dy) / nn;
+    const double ts = pow(rho / (F * k0), 1.0 / nn);
+    const double half_e = 0.5 * e;
+    double phi = VP_LCC_HALF_PI_D - 2.0 * atan(ts);
+    for (int i = 0; i < 15; ++i) {
+        const double e_sin = e * sin(phi);
+        const double dphi = VP_LCC_HALF_PI_D - 2.0 * atan(
+            ts * pow((1.0 - e_sin) / (1.0 + e_sin), half_e)
+        ) - phi;
+        phi += dphi;
+        if (fabs(dphi) < 1e-14) break;
+    }
+    *phi_out = phi;
 }
 """
 
@@ -2761,7 +2875,7 @@ _MERC_FORWARD_PRODUCT_BODY = """\
         const double max_lat = 1.5707788735023767;
         phi = fmin(fmax(phi, -max_lat), max_lat);
         const double sin_phi = sin(phi);
-        const double correction = e * atanh(e * sin_phi);
+        const double correction = vp_conformal_eccentricity_correction(e, sin_phi);
         const double spherical = tan(0.25 * VP_MERC_PI_D + 0.5 * phi);
         y_proj = k0 * log(
             spherical * vp_merc_exp_negative_small(correction)
@@ -2787,6 +2901,117 @@ def _merc_forward_product_rewrite(
 
 
 _PROJECTION_GUARDED_REWRITES = {
+    LCC_FORWARD_CONFORMAL_REFRAME: (
+        "lcc_forward_conformal_reframe",
+        (
+            (
+                _LCC_FORWARD_NATIVE_BODY,
+                """\
+    double projected_x = 0.0, projected_y = 0.0;
+    double candidate_rho = 0.0, candidate_theta = 0.0;
+    const bool coordinate_qualified = isfinite(d_lat) && isfinite(d_lon)
+        && isfinite(phi) && fabs(phi) < VP_LCC_HALF_PI_D && isfinite(lam);
+    const bool setup_qualified = vp_lcc_setup_is_qualified(
+        nn, F, rho0, e, k0, lam0, a, x0, y0,
+        x_unit_to_m, y_unit_to_m, true
+    );
+    if (coordinate_qualified && setup_qualified) {
+        const double sin_phi = sin(phi);
+        const double tan_half = tan(0.5 * (VP_LCC_HALF_PI_D - phi));
+        if (e == 0.0) {
+            candidate_rho = F * exp(nn * log(tan_half)) * k0;
+        } else {
+            const double correction = vp_conformal_eccentricity_correction(e, sin_phi);
+            const double ts = tan_half / exp(-correction);
+            candidate_rho = F * pow(ts, nn) * k0;
+        }
+        candidate_theta = nn * lam;
+        double sin_theta, cos_theta;
+        vp_native_sincos(candidate_theta, &sin_theta, &cos_theta);
+        projected_x = candidate_rho * sin_theta;
+        projected_y = rho0 - candidate_rho * cos_theta;
+    }
+    const bool lane_qualified = coordinate_qualified && setup_qualified
+        && isfinite(candidate_rho) && fabs(candidate_theta) <= VP_LCC_PI_D
+        && isfinite(projected_x) && isfinite(projected_y);
+    const bool warp_uses_native = __any_sync(__activemask(), !lane_qualified);
+    if (warp_uses_native) {
+        vp_lcc_forward_native_cold(
+            phi, lam, nn, F, rho0, e, k0, &projected_x, &projected_y
+        );
+    }
+    double easting = projected_x * a + x0;
+    double northing = projected_y * a + y0;
+""",
+            ),
+        ),
+    ),
+    LCC_INVERSE_CONFORMAL_REFRAME: (
+        "lcc_inverse_conformal_reframe",
+        (
+            (
+                _LCC_INVERSE_NATIVE_BODY,
+                """\
+    double candidate_lam = 0.0, candidate_phi = 0.0;
+    double work_cx = cx;
+    double dy = rho0 - cy;
+    double rho = sqrt(work_cx * work_cx + dy * dy);
+    if (nn < 0.0) { rho = -rho; work_cx = -work_cx; dy = -dy; }
+    const double ratio = rho / (F * k0);
+    const bool setup_qualified = vp_lcc_setup_is_qualified(
+        nn, F, rho0, e, k0, lam0, a, x0, y0,
+        x_unit_to_m, y_unit_to_m, false
+    );
+    const bool coordinate_qualified = isfinite(d_arg1) && isfinite(d_arg2)
+        && isfinite(cx) && isfinite(cy) && isfinite(work_cx) && isfinite(dy)
+        && ratio > 0.0;
+    if (setup_qualified && coordinate_qualified) {
+        candidate_lam = atan2(work_cx, dy) / nn;
+        if (e == 0.0) {
+            const double psi = -log(ratio) / nn;
+            candidate_phi = VP_LCC_HALF_PI_D - 2.0 * atan(exp(-psi));
+        } else {
+            const double ts = pow(ratio, 1.0 / nn);
+            candidate_phi = VP_LCC_HALF_PI_D - 2.0 * atan(ts);
+            for (int i = 0; i < 6; ++i) {
+                const double sin_phi = sin(candidate_phi);
+                const double correction = vp_conformal_eccentricity_correction(e, sin_phi);
+                const double scaled_ts = ts * exp(-correction);
+                const double dphi = VP_LCC_HALF_PI_D - 2.0 * atan(
+                    scaled_ts
+                ) - candidate_phi;
+                double step = dphi;
+                if (i == 5 && fabs(dphi) >= 1e-14) {
+                    // One fixed-point derivative correction reaches the same
+                    // 1e-14 stopping basin at the qualified e=0.1 boundary
+                    // without exceeding the six-iteration production cap.
+                    const double e_squared = e * e;
+                    const double contraction =
+                        e_squared * (1.0 - sin_phi * sin_phi)
+                        / (1.0 - e_squared * sin_phi * sin_phi);
+                    step /= 1.0 - contraction;
+                }
+                candidate_phi += step;
+                if (fabs(dphi) < 1e-14) break;
+            }
+        }
+    }
+    const bool lane_qualified = setup_qualified && coordinate_qualified
+        && isfinite(candidate_lam) && isfinite(candidate_phi);
+    const bool warp_uses_native = __any_sync(__activemask(), !lane_qualified);
+    double lam, phi;
+    if (warp_uses_native) {
+        vp_lcc_inverse_native_cold(
+            cx, cy, nn, F, rho0, e, k0, &lam, &phi
+        );
+    } else {
+        lam = candidate_lam;
+        phi = candidate_phi;
+    }
+""",
+            ),
+        ),
+    ),
     MERC_FORWARD_SPHERICAL_PRODUCT_POLY: _merc_forward_product_rewrite(
         "merc_forward_spherical_product_poly",
         bound_polar_cap=False,
@@ -2963,6 +3188,8 @@ def _build_projection_guarded_source(
     source = source.replace(native_func_name, function_name)
     for native_expression, accelerated_expression in replacements:
         if implementation_id in (
+            LCC_FORWARD_CONFORMAL_REFRAME,
+            LCC_INVERSE_CONFORMAL_REFRAME,
             MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY,
             MERC_FORWARD_SPHERICAL_PRODUCT_POLY,
             MERC_INVERSE_EXP_SERIES,
@@ -2980,16 +3207,19 @@ def _build_projection_guarded_source(
                 f"Expected one {native_expression!r} site while building {implementation_id!r}"
             )
         source = source.replace(native_expression, accelerated_expression)
-    implementation_helpers = (
-        _MERC_GUARDED_DEVICE_FNS
-        if implementation_id
-        in (
-            MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY,
-            MERC_FORWARD_SPHERICAL_PRODUCT_POLY,
-            MERC_INVERSE_EXP_SERIES,
-        )
-        else ""
-    )
+    if implementation_id in (
+        LCC_FORWARD_CONFORMAL_REFRAME,
+        LCC_INVERSE_CONFORMAL_REFRAME,
+    ):
+        implementation_helpers = _CONFORMAL_GUARDED_DEVICE_FNS + _LCC_GUARDED_DEVICE_FNS
+    elif implementation_id in (
+        MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY,
+        MERC_FORWARD_SPHERICAL_PRODUCT_POLY,
+        MERC_INVERSE_EXP_SERIES,
+    ):
+        implementation_helpers = _CONFORMAL_GUARDED_DEVICE_FNS + _MERC_GUARDED_DEVICE_FNS
+    else:
+        implementation_helpers = ""
     return (
         _NATIVE_PAIRED_SINCOS_DEVICE_FNS
         + _PROJECTION_SCALE_GUARD_DEVICE_FNS

@@ -27,6 +27,8 @@ GNOM_INVERSE_GUARDED_RSQRT_REFRAME = "gnom.inverse.guarded_rsqrt_reframe"
 STERE_INVERSE_FIXED_Q62 = "stere.inverse.fixed_q62"
 GEOS_FORWARD_FIXED_Q62 = "geos.forward.fixed_q62"
 LAEA_FORWARD_POLAR_FIXED_Q62 = "laea.forward.polar.fixed_q62"
+LCC_FORWARD_CONFORMAL_REFRAME = "lcc.forward.conformal_reframe"
+LCC_INVERSE_CONFORMAL_REFRAME = "lcc.inverse.conformal_reframe"
 MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY = "merc.forward.ellipsoidal.product_poly"
 MERC_FORWARD_SPHERICAL_PRODUCT_POLY = "merc.forward.spherical.product_poly"
 MERC_INVERSE_EXP_SERIES = "merc.inverse.exp_series"
@@ -39,11 +41,25 @@ ORTHO_INVERSE_GUARDED_REFRAME_MIN_ELEMENTS = 524_288
 STERE_INVERSE_FIXED_Q62_MIN_ELEMENTS = 1_000_000
 GEOS_FORWARD_FIXED_Q62_MIN_ELEMENTS = 2_097_152
 LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS = 1_048_576
+LCC_FORWARD_CONFORMAL_REFRAME_MIN_ELEMENTS = 65_536
+LCC_INVERSE_CONFORMAL_REFRAME_MIN_ELEMENTS = 128
 MERC_FORWARD_SPHERICAL_PRODUCT_POLY_MIN_ELEMENTS = 262_144
 MERC_INVERSE_EXP_SERIES_MIN_ELEMENTS = 65_536
 
 _EXACT_DOMAIN_FAMILIES = frozenset(
-    {"aeqd", "geos", "gnom", "laea", "merc", "ortho", "sinu", "stere", "sterea", "webmerc"}
+    {
+        "aeqd",
+        "geos",
+        "gnom",
+        "laea",
+        "lcc",
+        "merc",
+        "ortho",
+        "sinu",
+        "stere",
+        "sterea",
+        "webmerc",
+    }
 )
 
 
@@ -94,6 +110,40 @@ def projection_strategy_domain(projection: str, direction: str, computed: dict) 
         }
         variant = variants.get(method, "custom")
         return f"merc.{direction}.{geometry}.{variant}"
+    if projection == "lcc":
+        variant = str(computed.get("lcc_variant", "unknown"))
+        setup_names = (
+            "n",
+            "F",
+            "rho0",
+            "e",
+            "k0",
+            "lam0",
+            "a",
+            "x0",
+            "y0",
+            "x_unit_to_m",
+            "y_unit_to_m",
+        )
+        setup = tuple(computed.get(name) for name in setup_names)
+        setup_finite = all(value is not None and math.isfinite(float(value)) for value in setup)
+        if not (
+            setup_finite
+            and geometry in {"spherical", "ellipsoidal"}
+            and variant in {"1sp", "2sp"}
+            and float(computed["n"]) != 0.0
+            and float(computed["F"]) != 0.0
+            and 0.0 <= float(computed["e"]) <= 0.1
+            and float(computed["k0"]) == 1.0
+            and 0.0 < float(computed["a"]) <= PROJECTION_FIXED_Q62_MAX_SCALE_M
+            and float(computed["x_unit_to_m"]) != 0.0
+            and float(computed["y_unit_to_m"]) != 0.0
+        ):
+            return f"lcc.{direction}.{geometry}.{variant}.invalid_setup"
+        if direction == "forward":
+            cone = "regular_cone" if abs(float(computed["n"])) >= 0.2 else "near_equator"
+            return f"lcc.forward.{geometry}.{variant}.{cone}"
+        return f"lcc.inverse.{geometry}.{variant}"
     if projection == "webmerc":
         return f"webmerc.{direction}.{geometry}.pseudo"
     if projection == "laea":
@@ -162,6 +212,22 @@ def projection_strategy_domains(projection: str, direction: str) -> tuple[str, .
             else ("equatorial", "north_pole", "oblique", "south_pole")
         )
         return tuple(f"gnom.{direction}.spherical.{mode}" for mode in modes)
+    if projection == "lcc":
+        domains = []
+        for geometry in ("spherical", "ellipsoidal"):
+            for variant in ("1sp", "2sp"):
+                prefix = f"lcc.{direction}.{geometry}.{variant}"
+                if direction == "forward":
+                    domains.extend(
+                        (
+                            f"{prefix}.regular_cone",
+                            f"{prefix}.near_equator",
+                            f"{prefix}.invalid_setup",
+                        )
+                    )
+                else:
+                    domains.extend((prefix, f"{prefix}.invalid_setup"))
+        return tuple(domains)
     prefix = f"{projection}.{direction}"
     registered = {
         domain
@@ -522,6 +588,74 @@ _REGISTRY = (
                 "Polar LAEA forward uses Q1.62 paired longitude trig with "
                 "launch-uniform native fallback above 6,400,000 m physical scale. "
                 "Formal spherical-polar maximum/p99 error: 4.165/2.634 nm."
+            ),
+        ),
+        native_fallback=True,
+    ),
+    StrategyImplementation(
+        implementation_id=LCC_FORWARD_CONFORMAL_REFRAME,
+        operation=TranscendentalOperation.PROJECTION,
+        family="qualified_lcc_forward_transcendentals",
+        supported_policies=("auto", "accelerated"),
+        supported_backends=("cuda",),
+        supported_compute_capabilities=((8, 9),),
+        min_fp32_to_fp64_ratio=16,
+        supported_compute_precisions=("auto", "fp64"),
+        min_elements=LCC_FORWARD_CONFORMAL_REFRAME_MIN_ELEMENTS,
+        domains=tuple(
+            f"lcc.forward.{geometry}.{variant}.regular_cone"
+            for geometry in ("spherical", "ellipsoidal")
+            for variant in ("1sp", "2sp")
+        ),
+        accuracy=AccuracyContract(
+            reference=NATIVE_LIBDEVICE,
+            max_horizontal_error_m=1e-8,
+            max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+            notes=(
+                "LCC forward uses a setup-uniform geometry branch: spherical setups "
+                "reassociate the outer power as log/exp, while ellipsoidal setups "
+                "retain the native outer power and replace only the inner eccentricity "
+                "power with exp(e*atanh(e*sin(phi))). Exact 1SP/2SP setup requires "
+                "finite nonzero signed units, k0=1, abs(n)>=0.2, 0<=e<=0.1, and "
+                "0<a<=6,400,000 m. Near-equator cones stay native. Poles, nonfinite "
+                "coordinates, invalid derived values, or setup failures use the complete "
+                "native expression. RTX 4090 maximum native-relative error: 6.780 nm."
+            ),
+        ),
+        native_fallback=True,
+    ),
+    StrategyImplementation(
+        implementation_id=LCC_INVERSE_CONFORMAL_REFRAME,
+        operation=TranscendentalOperation.PROJECTION,
+        family="qualified_lcc_inverse_transcendentals",
+        supported_policies=("auto", "accelerated"),
+        supported_backends=("cuda",),
+        supported_compute_capabilities=((8, 9),),
+        min_fp32_to_fp64_ratio=16,
+        supported_compute_precisions=("auto", "fp64"),
+        min_elements=LCC_INVERSE_CONFORMAL_REFRAME_MIN_ELEMENTS,
+        domains=tuple(
+            f"lcc.inverse.{geometry}.{variant}"
+            for geometry in ("spherical", "ellipsoidal")
+            for variant in ("1sp", "2sp")
+        ),
+        accuracy=AccuracyContract(
+            reference=NATIVE_LIBDEVICE,
+            max_horizontal_error_m=1e-8,
+            max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+            notes=(
+                "LCC inverse uses a setup-uniform geometry branch. Spherical setups "
+                "recover latitude through the log-domain conformal value; ellipsoidal "
+                "setups retain the native outer power and replace the phi2 inner power "
+                "with exp/atanh for at most six iterations using the native 1e-14 "
+                "convergence rule. If the sixth step has not reached that rule, one "
+                "fixed-point contraction correction is applied to that step without a "
+                "seventh transcendental evaluation; this closes the e=0.1 accuracy "
+                "boundary. Exact 1SP/2SP setup requires finite nonzero signed "
+                "units, k0=1, 0<=e<=0.1, and 0<a<=6,400,000 m. Apex, nonpositive "
+                "radius ratio, nonfinite coordinates/results, or setup failures use "
+                "the complete native expression. RTX 4090 maximum native-relative "
+                "horizontal error: 6.328 nm."
             ),
         ),
         native_fallback=True,
@@ -1037,6 +1171,10 @@ __all__ = [
     "HELMERT_FIXED_Q62_MIN_ELEMENTS",
     "LAEA_FORWARD_POLAR_FIXED_Q62",
     "LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS",
+    "LCC_FORWARD_CONFORMAL_REFRAME",
+    "LCC_FORWARD_CONFORMAL_REFRAME_MIN_ELEMENTS",
+    "LCC_INVERSE_CONFORMAL_REFRAME",
+    "LCC_INVERSE_CONFORMAL_REFRAME_MIN_ELEMENTS",
     "MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY",
     "MERC_FORWARD_SPHERICAL_PRODUCT_POLY",
     "MERC_FORWARD_SPHERICAL_PRODUCT_POLY_MIN_ELEMENTS",

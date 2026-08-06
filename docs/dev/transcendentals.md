@@ -45,8 +45,8 @@ shared native pairing helper (or the equivalent double-single helper).
 | `webmerc` | inverse | `exp`, `atan` | normalized northing and exponent: unbounded | none | `native.libdevice` | native only | T3 |
 | `tmerc` | forward | three `sin`+`cos` arguments, `rsqrt`, `atan2`, `asinh` | general TM derived arguments: unknown; qualified UTM guard: `|lambda| <= 0.06`, `|asinh_arg| <= 0.06` with error `<= 2e-17`, `|atan_delta| <= 9.01e-4` with error `<= 2.3e-16 rad`; Q1.62 angles guarded to `[-pi, pi]` | pair `2phi`, Gaussian latitude, and `lambda` | native paired `sincos`/libdevice, or `tmerc.forward.fixed_q62` | qualified guarded implementation; native otherwise | T2 |
 | `tmerc` | inverse | `sin`/`cos`, `exp`, `sinh`, two `atan2`, `hypot` | inverse complex coordinates: unknown/unbounded | pair `2Cn`; pair `Cn` | `native.libdevice` | paired native only | T3 |
-| `lcc` | forward | `sin`, `tan`, `pow`, output `sin`/`cos` | `phi`: unknown; `theta = n*lambda` depends on CRS parameter | pair `theta` | `native.libdevice` | paired native only | T3 |
-| `lcc` | inverse | `sqrt`, `atan2`, `pow`, iterative `atan`/`sin`/`pow` | projected radius and iteration arguments: unknown | none | `native.libdevice` | native only | T3 |
+| `lcc` | forward | `sin`, `tan`, `pow`, output `sin`/`cos` | spherical/ellipsoidal 1SP/2SP regular cones require finite setup, signed nonzero units, exact `k0==1`, `0<=e<=0.1`, `0<a<=6,400,000 m`, and `abs(n)>=0.2`; finite non-pole coordinates and bounded `theta` | pair `theta` | `native.libdevice`, or `lcc.forward.conformal_reframe` | spherical log/exp power; ellipsoidal native outer power with exp/atanh inner correction; complete-warp native fallback | T2 |
+| `lcc` | inverse | `sqrt`, `atan2`, `pow`, iterative `atan`/`sin`/`pow` | same setup except no `abs(n)` floor; finite raw/normalized coordinates and positive radius ratio; huge finite raw coordinates may yield positive-infinite ratio and the pole limit | none | `native.libdevice`, or `lcc.inverse.conformal_reframe` | spherical logarithmic reconstruction; ellipsoidal native outer power plus bounded six-step exp/atanh recovery and a sixth-step contraction correction when `abs(dphi)>=1e-14`; apex/nonpositive/non-finite complete-warp native fallback | T2 |
 | `stere` | forward | `sin`, `tan`, `pow`, output `sin`/`cos` | adjusted `phi`: unknown; `lambda` finite wrapped | pair `lambda` | `native.libdevice` | paired native only | T3 |
 | `stere` | inverse | `sqrt`, `atan2`, iterative `atan`/`sin`/`pow` | public ellipsoidal A/B north/south and C south domains; accelerated uniform guard requires `0.05 <= e <= 0.2` and `0 < a <= 6,400,000 m`; shared helper guards each iterative sine angle | none | `native.libdevice`, or `stere.inverse.fixed_q62` | qualified Q1.62 iterative sine in five exact domains; native otherwise | T2 |
 | `aea` | forward | `sin`, `atanh`, `sqrt`, output `sin`/`cos` | `phi`: unknown; negative radicand is clamped to zero; `theta=n*lambda` depends on CRS | pair `theta` | `native.libdevice` | paired native only | T3 |
@@ -110,6 +110,8 @@ The user-facing coverage matrix is intentionally narrower than the inventory:
 | `merc.forward.spherical.product_poly` | `merc` | spherical forward A/B | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 262,144 | removes the zero-exponent `pow`; `e==0` device guard and full-domain bitwise-native result |
 | `merc.forward.ellipsoidal.product_poly` | `merc` | ellipsoidal forward A/B | fp64 | Ada `sm_89`, weak-native-fp64 consumer class; explicit `accelerated` only | n/a | product reframe and degree-eight exponential polynomial; `0<e<=0.1`, `|phi|<=89.9 degrees`, and bounded setup guards; `auto` disabled by polar-cap mixture regression |
 | `merc.inverse.exp_series` | `merc` | inverse, spherical/ellipsoidal A/B | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 65,536 | native `exp`/`atan` conformal seed followed by reusable sixth-order Poder/Engsager recovery; finite raw/normalized/setup/coefficients guard |
+| `lcc.forward.conformal_reframe` | `lcc` | spherical/ellipsoidal 1SP/2SP forward regular cones | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 65,536 | log/exp or native-outer-power conformal reframe; exact finite setup, `k0==1`, `abs(n)>=0.2`, pole/non-finite/theta and complete-warp native guards |
+| `lcc.inverse.conformal_reframe` | `lcc` | spherical/ellipsoidal 1SP/2SP inverse | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 128 | logarithmic or native-outer-power conformal reconstruction; six-step `1e-14` recovery bound with a final contraction correction only when step six has not converged; apex/nonpositive/non-finite complete-warp native guards |
 
 `tests/test_transcendental_coverage.py` binds these IDs and capabilities to
 the public registry and resolver. Adding a documented accelerated row without
@@ -468,6 +470,55 @@ flock /tmp/vibeproj-wave3-gpu.lock -c 'uv run python \
   --workload-sizes 5000000 --warmup 10 --iterations 30 --repeats 3 \
   --oracle-n 100000 --precision fp64 --seed 42 --enforce-gates \
   --json /tmp/wave3b_merc_public_qualification.json'
+```
+
+### Wave 3C Lambert Conformal Conic evidence
+
+Wave 3C qualifies spherical and ellipsoidal LCC 1SP/2SP in both directions on
+Ada `sm_89`. Forward uses the accelerated path only for the exact regular-cone
+domain `abs(n)>=0.2`; inverse also qualifies near-equator cones. Both require
+finite setup, signed nonzero units, exact `k0==1`, `0<=e<=0.1`, and
+`0<a<=6,400,000 m`. The thresholds are 65,536 forward and 128 inverse.
+
+The public artifact includes northern, southern, and zero-standard-parallel
+cones, both geometry modes and variants, exact `e=0.1`/`a=6,400,000 m`
+boundaries, nextafter setup boundaries, exact poles/apex, non-finite values,
+huge finite inverse inputs, and random opposite-cone extreme fractions of 0%,
+0.1%, 1%, 10%, 50%, and 100%. Guarded fallbacks are complete-warp and bitwise
+native. The accelerated forward kernel currently compiles to 38 registers and
+the accelerated inverse kernel to 40 registers. Both use 56 bytes of local
+memory, zero shared memory, six active 256-thread blocks per SM, and full
+calculated occupancy on the qualification toolchain.
+
+Forward crossover screens at 4,096, 8,192, 16,384, and 32,768 were retained as
+negative threshold evidence: device execution was faster, but one or more
+synchronized public-wall repeats lacked the required 1.05 margin across the
+full regular/mixed matrix. At 65,536 the worst candidate wall repeat exceeded
+1.07 in the crossover screen, so the library uses the single conservative
+65,536 threshold for every qualified forward domain. Inverse remains robust at
+128. CUDA-event ratios for below-threshold AUTO/native identity calls are
+informational because timer quantization dominates at those sizes; exact
+same-ID cache resolution and synchronized-wall no-regression remain gated.
+
+Numeric no-go evidence for the rejected forward log-tan and explicit-zero-exp
+variants and inaccurate two-step inverse iterations is retained in the central
+benchmark metadata. Native LCC source and ABI remain unchanged; the guarded
+helpers and reframe symbols exist only in accelerated sources.
+The ellipsoidal inverse performs at most six exp/atanh fixed-point steps using
+the native `1e-14` stopping rule. When the sixth delta has not converged, it is
+divided by the local contraction complement
+`1 - e^2(1-sin^2(phi))/(1-e^2 sin^2(phi))`. This final-step correction requires
+no seventh transcendental evaluation and is what keeps the closed `e=0.1`,
+`a=6,400,000 m` boundary below 10 nm.
+
+Replay the scoped 3x30 public qualification with:
+
+```console
+flock /tmp/vibeproj-wave3-gpu.lock -c 'uv run python \
+  benchmarks/bench_transcendental_policy.py --case lcc --n 5000000 \
+  --workload-sizes 5000000 --warmup 10 --iterations 30 --repeats 3 \
+  --oracle-n 100000 --precision fp64 --seed 42 --enforce-gates \
+  --json /tmp/wave3c_lcc_public_qualification.json'
 ```
 
 ### Go/no-go gates

@@ -74,7 +74,8 @@ class LambertConformalConic(Projection):
         m1 = _msfn(sin_phi1, cos_phi1, es)
         t1 = _tsfn(phi1, sin_phi1, ec)
 
-        if abs(phi1 - phi2) < EPS_ANGLE:
+        one_standard_parallel = abs(phi1 - phi2) < EPS_ANGLE
+        if one_standard_parallel:
             # 1SP case
             n = sin_phi1
         else:
@@ -97,6 +98,7 @@ class LambertConformalConic(Projection):
             "es": es,
             "a": e.a,
             "k0": params.k_0,
+            "lcc_variant": "1sp" if one_standard_parallel else "2sp",
             "lam0": math.radians(params.lon_0),
             "x0": params.x_0,
             "y0": params.y_0,

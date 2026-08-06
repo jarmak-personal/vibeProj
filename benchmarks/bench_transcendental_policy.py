@@ -41,6 +41,10 @@ from vibeproj.transcendentals import (
     HELMERT_FIXED_Q62_MIN_ELEMENTS,
     LAEA_FORWARD_POLAR_FIXED_Q62,
     LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS,
+    LCC_FORWARD_CONFORMAL_REFRAME,
+    LCC_FORWARD_CONFORMAL_REFRAME_MIN_ELEMENTS,
+    LCC_INVERSE_CONFORMAL_REFRAME,
+    LCC_INVERSE_CONFORMAL_REFRAME_MIN_ELEMENTS,
     MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY,
     MERC_FORWARD_SPHERICAL_PRODUCT_POLY,
     MERC_FORWARD_SPHERICAL_PRODUCT_POLY_MIN_ELEMENTS,
@@ -274,10 +278,75 @@ QUALIFICATION_SPECS = {
         for geometry in ("spherical", "ellipsoidal")
         for variant in ("a", "b")
     },
+    **{
+        f"lcc-{direction}-{configuration}": QualificationSpec(
+            implementation_id=(
+                LCC_FORWARD_CONFORMAL_REFRAME
+                if direction == "forward"
+                else LCC_INVERSE_CONFORMAL_REFRAME
+            ),
+            operation="projection",
+            domain=(
+                f"lcc.{direction}.{geometry}.{variant}.regular_cone"
+                if direction == "forward"
+                else f"lcc.{direction}.{geometry}.{variant}"
+            ),
+            direction=direction,
+            min_elements=(
+                LCC_FORWARD_CONFORMAL_REFRAME_MIN_ELEMENTS
+                if direction == "forward"
+                else LCC_INVERSE_CONFORMAL_REFRAME_MIN_ELEMENTS
+            ),
+            coordinate_contract_m=1e-8,
+            max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+        )
+        for direction in ("forward", "inverse")
+        for configuration, geometry, variant in (
+            ("spherical-1sp-north", "spherical", "1sp"),
+            ("spherical-2sp-north", "spherical", "2sp"),
+            ("ellipsoidal-1sp-north", "ellipsoidal", "1sp"),
+            ("ellipsoidal-2sp-north", "ellipsoidal", "2sp"),
+            ("ellipsoidal-2sp-south", "ellipsoidal", "2sp"),
+            ("ellipsoidal-2sp-zero", "ellipsoidal", "2sp"),
+        )
+    },
+    **{
+        f"lcc-forward-ellipsoidal-2sp-mix-{mix:04d}": QualificationSpec(
+            implementation_id=LCC_FORWARD_CONFORMAL_REFRAME,
+            operation="projection",
+            domain="lcc.forward.ellipsoidal.2sp.regular_cone",
+            direction="forward",
+            min_elements=LCC_FORWARD_CONFORMAL_REFRAME_MIN_ELEMENTS,
+            coordinate_contract_m=1e-8,
+            max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+        )
+        for mix in (0, 1, 10, 100, 500, 1000)
+    },
+    "lcc-forward-ellipsoidal-1sp-near-equator": QualificationSpec(
+        implementation_id=NATIVE_LIBDEVICE,
+        operation="projection",
+        domain="lcc.forward.ellipsoidal.1sp.near_equator",
+        direction="forward",
+        min_elements=0,
+        coordinate_contract_m=1e-8,
+        max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+        auto_enabled=False,
+        auto_disabled_reason="abs(n) below the proved 0.2 regular-cone boundary",
+    ),
+    "lcc-inverse-ellipsoidal-1sp-near-equator": QualificationSpec(
+        implementation_id=LCC_INVERSE_CONFORMAL_REFRAME,
+        operation="projection",
+        domain="lcc.inverse.ellipsoidal.1sp",
+        direction="inverse",
+        min_elements=LCC_INVERSE_CONFORMAL_REFRAME_MIN_ELEMENTS,
+        coordinate_contract_m=1e-8,
+        max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+    ),
 }
 CASES = tuple(QUALIFICATION_SPECS)
 MERC_CASES = tuple(name for name in CASES if name.startswith("merc-"))
-CASE_GROUPS = {"merc": MERC_CASES}
+LCC_CASES = tuple(name for name in CASES if name.startswith("lcc-"))
+CASE_GROUPS = {"merc": MERC_CASES, "lcc": LCC_CASES}
 WORKLOAD_GRID_CASES = tuple(
     name
     for name, qualification in QUALIFICATION_SPECS.items()
@@ -311,6 +380,37 @@ WAVE2A_REJECTED_CANDIDATES = {
         "candidate_ms": 0.6042,
         "max_error_m": 6.77e-9,
         "reason": "accuracy passes but mixed guarded execution is slower",
+    },
+}
+
+# Retained Wave 3C numeric no-go evidence. These rejected variants cannot be
+# selected by production policy.
+WAVE3C_LCC_REJECTED_CANDIDATES = {
+    "lcc.forward.exp_isometric_explicit_zero": {
+        "max_error_m": 1.21e-8,
+        "reason": "exceeds the 1e-8 m native-relative contract",
+    },
+    "lcc.forward.guarded_logtan": {
+        "speedup_vs_native": [0.72, 0.92],
+        "reason": "full-domain warp guards make production-shaped execution slower",
+    },
+    "lcc.inverse.two_step_newton": {
+        "max_error_m": [1.86e-3, 2.91e-3],
+        "reason": "millimetre error exceeds the 1e-8 m native-relative contract",
+    },
+    "lcc.inverse.two_step_direct": {
+        "max_error_m": [2.3e-4, 3.6e-4],
+        "reason": "sub-millimetre error still exceeds the 1e-8 m contract",
+    },
+}
+
+WAVE3C_LCC_FORWARD_THRESHOLD_EVIDENCE = {
+    "rejected_auto_minimums": [4_096, 8_192, 16_384, 32_768],
+    "selected_auto_minimum": LCC_FORWARD_CONFORMAL_REFRAME_MIN_ELEMENTS,
+    "rule": "lowest size with meaningful >=1.05 wall margin in every 3x30 repeat/domain",
+    "selected_screen_worst_wall_repeat": {
+        "accelerated": 1.0742620020953595,
+        "auto": 1.0760746548140832,
     },
 }
 
@@ -1328,6 +1428,241 @@ def _prepare_merc(
     )
 
 
+_LCC_TARGETS = {
+    "spherical-1sp-north": (
+        "+proj=lcc +lat_0=40 +lat_1=40 +lon_0=-96 +R=6371000 +units=m +type=crs"
+    ),
+    "spherical-2sp-north": (
+        "+proj=lcc +lat_0=23 +lat_1=33 +lat_2=45 +lon_0=-96 +R=6371000 +units=m +type=crs"
+    ),
+    "ellipsoidal-1sp-north": (
+        "+proj=lcc +lat_0=40 +lat_1=40 +lon_0=-96 +ellps=WGS84 +units=m +type=crs"
+    ),
+    "ellipsoidal-1sp-near-equator": (
+        "+proj=lcc +lat_0=.1 +lat_1=.1 +lon_0=0 +ellps=WGS84 +units=m +type=crs"
+    ),
+    "ellipsoidal-2sp-north": "EPSG:2154",
+    "ellipsoidal-2sp-south": "EPSG:3851",
+    "ellipsoidal-2sp-zero": (
+        "+proj=lcc +lat_0=10 +lat_1=0 +lat_2=30 +lon_0=-96 +ellps=WGS84 +units=m +type=crs"
+    ),
+}
+
+
+def _prepare_lcc(
+    cp: Any,
+    n: int,
+    rng: np.random.Generator,
+    *,
+    direction: str,
+    configuration: str,
+    mix_per_mille: int | None = None,
+) -> BenchmarkCase:
+    """Prepare LCC 1SP/2SP, sphere/ellipsoid, sign, and cold-mixture cases."""
+    from pyproj import CRS
+    from pyproj import Transformer as PyProjTransformer
+
+    from vibeproj import Transformer
+
+    target = CRS.from_user_input(_LCC_TARGETS[configuration])
+    source = target.geodetic_crs
+    forward = Transformer.from_crs(source, target, always_xy=True)
+    computed = forward._pipeline.computed
+    a = float(computed["a"])
+    longitude_origin = math.degrees(float(computed["lam0"]))
+    southern = float(computed["n"]) < 0.0
+    latitude_range = (-75.0, -5.0) if southern else (5.0, 75.0)
+    longitude = rng.uniform(longitude_origin - 45.0, longitude_origin + 45.0, n).astype(np.float64)
+    latitude = rng.uniform(*latitude_range, n).astype(np.float64)
+
+    name = f"lcc-{direction}-{configuration}"
+    if mix_per_mille is not None:
+        name = f"lcc-forward-ellipsoidal-2sp-mix-{mix_per_mille:04d}"
+        count = round(n * mix_per_mille / 1000.0)
+        if count:
+            latitude[rng.choice(n, count, replace=False)] = -89.999
+
+    if direction == "forward":
+        transformer = forward
+        input_x, input_y = longitude, latitude
+        edge_x = np.asarray(
+            [longitude_origin, longitude_origin, math.nan, math.inf, -math.inf],
+            dtype=np.float64,
+        )
+        edge_y = np.asarray([90.0, -90.0, 45.0, 45.0, 45.0], dtype=np.float64)
+        output_is_geographic = False
+        oracle_from, oracle_to = source, target
+    else:
+        transformer = Transformer.from_crs(target, source, always_xy=True)
+        oracle = PyProjTransformer.from_crs(source, target, always_xy=True)
+        input_x, input_y = oracle.transform(longitude, latitude)
+        input_x = np.asarray(input_x, dtype=np.float64)
+        input_y = np.asarray(input_y, dtype=np.float64)
+        apex_x = float(computed["x0"])
+        apex_y = float(computed["y0"] + a * computed["rho0"])
+        edge_x = np.asarray(
+            [apex_x, math.nan, math.inf, -math.inf, 1e300, -1e300], dtype=np.float64
+        )
+        edge_y = np.asarray([apex_y, apex_y, apex_y, apex_y, -1e300, 1e300], dtype=np.float64)
+        output_is_geographic = True
+        oracle_from, oracle_to = target, source
+
+    return BenchmarkCase(
+        name=name,
+        family="lcc",
+        direction="FORWARD",
+        transformer=transformer,
+        input_x=cp.asarray(input_x),
+        input_y=cp.asarray(input_y),
+        host_x=np.asarray(input_x, dtype=np.float64),
+        host_y=np.asarray(input_y, dtype=np.float64),
+        edge_host_x=edge_x,
+        edge_host_y=edge_y,
+        domain={
+            "crs": f"{source.name} -> {target.name}"
+            if direction == "forward"
+            else f"{target.name} -> {source.name}",
+            "geometry": "spherical" if float(computed["e"]) == 0.0 else "ellipsoidal",
+            "variant": computed["lcc_variant"],
+            "cone_sign": "south"
+            if southern
+            else ("zero-standard-parallel" if configuration.endswith("zero") else "north"),
+            "longitude_degrees": [longitude_origin - 45.0, longitude_origin + 45.0],
+            "source_latitude_degrees": list(latitude_range),
+            "opposite_cone_extreme_fraction": (
+                None if mix_per_mille is None else mix_per_mille / 1000.0
+            ),
+        },
+        edges={"first": _json_edge_values(edge_x), "second": _json_edge_values(edge_y)},
+        output_is_geographic=output_is_geographic,
+        oracle_from_crs=oracle_from,
+        oracle_to_crs=oracle_to,
+        qualification=QUALIFICATION_SPECS[name],
+        geographic_scale_m=a,
+    )
+
+
+def _lcc_hot_guard_audit(
+    direction: str,
+    computed: dict[str, Any],
+    first: np.ndarray,
+    second: np.ndarray,
+) -> dict[str, Any]:
+    """Mirror LCC's production predicates for a deterministic hot-probe audit."""
+    nn = float(computed["n"])
+    F = float(computed["F"])
+    rho0 = float(computed["rho0"])
+    e = float(computed["e"])
+    k0 = float(computed["k0"])
+    lam0 = float(computed["lam0"])
+    a = float(computed["a"])
+    x0 = float(computed["x0"])
+    y0 = float(computed["y0"])
+    x_unit = float(computed["x_unit_to_m"])
+    y_unit = float(computed["y_unit_to_m"])
+    setup_qualified = (
+        all(np.isfinite(value) for value in (nn, F, rho0, e, k0, lam0, a, x0, y0))
+        and nn != 0.0
+        and F != 0.0
+        and 0.0 <= e <= 0.1
+        and k0 == 1.0
+        and 0.0 < a <= PROJECTION_FIXED_Q62_MAX_SCALE_M
+        and np.isfinite(x_unit)
+        and x_unit != 0.0
+        and np.isfinite(y_unit)
+        and y_unit != 0.0
+        and (direction == "inverse" or abs(nn) >= 0.2)
+    )
+    if direction == "forward":
+        phi = np.deg2rad(second)
+        lam = np.deg2rad(first) - lam0
+        lam -= 2.0 * math.pi * np.rint(lam / (2.0 * math.pi))
+        tan_half = np.tan(0.5 * (0.5 * math.pi - phi))
+        if e == 0.0:
+            rho = F * np.exp(nn * np.log(tan_half)) * k0
+        else:
+            correction = e * np.arctanh(e * np.sin(phi))
+            rho = F * np.power(tan_half / np.exp(-correction), nn) * k0
+        theta = nn * lam
+        mask = (
+            setup_qualified
+            & np.isfinite(first)
+            & np.isfinite(second)
+            & np.isfinite(phi)
+            & (np.abs(phi) < 0.5 * math.pi)
+            & np.isfinite(lam)
+            & np.isfinite(rho)
+            & (np.abs(theta) <= math.pi)
+            & np.isfinite(rho * np.sin(theta))
+            & np.isfinite(rho0 - rho * np.cos(theta))
+        )
+        pole_margin = float(0.5 * math.pi - np.max(np.abs(phi)))
+        theta_margin = float(math.pi - np.max(np.abs(theta)))
+        minimum_ratio = None
+    else:
+        cx = (first * x_unit - x0) / a
+        cy = (second * y_unit - y0) / a
+        work_cx = cx.copy()
+        dy = rho0 - cy
+        rho = np.sqrt(work_cx * work_cx + dy * dy)
+        if nn < 0.0:
+            rho = -rho
+            work_cx = -work_cx
+            dy = -dy
+        ratio = rho / (F * k0)
+        candidate_lam = np.arctan2(work_cx, dy) / nn
+        if e == 0.0:
+            psi = -np.log(ratio) / nn
+            candidate_phi = 0.5 * math.pi - 2.0 * np.arctan(np.exp(-psi))
+        else:
+            ts = np.power(ratio, 1.0 / nn)
+            candidate_phi = 0.5 * math.pi - 2.0 * np.arctan(ts)
+            for iteration in range(6):
+                sin_phi = np.sin(candidate_phi)
+                correction = e * np.arctanh(e * sin_phi)
+                scaled_ts = ts * np.exp(-correction)
+                dphi = 0.5 * math.pi - 2.0 * np.arctan(scaled_ts) - candidate_phi
+                step = dphi
+                if iteration == 5:
+                    e_squared = e * e
+                    contraction = (
+                        e_squared
+                        * (1.0 - sin_phi * sin_phi)
+                        / (1.0 - e_squared * sin_phi * sin_phi)
+                    )
+                    step = np.where(np.abs(dphi) >= 1e-14, dphi / (1.0 - contraction), dphi)
+                candidate_phi += step
+        mask = (
+            setup_qualified
+            & np.isfinite(first)
+            & np.isfinite(second)
+            & np.isfinite(cx)
+            & np.isfinite(cy)
+            & np.isfinite(work_cx)
+            & np.isfinite(dy)
+            & (ratio > 0.0)
+            & np.isfinite(candidate_lam)
+            & np.isfinite(candidate_phi)
+        )
+        pole_margin = None
+        theta_margin = None
+        minimum_ratio = float(np.min(ratio))
+    mask = np.asarray(mask, dtype=bool)
+    warp_count = (mask.size + 31) // 32
+    padded = np.pad(mask, (0, warp_count * 32 - mask.size), constant_values=False)
+    qualified_warps = int(np.count_nonzero(np.all(padded.reshape(-1, 32), axis=1)))
+    return {
+        "setup_qualified": bool(setup_qualified),
+        "qualified_lanes": int(np.count_nonzero(mask)),
+        "total_lanes": int(mask.size),
+        "qualified_warps": qualified_warps,
+        "cold_warps": int(warp_count - qualified_warps),
+        "pole_margin_rad": pole_margin,
+        "theta_margin_rad": theta_margin,
+        "minimum_radius_ratio": minimum_ratio,
+    }
+
+
 def _prepare_case(cp: Any, name: str, n: int, seed: int) -> BenchmarkCase:
     rng = np.random.default_rng(seed)
     if name == "tmerc-forward":
@@ -1364,6 +1699,24 @@ def _prepare_case(cp: Any, name: str, n: int, seed: int) -> BenchmarkCase:
             direction=direction,
             geometry=geometry,
             variant=variant,
+        )
+    if name.startswith("lcc-forward-ellipsoidal-2sp-mix-"):
+        return _prepare_lcc(
+            cp,
+            n,
+            rng,
+            direction="forward",
+            configuration="ellipsoidal-2sp-north",
+            mix_per_mille=int(name.rsplit("-", maxsplit=1)[1]),
+        )
+    if name.startswith("lcc-"):
+        _, direction, *configuration_parts = name.split("-")
+        return _prepare_lcc(
+            cp,
+            n,
+            rng,
+            direction=direction,
+            configuration="-".join(configuration_parts),
         )
     raise ValueError(f"Unknown benchmark case: {name}")
 
@@ -1427,9 +1780,13 @@ def _native_identity_noise_pass(
     native_implementation_ids: list[str],
     wall_speedup: float,
     wall_repeat_speedups: list[float],
-    device_repeat_speedups: list[float],
 ) -> bool:
-    """Gate identical-native AUTO timing without a quantized event aggregate."""
+    """Gate identical-native AUTO timing only on stable public wall measurements.
+
+    At tiny crossover-adjacent workloads, CUDA event medians are quantized too
+    coarsely to compare two launches of the exact same cached native kernel.
+    Candidate event gates remain strict once AUTO resolves an accelerated ID.
+    """
     identical_native_variant = (
         auto_implementation_ids == native_implementation_ids == [NATIVE_LIBDEVICE]
     )
@@ -1437,7 +1794,6 @@ def _native_identity_noise_pass(
         identical_native_variant
         and wall_speedup >= 0.98
         and all(speedup >= 0.95 for speedup in wall_repeat_speedups)
-        and all(speedup >= 0.95 for speedup in device_repeat_speedups)
     )
 
 
@@ -1964,7 +2320,7 @@ def _pyproj_reference(case: BenchmarkCase, limit: int) -> tuple[np.ndarray, np.n
 
 def _edge_accuracy(cp: Any, case: BenchmarkCase, precision: str) -> dict[str, Any]:
     """Run boundary/out-of-domain probes separately from the timed distribution."""
-    # Mercator guards are warp-atomic. Launch each edge as one homogeneous
+    # Mercator and LCC guards are warp-atomic. Launch each edge as one homogeneous
     # warp so a NaN/Inf probe cannot make signed-zero, clamp, or huge-finite
     # evidence vacuously execute the native path.
     groups = (
@@ -1975,7 +2331,7 @@ def _edge_accuracy(cp: Any, case: BenchmarkCase, precision: str) -> dict[str, An
             )
             for first, second in zip(case.edge_host_x, case.edge_host_y, strict=True)
         )
-        if case.family == "merc"
+        if case.family in {"merc", "lcc"}
         else ((cp.asarray(case.edge_host_x), cp.asarray(case.edge_host_y)),)
     )
     host_groups: dict[str, list[tuple[np.ndarray, np.ndarray]]] = {
@@ -2026,7 +2382,7 @@ def _scale_guard_behavior(cp: Any, case: BenchmarkCase, precision: str) -> dict[
     probes = []
     raw_scales = (
         (maximum_scale, np.nextafter(maximum_scale, math.inf), 1e12)
-        if case.family in {"merc", "stere"}
+        if case.family in {"merc", "stere", "lcc"}
         else (np.nextafter(maximum_scale, math.inf), 1e12)
     )
     for raw_scale in raw_scales:
@@ -2053,9 +2409,18 @@ def _scale_guard_behavior(cp: Any, case: BenchmarkCase, precision: str) -> dict[
                 projection_parameters += " +k=0.87"
             if "ellipsoidal" in case.name:
                 source_crs = f"+proj=longlat +a={physical_scale:.17g} +rf=298.257223563 +type=crs"
+        elif case.family == "lcc":
+            if "near-equator" in case.name:
+                projection_parameters += " +lat_0=.1 +lat_1=.1"
+            elif "1sp" in case.name:
+                projection_parameters += " +lat_0=40 +lat_1=40"
+            else:
+                projection_parameters += " +lat_0=23 +lat_1=33 +lat_2=45"
+            if "ellipsoidal" in case.name:
+                source_crs = f"+proj=longlat +a={physical_scale:.17g} +rf=298.257223563 +type=crs"
         earth = (
             f"+a={physical_scale:.17g} +rf=298.257223563"
-            if case.family in {"merc", "stere"} and "ellipsoidal" in case.name
+            if case.family in {"merc", "stere", "lcc"} and "ellipsoidal" in case.name
             else f"+R={physical_scale:.17g}"
         )
         target_crs = f"{projection_parameters} {earth} +units=m +type=crs"
@@ -2063,6 +2428,7 @@ def _scale_guard_behavior(cp: Any, case: BenchmarkCase, precision: str) -> dict[
             case.name == "ortho-inverse"
             or case.family in {"gnom", "stere"}
             or (case.family == "merc" and case.qualification.direction == "inverse")
+            or (case.family == "lcc" and case.qualification.direction == "inverse")
         ):
             transformer = Transformer.from_crs(target_crs, source_crs, always_xy=True)
             first_host = (
@@ -2112,8 +2478,13 @@ def _scale_guard_behavior(cp: Any, case: BenchmarkCase, precision: str) -> dict[
             precision=precision,
             workload_size=int(first.size),
         )
+        expected_scale_implementation = (
+            NATIVE_LIBDEVICE
+            if case.family == "lcc" and native_expected
+            else case.qualification.implementation_id
+        )
         strategy_remains_selected = strategy["implementation_ids"] == [
-            case.qualification.implementation_id
+            expected_scale_implementation
         ]
         probes.append(
             {
@@ -2388,6 +2759,211 @@ def _merc_parameter_guard_behavior(
     }
 
 
+def _lcc_parameter_guard_behavior(
+    cp: Any,
+    case: BenchmarkCase,
+    precision: str,
+) -> dict[str, Any]:
+    """Exercise LCC setup, coordinate, warp-atomic, and cone-boundary guards."""
+    if case.family != "lcc":
+        return {"required": False, "qualification_pass": True, "probes": []}
+
+    pipeline = case.transformer._pipeline_for_direction(case.direction)
+    original = pipeline.computed
+    n = 256
+    first = cp.resize(case.input_x, n)
+    second = cp.resize(case.input_y, n)
+
+    def execute(input_first, input_second) -> dict[str, Any]:
+        outputs = {}
+        for policy in ("native", "accelerated"):
+            out_x = cp.empty(input_first.size, dtype=cp.float64)
+            out_y = cp.empty(input_second.size, dtype=cp.float64)
+            case.transformer.transform_buffers(
+                input_first,
+                input_second,
+                direction=case.direction,
+                out_x=out_x,
+                out_y=out_y,
+                precision=precision,
+                transcendentals=policy,
+            )
+            outputs[policy] = (cp.asnumpy(out_x), cp.asnumpy(out_y))
+        bitwise_native = all(
+            np.array_equal(actual.view(np.uint64), expected.view(np.uint64))
+            for actual, expected in zip(outputs["accelerated"], outputs["native"], strict=True)
+        )
+        error = _coordinate_error(
+            *outputs["accelerated"],
+            *outputs["native"],
+            geographic=case.output_is_geographic,
+            geographic_scale_m=case.geographic_scale_m,
+        )
+        return {"bitwise_native_outputs": bitwise_native, "error_vs_native_m": error}
+
+    hot_n = 4_096
+    longitude_origin = math.degrees(float(original["lam0"]))
+    if case.qualification.direction == "forward" and float(original["n"]) < 0.0:
+        # Deterministic EPSG:3851 witness retained independently of workload N
+        # and seed; the conformal candidate differs from native by one ULP.
+        hot_host_first = np.full(hot_n, 169.3024197984506, dtype=np.float64)
+        hot_host_second = np.full(hot_n, -9.308100979853066, dtype=np.float64)
+    elif case.qualification.direction == "forward":
+        hot_host_first = np.linspace(longitude_origin - 45.0, longitude_origin + 45.0, hot_n)
+        hot_host_second = np.linspace(5.0, 75.0, hot_n)
+    else:
+        from pyproj import Transformer as PyProjTransformer
+
+        latitude_range = (-75.0, -5.0) if float(original["n"]) < 0.0 else (5.0, 75.0)
+        hot_longitude = np.linspace(longitude_origin - 45.0, longitude_origin + 45.0, hot_n)
+        hot_latitude = np.linspace(*latitude_range, hot_n)
+        oracle_forward = PyProjTransformer.from_crs(
+            case.oracle_to_crs, case.oracle_from_crs, always_xy=True
+        )
+        hot_projected = oracle_forward.transform(hot_longitude, hot_latitude)
+        hot_host_first = np.asarray(hot_projected[0], dtype=np.float64)
+        hot_host_second = np.asarray(hot_projected[1], dtype=np.float64)
+    hot_guard_audit = _lcc_hot_guard_audit(
+        case.qualification.direction, original, hot_host_first, hot_host_second
+    )
+    hot_first, hot_second = cp.asarray(hot_host_first), cp.asarray(hot_host_second)
+    hot_probe = execute(hot_first, hot_second)
+    hot_strategy = _resolved_strategy(
+        case.transformer,
+        "accelerated",
+        case.direction,
+        precision=precision,
+        workload_size=hot_n,
+    )
+    hot_strategy_selected = hot_strategy["implementation_ids"] == [
+        case.qualification.implementation_id
+    ]
+    if case.qualification.implementation_id == NATIVE_LIBDEVICE:
+        hot_nonvacuous = hot_strategy_selected and hot_probe["bitwise_native_outputs"]
+    else:
+        hot_nonvacuous = (
+            hot_strategy_selected
+            and hot_guard_audit["qualified_lanes"] == hot_guard_audit["total_lanes"]
+            and hot_guard_audit["cold_warps"] == 0
+            and not hot_probe["bitwise_native_outputs"]
+        )
+    hot_probe.update(
+        {
+            "strategy": hot_strategy,
+            "strategy_selected": hot_strategy_selected,
+            "guard_audit": hot_guard_audit,
+            "nonvacuous_pass": hot_nonvacuous,
+        }
+    )
+
+    setup_mutations: list[tuple[str, dict[str, float]]] = [
+        ("zero_cone_constant", {"n": 0.0}),
+        ("nonfinite_cone_constant", {"n": math.nan}),
+        ("zero_F", {"F": 0.0}),
+        ("nonfinite_F", {"F": math.nan}),
+        ("nonfinite_rho0", {"rho0": math.inf}),
+        ("eccentricity_below_zero", {"e": math.nextafter(0.0, -math.inf)}),
+        ("eccentricity_nextabove", {"e": math.nextafter(0.1, math.inf)}),
+        ("scale_factor_nextbelow", {"k0": math.nextafter(1.0, 0.0)}),
+        ("scale_factor_nextabove", {"k0": math.nextafter(1.0, math.inf)}),
+        ("nonfinite_central_meridian", {"lam0": math.inf}),
+        ("zero_scale", {"a": 0.0}),
+        ("scale_nextabove", {"a": math.nextafter(PROJECTION_FIXED_Q62_MAX_SCALE_M, math.inf)}),
+        ("nonfinite_x_offset", {"x0": math.inf}),
+        ("nonfinite_y_offset", {"y0": math.nan}),
+        ("zero_x_unit", {"x_unit_to_m": 0.0}),
+        ("nonfinite_y_unit", {"y_unit_to_m": math.inf}),
+    ]
+    if case.qualification.direction == "forward":
+        setup_mutations.extend(
+            [
+                ("positive_cone_nextinside", {"n": math.nextafter(0.2, 0.0)}),
+                ("negative_cone_nextinside", {"n": math.nextafter(-0.2, 0.0)}),
+            ]
+        )
+    else:
+        setup_mutations.append(("negative_radius_ratio", {"F": -float(original["F"])}))
+    setup_probes = []
+    try:
+        for label, mutation in setup_mutations:
+            pipeline.computed = {**original, **mutation}
+            setup_probes.append({"name": label, **execute(first, second)})
+    finally:
+        pipeline.computed = original
+
+    qualified_boundary_probes = []
+    for label, mutation in (
+        ("eccentricity_exact_upper", {"e": 0.1}),
+        ("scale_exact_upper", {"a": PROJECTION_FIXED_Q62_MAX_SCALE_M}),
+    ):
+        pipeline.computed = {**original, **mutation}
+        try:
+            result = execute(hot_first, hot_second)
+            strategy = _resolved_strategy(
+                case.transformer,
+                "accelerated",
+                case.direction,
+                precision=precision,
+                workload_size=n,
+            )
+        finally:
+            pipeline.computed = original
+        expected_bitwise = case.qualification.implementation_id == NATIVE_LIBDEVICE
+        strategy_selected = strategy["implementation_ids"] == [case.qualification.implementation_id]
+        qualified_boundary_probes.append(
+            {
+                "name": label,
+                **result,
+                "strategy": strategy,
+                "strategy_selected": strategy_selected,
+                "nonvacuous_pass": strategy_selected
+                and (not expected_bitwise or result["bitwise_native_outputs"]),
+            }
+        )
+
+    coordinate_probes = []
+    ordinary_first = float(case.host_x[min(2, case.host_x.size - 1)])
+    ordinary_second = float(case.host_y[min(2, case.host_y.size - 1)])
+    coordinate_edges = list(zip(case.edge_host_x, case.edge_host_y, strict=True))
+    if case.qualification.direction == "inverse":
+        # Huge finite raw coordinates are qualified and intentionally converge
+        # to the finite pole limit even when normalized rho overflows to +inf.
+        # The exact apex is pinned by the direct ABI-level GPU test; public CRS
+        # reconstruction can round its raw y representation by one ULP.
+        coordinate_edges = coordinate_edges[1:4]
+    for index, (edge_first, edge_second) in enumerate(coordinate_edges):
+        homogeneous_first = cp.full(32, edge_first, dtype=cp.float64)
+        homogeneous_second = cp.full(32, edge_second, dtype=cp.float64)
+        coordinate_probes.append(
+            {"name": f"edge_{index}_homogeneous", **execute(homogeneous_first, homogeneous_second)}
+        )
+        mixed_first = cp.full(32, ordinary_first, dtype=cp.float64)
+        mixed_second = cp.full(32, ordinary_second, dtype=cp.float64)
+        mixed_first[0], mixed_second[0] = edge_first, edge_second
+        coordinate_probes.append(
+            {"name": f"edge_{index}_mixed", **execute(mixed_first, mixed_second)}
+        )
+
+    return {
+        "required": True,
+        "hot_probe": hot_probe,
+        "coordinate_fallback_probes": coordinate_probes,
+        "qualified_boundary_probes": qualified_boundary_probes,
+        "probes": setup_probes,
+        "qualification_pass": (
+            hot_probe["nonvacuous_pass"]
+            and hot_probe["error_vs_native_m"]["max_m"] <= case.qualification.coordinate_contract_m
+            and all(probe["bitwise_native_outputs"] for probe in coordinate_probes)
+            and all(probe["bitwise_native_outputs"] for probe in setup_probes)
+            and all(
+                probe["nonvacuous_pass"]
+                and probe["error_vs_native_m"]["max_m"] <= case.qualification.coordinate_contract_m
+                for probe in qualified_boundary_probes
+            )
+        ),
+    }
+
+
 def _parameter_guard_behavior(
     cp: Any,
     case: BenchmarkCase,
@@ -2395,6 +2971,8 @@ def _parameter_guard_behavior(
 ) -> dict[str, Any]:
     if case.family == "merc":
         return _merc_parameter_guard_behavior(cp, case, args.precision)
+    if case.family == "lcc":
+        return _lcc_parameter_guard_behavior(cp, case, args.precision)
     return _stere_inverse_e_guard_behavior(cp, case, args)
 
 
@@ -2843,8 +3421,8 @@ def _run_workload_grid(
                 == [expected_auto_id],
                 # Identical native execution can jitter around 1.0 at tiny N.
                 # Bound synchronized-wall aggregate noise to 2% and every
-                # wall/device repeat to 5%. CUDA-event aggregate medians at
-                # ~0.03 ms are quantized too coarsely for a separate 2% gate.
+                # wall repeat to 5%. CUDA-event medians at ~0.03 ms are
+                # quantized too coarsely to gate identical cached kernels.
                 "small_auto_native_identity_noise_pass": (
                     qualification.auto_enabled and not below_crossover
                 )
@@ -2853,7 +3431,6 @@ def _run_workload_grid(
                     native_implementation_ids=strategies["native"]["implementation_ids"],
                     wall_speedup=auto_wall_speedup,
                     wall_repeat_speedups=auto_wall_repeat_speedups,
-                    device_repeat_speedups=auto_device_repeat_speedups,
                 ),
                 "qualified_auto_wall_median_pass": not qualification.auto_enabled
                 or below_crossover
@@ -3018,6 +3595,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 name: asdict(specification) for name, specification in QUALIFICATION_SPECS.items()
             },
             "wave2a_rejected_candidates": WAVE2A_REJECTED_CANDIDATES,
+            "wave3c_lcc_rejected_candidates": WAVE3C_LCC_REJECTED_CANDIDATES,
+            "wave3c_lcc_forward_threshold_evidence": WAVE3C_LCC_FORWARD_THRESHOLD_EVIDENCE,
             "ortho_inverse_threshold_note": (
                 "N=524288 is the first tested size whose three actual-public repeats "
                 "all reached the 1.05 gate in the retained qualification runs; every "
@@ -3036,6 +3615,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "topology_probes": topology_probes,
         "workload_grid": workload_grid,
     }
+
+
+def _requires_default_workload_grid(case: str) -> bool:
+    """Whether enforced qualification requires the full historical 20-size grid."""
+    return case not in {"merc", "lcc"}
 
 
 def main() -> None:
@@ -3081,7 +3665,7 @@ def main() -> None:
         )
     if (
         args.enforce_gates
-        and args.case != "merc"
+        and _requires_default_workload_grid(args.case)
         and not set(DEFAULT_WORKLOAD_SIZES).issubset(args.workload_sizes)
     ):
         parser.error(
