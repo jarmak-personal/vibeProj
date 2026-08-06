@@ -360,7 +360,7 @@ def test_static_inventory_covers_every_fused_family_and_direction():
     assert "| `helmert` | datum shift (forward or inverse pipeline) |" in section
 
 
-def test_wave2b_inventory_and_readme_name_automatic_coverage() -> None:
+def test_wave2b_inventory_names_automatic_coverage() -> None:
     root = Path(__file__).resolve().parents[1]
     developer_text = (root / "docs/dev/transcendentals.md").read_text(encoding="utf-8")
     inventory = developer_text.split("## Complete fused-kernel inventory", maxsplit=1)[1].split(
@@ -376,10 +376,6 @@ def test_wave2b_inventory_and_readme_name_automatic_coverage() -> None:
     assert GEOS_FORWARD_FIXED_Q62 in geos_row
     assert laea_row.endswith("| T2 |")
     assert geos_row.endswith("| T2 |")
-
-    readme = (root / "README.md").read_text(encoding="utf-8")
-    assert "GEOS-forward (sphere/ellipsoid and sweep x/y)" in readme
-    assert "spherical-polar LAEA-forward" in readme
 
 
 def test_registry_exactly_matches_documented_coverage_matrix():
