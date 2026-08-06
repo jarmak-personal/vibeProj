@@ -68,7 +68,7 @@ variants reachable in either transform direction.
 
 The initial accelerated coverage is deliberately small:
 
-| Implementation ID | Family and direction | Operations | Qualified automatic device | Auto minimum elements |
+| Implementation ID | Family and direction | Operations | Qualified device/policy | Auto minimum elements |
 |---|---|---|---|---:|
 | `native.libdevice` | Every fused family/direction and Helmert | CUDA native special math, including paired native `sincos` where implemented | All devices and CPU/no-GPU fallback | n/a |
 | `helmert.fixed_q62` | Helmert datum shift | Bounded sine/cosine only; ECEF, square root, and `atan2` remain native fp64 | Ada `sm_89` consumer GPUs | 131,072 |
@@ -76,6 +76,7 @@ The initial accelerated coverage is deliberately small:
 | `sinu.forward.fixed_q62` | Spherical Sinusoidal forward only | Guarded Q1.62 cosine; remaining arithmetic stays fp64 | Ada `sm_89` consumer GPUs | 524,288 |
 | `ortho.forward.fixed_q62` | Orthographic forward only | Atomically guarded Q1.62 sine/cosine pairs; remaining arithmetic stays fp64 | Ada `sm_89` consumer GPUs | 262,144 |
 | `ortho.inverse.guarded_reframe` | Spherical equatorial Orthographic inverse only (after CRS setup canonicalization) | Guarded algebraic reframe removes one `asin` and one `sincos`; ill-conditioned inputs use native fp64 | Ada `sm_89` consumer GPUs | 524,288 |
+| `gnom.inverse.guarded_rsqrt_reframe` | Spherical Gnomonic inverse, equatorial and bounded oblique origins | Guarded reciprocal-square-root reframe for finite non-axis `1e-24 < rho^2 <= 0.02`; every cold coordinate uses exact native fp64 | Ada `sm_89` consumer GPUs | n/a (explicit only) |
 | `stere.inverse.fixed_q62` | Polar Stereographic inverse, public ellipsoidal A/B north/south and C south modes | Q1.62 sine inside the conformal-latitude iteration; scale, eccentricity, and iterative-angle guard failures use native fp64 | Ada `sm_89` consumer GPUs | 1,000,000 |
 | `geos.forward.fixed_q62` | Geostationary forward, sphere/ellipsoid and sweep x/y | Paired Q1.62 trig for geocentric latitude and longitude; uncertain limb visibility recomputes complete native output | Ada `sm_89` consumer GPUs | 2,097,152 |
 | `laea.forward.polar.fixed_q62` | Spherical polar LAEA forward, north/south origins | Q1.62 longitude sine/cosine; authalic and inverse paths remain native fp64 | Ada `sm_89` consumer GPUs | 1,048,576 |
@@ -95,6 +96,13 @@ projection-specific accelerated implementations
 are fp64-only; `precision="fp32"` and `precision="ds"` stay native. Planning
 calls with `precision="auto"` may select them because the corresponding fused
 kernel resolves to fp64.
+
+Gnomonic inverse is the deliberate exception to automatic selection. Its bounded
+hot domain is materially faster, but host dispatch cannot inspect each coordinate's
+normalized radius. A random 10% mixture outside the guard measured about 0.92x native
+on RTX 4090, so `"auto"` remains native at every size. Expert callers who know their
+inputs are concentrated in the documented hot domain may opt in with
+`transcendentals="accelerated"`; high-origin and polar CRS domains remain native.
 
 H100, Hopper, and other datacenter GPUs remain native. Their much stronger
 native fp64 throughput changes the performance trade-off, and acceleration

@@ -19,6 +19,7 @@ import numpy as np
 from vibeproj.projections.gnomonic import GNOM_MIN_COS_C
 from vibeproj.transcendentals import (
     GEOS_FORWARD_FIXED_Q62,
+    GNOM_INVERSE_GUARDED_RSQRT_REFRAME,
     HELMERT_FIXED_Q62,
     LAEA_FORWARD_POLAR_FIXED_Q62,
     NATIVE_LIBDEVICE,
@@ -2349,6 +2350,7 @@ _PROJECTION_IMPLEMENTATION_TARGETS = {
     SINU_FORWARD_FIXED_Q62: ("sinu", "forward", "float64"),
     ORTHO_FORWARD_FIXED_Q62: ("ortho", "forward", "float64"),
     ORTHO_INVERSE_GUARDED_REFRAME: ("ortho", "inverse", "float64"),
+    GNOM_INVERSE_GUARDED_RSQRT_REFRAME: ("gnom", "inverse", "float64"),
     STERE_INVERSE_FIXED_Q62: ("stere", "inverse", "float64"),
 }
 
@@ -2523,7 +2525,54 @@ _ORTHO_INVERSE_NATIVE_BODY = """\
     {real_t} phi = asin(cos_c * sin_phi0 + cy * sin_c * cos_phi0 / safe_rho);
     {real_t} lam = atan2(cx * sin_c, safe_rho * cos_phi0 * cos_c - cy * sin_phi0 * sin_c);"""
 
+_GNOM_INVERSE_NATIVE_BODY = """\
+    const bool finite = isfinite(cx) && isfinite(cy);
+    const {real_t} work_x = finite ? cx : ({real_t})0.0;
+    const {real_t} work_y = finite ? cy : ({real_t})0.0;
+    const {real_t} rho = hypot(work_x, work_y);
+    const {real_t} norm = hypot(({real_t})1.0, rho);
+    const {real_t} sin_c = rho / norm;
+    const {real_t} cos_c = ({real_t})1.0 / norm;
+    const {real_t} safe_rho = rho == ({real_t})0.0 ? ({real_t})1.0 : rho;
+    const {real_t} unit_x = work_x / safe_rho;
+    const {real_t} unit_y = work_y / safe_rho;
+    const {real_t} phi_argument = cos_c * sin_phi0 + unit_y * sin_c * cos_phi0;
+    {real_t} phi = asin(fmin(fmax(phi_argument, ({real_t})-1.0), ({real_t})1.0));
+    {real_t} lam = atan2(
+        unit_x * sin_c,
+        cos_phi0 * cos_c - unit_y * sin_phi0 * sin_c
+    );
+    if (!finite) {
+        if (isnan(cx) || isnan(cy)) {
+            phi = lam = nan("");
+        } else {
+            phi = lam = ({real_t})(1.0 / 0.0);
+        }
+    }"""
+
 _PROJECTION_GUARDED_NATIVE_FALLBACK_HELPERS = r"""
+// Reusable radial normalization primitive for inverse-projection reframes.
+// The caller owns downstream conditioning and physical-scale guards.
+__device__ __forceinline__ bool vp_projection_guarded_rsqrt_norm(
+    double x,
+    double y,
+    double min_radius_squared,
+    double max_radius_squared,
+    double* radius_squared_out,
+    double* inverse_norm_out
+) {
+    const double radius_squared = fma(x, x, y * y);
+    *radius_squared_out = radius_squared;
+    // Keep the helper's outputs defined even when the caller subsequently
+    // computes predicates or candidate values before selecting its cold path.
+    *inverse_norm_out = 1.0;
+    if (!(isfinite(radius_squared)
+          && radius_squared > min_radius_squared
+          && radius_squared <= max_radius_squared)) return false;
+    *inverse_norm_out = rsqrt(1.0 + radius_squared);
+    return true;
+}
+
 // Projection-specific native expressions are outlined so an uncommon guarded
 // fallback does not force libdevice call state into the table-free hot path.
 __device__ __noinline__ void vp_ortho_inverse_native_cold(
@@ -2544,6 +2593,36 @@ __device__ __noinline__ void vp_ortho_inverse_native_cold(
         cx * sin_c,
         safe_rho * cos_phi0 * cos_c - cy * sin_phi0 * sin_c
     );
+}
+
+__device__ __noinline__ void vp_gnom_inverse_native_cold(
+    double cx,
+    double cy,
+    double sin_phi0,
+    double cos_phi0,
+    double* phi_out,
+    double* lam_out
+) {
+    const bool finite = isfinite(cx) && isfinite(cy);
+    const double work_x = finite ? cx : 0.0;
+    const double work_y = finite ? cy : 0.0;
+    const double rho = hypot(work_x, work_y);
+    const double norm = hypot(1.0, rho);
+    const double sin_c = rho / norm;
+    const double cos_c = 1.0 / norm;
+    const double safe_rho = rho == 0.0 ? 1.0 : rho;
+    const double unit_x = work_x / safe_rho;
+    const double unit_y = work_y / safe_rho;
+    const double phi_argument = cos_c * sin_phi0 + unit_y * sin_c * cos_phi0;
+    *phi_out = asin(fmin(fmax(phi_argument, -1.0), 1.0));
+    *lam_out = atan2(
+        unit_x * sin_c,
+        cos_phi0 * cos_c - unit_y * sin_phi0 * sin_c
+    );
+    if (!finite) {
+        if (isnan(cx) || isnan(cy)) *phi_out = *lam_out = nan("");
+        else *phi_out = *lam_out = 1.0 / 0.0;
+    }
 }
 """
 
@@ -2570,6 +2649,38 @@ _PROJECTION_GUARDED_REWRITES = {
         lam = atan2(cx, q * cos_phi0 - cy * sin_phi0);
     } else {
         vp_ortho_inverse_native_cold(
+            cx, cy, sin_phi0, cos_phi0, &phi, &lam
+        );
+    }""",
+            ),
+        ),
+    ),
+    GNOM_INVERSE_GUARDED_RSQRT_REFRAME: (
+        "gnom_inverse_guarded_rsqrt_reframe",
+        (
+            (
+                _GNOM_INVERSE_NATIVE_BODY,
+                """\
+    double rho_squared, inverse_norm;
+    double phi, lam;
+    const bool radial_qualified = vp_projection_guarded_rsqrt_norm(
+        cx, cy, 1e-24, 0.02, &rho_squared, &inverse_norm
+    );
+    const double phi_argument = fma(cy, cos_phi0, sin_phi0) * inverse_norm;
+    const double lam_denominator = fma(-cy, sin_phi0, cos_phi0);
+    const bool lane_qualified = radial_qualified
+        && cx != 0.0 && cy != 0.0
+        && isfinite(sin_phi0) && isfinite(cos_phi0)
+        && isfinite(lam0) && isfinite(x0) && isfinite(y0)
+        && fabs(cos_phi0) >= 0.5
+        && vp_projection_fixed_scale_is_qualified(a)
+        && fabs(phi_argument) <= 1.0 && isfinite(lam_denominator);
+    const bool warp_uses_native = __any_sync(__activemask(), !lane_qualified);
+    if (!warp_uses_native) {
+        phi = asin(phi_argument);
+        lam = atan2(cx, lam_denominator);
+    } else {
+        vp_gnom_inverse_native_cold(
             cx, cy, sin_phi0, cos_phi0, &phi, &lam
         );
     }""",

@@ -21,6 +21,7 @@ from vibeproj.transcendentals import (
     AccuracyContract,
     GEOS_FORWARD_FIXED_Q62,
     GEOS_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+    GNOM_INVERSE_GUARDED_RSQRT_REFRAME,
     HELMERT_FIXED_Q62,
     HELMERT_FIXED_Q62_MIN_ELEMENTS,
     LAEA_FORWARD_POLAR_FIXED_Q62,
@@ -126,6 +127,17 @@ EXPECTED_REGISTRY_MATRIX = frozenset(
             ((8, 9),),
             ("auto", "fp64"),
             ORTHO_INVERSE_GUARDED_REFRAME_MIN_ELEMENTS,
+        ),
+        (
+            GNOM_INVERSE_GUARDED_RSQRT_REFRAME,
+            TranscendentalOperation.PROJECTION,
+            (
+                "gnom.inverse.spherical.equatorial",
+                "gnom.inverse.spherical.oblique_bounded",
+            ),
+            ((8, 9),),
+            ("auto", "fp64"),
+            0,
         ),
         (
             STERE_INVERSE_FIXED_Q62,
@@ -477,6 +489,54 @@ def test_size_aware_auto_crossover_and_explicit_override(
     assert at_crossover.workload_size == min_elements
     assert explicit.implementation_id == accelerated_id
     assert explicit.workload_size == 32
+
+
+@pytest.mark.parametrize("workload_size", [1, 262_143, 262_144, 5_000_000])
+@pytest.mark.parametrize(
+    "domain",
+    [
+        "gnom.inverse.spherical.equatorial",
+        "gnom.inverse.spherical.oblique_bounded",
+    ],
+)
+def test_gnom_inverse_is_explicit_accelerated_only(domain, workload_size):
+    automatic = resolve_transcendental_strategy(
+        TranscendentalOperation.PROJECTION,
+        "auto",
+        device=ADA_4090,
+        domain=domain,
+        precision="fp64",
+        workload_size=workload_size,
+    )
+    explicit = resolve_transcendental_strategy(
+        TranscendentalOperation.PROJECTION,
+        "accelerated",
+        device=ADA_4090,
+        domain=domain,
+        precision="fp64",
+        workload_size=workload_size,
+    )
+
+    assert automatic.implementation_id == NATIVE_LIBDEVICE
+    assert explicit.implementation_id == GNOM_INVERSE_GUARDED_RSQRT_REFRAME
+
+
+def test_gnom_explicit_only_does_not_change_sinu_auto_contract():
+    gnom = next(
+        entry
+        for entry in list_transcendental_strategies()
+        if entry.implementation_id == GNOM_INVERSE_GUARDED_RSQRT_REFRAME
+    )
+    sinu = next(
+        entry
+        for entry in list_transcendental_strategies()
+        if entry.implementation_id == SINU_FORWARD_FIXED_Q62
+    )
+
+    assert gnom.supported_policies == ("accelerated",)
+    assert gnom.min_elements == 0
+    assert sinu.supported_policies == ("auto", "accelerated")
+    assert sinu.min_elements == SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS
 
 
 @pytest.mark.parametrize(
@@ -913,6 +973,32 @@ def test_wave2c_stere_inverse_benchmark_specs_cover_exact_public_domains() -> No
         assert np.all(np.isfinite(case.host_y))
         assert np.any(~np.isfinite(case.edge_host_x))
         assert case.domain["adversarial_accuracy_only"].startswith("normalized radius")
+
+
+def test_wave3a_gnom_inverse_benchmark_specs_are_explicit_only():
+    benchmark_module = _load_policy_benchmark_module()
+    expected = {
+        "gnom-inverse-equatorial": "gnom.inverse.spherical.equatorial",
+        "gnom-inverse-oblique": "gnom.inverse.spherical.oblique_bounded",
+    }
+    for index, (case_name, domain) in enumerate(expected.items()):
+        specification = benchmark_module.QUALIFICATION_SPECS[case_name]
+        assert specification.implementation_id == GNOM_INVERSE_GUARDED_RSQRT_REFRAME
+        assert specification.domain == domain
+        assert specification.direction == "inverse"
+        assert specification.min_elements == 0
+        assert specification.auto_enabled is False
+        assert "10% cold" in specification.auto_disabled_reason
+        assert specification.max_physical_scale_m == PROJECTION_FIXED_Q62_MAX_SCALE_M
+
+        case = benchmark_module._prepare_case(np, case_name, 128, 20260806 + index)
+        assert case.family == "gnom"
+        assert case.direction == "FORWARD"
+        assert case.output_is_geographic is True
+        assert np.all(np.isfinite(case.host_x))
+        assert np.all(np.isfinite(case.host_y))
+        assert np.any(~np.isfinite(case.edge_host_x))
+        assert case.qualification is specification
 
 
 @pytest.mark.parametrize("geometry", ["spherical", "ellipsoidal"])

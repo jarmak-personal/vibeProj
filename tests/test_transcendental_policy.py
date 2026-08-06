@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import math
 import pickle
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -16,6 +17,7 @@ from vibeproj import DeviceCapability, Transformer
 from vibeproj.transcendentals import (
     GEOS_FORWARD_FIXED_Q62,
     GEOS_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+    GNOM_INVERSE_GUARDED_RSQRT_REFRAME,
     HELMERT_FIXED_Q62,
     HELMERT_FIXED_Q62_MIN_ELEMENTS,
     LAEA_FORWARD_POLAR_FIXED_Q62,
@@ -33,6 +35,7 @@ from vibeproj.transcendentals import (
     TranscendentalOperation,
     _resolve_transcendental_strategy_cached,
     list_transcendental_strategies,
+    projection_strategy_domain,
     resolve_transcendental_strategy,
 )
 
@@ -116,6 +119,7 @@ def test_registry_is_immutable_and_contains_stable_ids():
         NATIVE_LIBDEVICE,
         HELMERT_FIXED_Q62,
         GEOS_FORWARD_FIXED_Q62,
+        GNOM_INVERSE_GUARDED_RSQRT_REFRAME,
         LAEA_FORWARD_POLAR_FIXED_Q62,
         ORTHO_FORWARD_FIXED_Q62,
         ORTHO_INVERSE_GUARDED_REFRAME,
@@ -941,6 +945,70 @@ def test_ortho_inverse_canonicalized_origin_controls_public_selection(
     assert pipeline.proj_params.lat_0 == canonical_lat_0
     assert pipeline.computed["_strategy_latitude_origin"] == canonical_lat_0
     assert explanation.decisions[0].implementation_id == expected_implementation
+
+
+@pytest.mark.parametrize(
+    ("latitude_origin", "expected_domain", "expected_implementation"),
+    [
+        (0.0, "gnom.inverse.spherical.equatorial", GNOM_INVERSE_GUARDED_RSQRT_REFRAME),
+        (45.0, "gnom.inverse.spherical.oblique_bounded", GNOM_INVERSE_GUARDED_RSQRT_REFRAME),
+        (60.0, "gnom.inverse.spherical.oblique_bounded", GNOM_INVERSE_GUARDED_RSQRT_REFRAME),
+        (61.0, "gnom.inverse.spherical.oblique_high", NATIVE_LIBDEVICE),
+        (90.0, "gnom.inverse.spherical.north_pole", NATIVE_LIBDEVICE),
+        (-90.0, "gnom.inverse.spherical.south_pole", NATIVE_LIBDEVICE),
+    ],
+)
+def test_gnom_inverse_origin_domain_controls_public_selection(
+    latitude_origin,
+    expected_domain,
+    expected_implementation,
+):
+    target = f"+proj=gnom +lat_0={latitude_origin:.17g} +lon_0=0 +R=6378137 +units=m +type=crs"
+    transformer = Transformer.from_crs(target, SPHERICAL_LONG_LAT, always_xy=True)
+    explanation = transformer.explain_strategy(
+        transcendentals="accelerated",
+        precision="fp64",
+        workload_size=5_000_000,
+        device=ADA,
+    )
+    automatic = transformer.explain_strategy(
+        transcendentals="auto",
+        precision="fp64",
+        workload_size=5_000_000,
+        device=ADA,
+    )
+
+    assert explanation.decisions[0].domain == expected_domain
+    assert explanation.decisions[0].implementation_id == expected_implementation
+    assert automatic.decisions[0].implementation_id == NATIVE_LIBDEVICE
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_domain"),
+    [
+        ({"cos_phi0": 0.5}, "gnom.inverse.spherical.oblique_bounded"),
+        (
+            {"cos_phi0": np.nextafter(0.5, 0.0)},
+            "gnom.inverse.spherical.oblique_high",
+        ),
+        ({"sin_phi0": math.nan}, "gnom.inverse.spherical.invalid_setup"),
+        ({"a": math.inf}, "gnom.inverse.spherical.invalid_setup"),
+    ],
+)
+def test_gnom_inverse_domain_pins_exact_cosine_and_invalid_setup(overrides, expected_domain):
+    computed = {
+        "_strategy_geometry": "spherical",
+        "_strategy_latitude_origin": 60.0,
+        "sin_phi0": math.sqrt(0.75),
+        "cos_phi0": 0.5,
+        "a": 6_378_137.0,
+        "lam0": 0.0,
+        "x0": 0.0,
+        "y0": 0.0,
+        **overrides,
+    }
+
+    assert projection_strategy_domain("gnom", "inverse", computed) == expected_domain
 
 
 def test_compile_collects_both_directions_of_projected_pipeline(monkeypatch):

@@ -23,6 +23,7 @@ TMERC_FIXED_Q62 = "tmerc.forward.fixed_q62"
 SINU_FORWARD_FIXED_Q62 = "sinu.forward.fixed_q62"
 ORTHO_FORWARD_FIXED_Q62 = "ortho.forward.fixed_q62"
 ORTHO_INVERSE_GUARDED_REFRAME = "ortho.inverse.guarded_reframe"
+GNOM_INVERSE_GUARDED_RSQRT_REFRAME = "gnom.inverse.guarded_rsqrt_reframe"
 STERE_INVERSE_FIXED_Q62 = "stere.inverse.fixed_q62"
 GEOS_FORWARD_FIXED_Q62 = "geos.forward.fixed_q62"
 LAEA_FORWARD_POLAR_FIXED_Q62 = "laea.forward.polar.fixed_q62"
@@ -96,7 +97,23 @@ def projection_strategy_domain(projection: str, direction: str, computed: dict) 
     if projection == "ortho":
         return f"ortho.{direction}.{geometry}.{_origin_mode(computed)}"
     if projection == "gnom":
-        return f"gnom.{direction}.{geometry}.{_origin_mode(computed)}"
+        origin = _origin_mode(computed)
+        if direction == "inverse":
+            setup_values = (
+                computed.get("sin_phi0"),
+                computed.get("cos_phi0"),
+                computed.get("a"),
+                computed.get("lam0"),
+                computed.get("x0"),
+                computed.get("y0"),
+            )
+            if not all(value is not None and math.isfinite(float(value)) for value in setup_values):
+                origin = "invalid_setup"
+            elif origin == "oblique":
+                origin = (
+                    "oblique_bounded" if abs(float(computed["cos_phi0"])) >= 0.5 else "oblique_high"
+                )
+        return f"gnom.{direction}.{geometry}.{origin}"
     if projection == "aeqd":
         if method == "Guam Projection":
             semantics = "guam"
@@ -127,10 +144,19 @@ def projection_strategy_domains(projection: str, direction: str) -> tuple[str, .
     if projection == "tmerc" and direction == "forward":
         return ("global", "utm")
     if projection == "gnom":
-        return tuple(
-            f"gnom.{direction}.spherical.{mode}"
-            for mode in ("equatorial", "north_pole", "oblique", "south_pole")
+        modes = (
+            (
+                "equatorial",
+                "north_pole",
+                "oblique_bounded",
+                "oblique_high",
+                "south_pole",
+                "invalid_setup",
+            )
+            if direction == "inverse"
+            else ("equatorial", "north_pole", "oblique", "south_pole")
         )
+        return tuple(f"gnom.{direction}.spherical.{mode}" for mode in modes)
     prefix = f"{projection}.{direction}"
     registered = {
         domain
@@ -364,6 +390,39 @@ _REGISTRY = (
                 "ill-conditioned output-latitude inputs use exact native fallback. "
                 "Final RTX 4090 full-valid-disk maximum/p99 horizontal error: "
                 "6.328/1.584 nm."
+            ),
+        ),
+        native_fallback=True,
+    ),
+    StrategyImplementation(
+        implementation_id=GNOM_INVERSE_GUARDED_RSQRT_REFRAME,
+        operation=TranscendentalOperation.PROJECTION,
+        family="qualified_gnom_inverse_reframe",
+        supported_policies=("accelerated",),
+        supported_backends=("cuda",),
+        supported_compute_capabilities=((8, 9),),
+        min_fp32_to_fp64_ratio=16,
+        supported_compute_precisions=("auto", "fp64"),
+        min_elements=0,
+        domains=(
+            "gnom.inverse.spherical.equatorial",
+            "gnom.inverse.spherical.oblique_bounded",
+        ),
+        accuracy=AccuracyContract(
+            reference=NATIVE_LIBDEVICE,
+            max_horizontal_error_m=1e-8,
+            max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+            notes=(
+                "Spherical Gnomonic inverse algebraically reframes the current "
+                "hypot-based central-angle normalization with a guarded reciprocal "
+                "square root. Exact host domains require finite setup and "
+                "abs(cos(phi0)) >= 0.5. The fused kernel additionally requires "
+                "1e-24 < rho^2 <= 0.02, non-axis finite coordinates, and physical "
+                "scale a <= 6,400,000 m; every guard failure recomputes the exact "
+                "native expression. RTX 4090 maximum/p99 native-relative horizontal "
+                "error: 7.910/3.955 nm. Expert accelerated opt-in only: auto remains "
+                "native because host dispatch cannot observe mixed per-coordinate rho "
+                "domains and a 10% cold mixture regresses on Ada."
             ),
         ),
         native_fallback=True,
@@ -870,6 +929,7 @@ __all__ = [
     "ExecutionContext",
     "GEOS_FORWARD_FIXED_Q62",
     "GEOS_FORWARD_FIXED_Q62_MIN_ELEMENTS",
+    "GNOM_INVERSE_GUARDED_RSQRT_REFRAME",
     "HELMERT_FIXED_Q62",
     "HELMERT_FIXED_Q62_MIN_ELEMENTS",
     "LAEA_FORWARD_POLAR_FIXED_Q62",

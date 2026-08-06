@@ -114,6 +114,11 @@ accelerated kernel may still take its guarded native branch for individual
 out-of-domain coordinates or a uniformly unsupported physical scale. See the
 [transcendental policy](https://jarmak-personal.github.io/vibeProj/user/transcendentals.html).
 
+Spherical Gnomonic inverse also has an Ada-qualified bounded reframe for expert
+`transcendentals="accelerated"` opt-in. It is intentionally excluded from `"auto"`:
+mixed in/out-of-guard radius distributions can regress, and the host planner cannot
+inspect coordinate values before dispatch.
+
 ### Cross-datum transforms (Helmert)
 
 ```python

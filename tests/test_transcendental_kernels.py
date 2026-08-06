@@ -38,6 +38,7 @@ from vibeproj.fused_kernels import (  # noqa: E402
     fused_transform,
 )
 from vibeproj.transcendentals import (  # noqa: E402
+    GNOM_INVERSE_GUARDED_RSQRT_REFRAME,
     HELMERT_FIXED_Q62,
     NATIVE_LIBDEVICE,
     TMERC_FIXED_Q62,
@@ -91,7 +92,7 @@ def test_native_paired_sincos_kernels_compile(projection, direction, compute_dty
     kernel.compile()
 
 
-def test_all_102_production_rawkernel_variants_compile():
+def test_all_103_production_rawkernel_variants_compile():
     compiled = []
     for compute_dtype in ("float64", "float32"):
         for projection, direction in sorted(_SUPPORTED):
@@ -111,13 +112,21 @@ def test_all_102_production_rawkernel_variants_compile():
     _get_kernel("tmerc", "forward", "float64", transcendental_impl=TMERC_FIXED_Q62).compile()
     compiled.append(("tmerc", "forward", "float64", TMERC_FIXED_Q62))
 
+    _get_kernel(
+        "gnom",
+        "inverse",
+        "float64",
+        transcendental_impl=GNOM_INVERSE_GUARDED_RSQRT_REFRAME,
+    ).compile()
+    compiled.append(("gnom", "inverse", "float64", GNOM_INVERSE_GUARDED_RSQRT_REFRAME))
+
     for implementation_id in (NATIVE_LIBDEVICE, HELMERT_FIXED_Q62):
         _get_helmert_kernel(implementation_id).compile()
         compiled.append(("helmert", "forward", "float64", implementation_id))
 
     _get_svd_kernel().compile()
     compiled.append(("svd", "correction", "float64", NATIVE_LIBDEVICE))
-    assert len(compiled) == 102
+    assert len(compiled) == 103
 
 
 def test_tmerc_implementation_id_separates_rawkernel_cache():

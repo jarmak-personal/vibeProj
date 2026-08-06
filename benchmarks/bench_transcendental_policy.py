@@ -36,6 +36,7 @@ import numpy as np
 from vibeproj.transcendentals import (
     GEOS_FORWARD_FIXED_Q62,
     GEOS_FORWARD_FIXED_Q62_MIN_ELEMENTS,
+    GNOM_INVERSE_GUARDED_RSQRT_REFRAME,
     HELMERT_FIXED_Q62,
     HELMERT_FIXED_Q62_MIN_ELEMENTS,
     LAEA_FORWARD_POLAR_FIXED_Q62,
@@ -93,6 +94,8 @@ class QualificationSpec:
     coordinate_contract_m: float
     max_physical_scale_m: float | None = None
     expected_kernel_nodes: int = 1
+    auto_enabled: bool = True
+    auto_disabled_reason: str | None = None
 
 
 QUALIFICATION_SPECS = {
@@ -154,6 +157,34 @@ QUALIFICATION_SPECS = {
         min_elements=ORTHO_INVERSE_GUARDED_REFRAME_MIN_ELEMENTS,
         coordinate_contract_m=1e-8,
         max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+    ),
+    "gnom-inverse-equatorial": QualificationSpec(
+        implementation_id=GNOM_INVERSE_GUARDED_RSQRT_REFRAME,
+        operation="projection",
+        domain="gnom.inverse.spherical.equatorial",
+        direction="inverse",
+        min_elements=0,
+        coordinate_contract_m=1e-8,
+        max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+        auto_enabled=False,
+        auto_disabled_reason=(
+            "host dispatch cannot observe per-coordinate rho; random 10% cold mixtures "
+            "regress to about 0.92x native on RTX 4090"
+        ),
+    ),
+    "gnom-inverse-oblique": QualificationSpec(
+        implementation_id=GNOM_INVERSE_GUARDED_RSQRT_REFRAME,
+        operation="projection",
+        domain="gnom.inverse.spherical.oblique_bounded",
+        direction="inverse",
+        min_elements=0,
+        coordinate_contract_m=1e-8,
+        max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+        auto_enabled=False,
+        auto_disabled_reason=(
+            "host dispatch cannot observe per-coordinate rho; random 10% cold mixtures "
+            "regress to about 0.92x native on RTX 4090"
+        ),
     ),
     **{
         f"geos-forward-{geometry}-sweep-{sweep}": QualificationSpec(
@@ -242,18 +273,13 @@ def _qualification_workload_sizes(
     requested_sizes: tuple[int, ...],
     qualification: QualificationSpec,
 ) -> tuple[int, ...]:
-    """Return the requested grid with threshold-1 and threshold included."""
+    """Return the requested grid plus crossover boundaries where auto is enabled."""
     if not requested_sizes:
         return ()
-    return tuple(
-        sorted(
-            {
-                *requested_sizes,
-                qualification.min_elements - 1,
-                qualification.min_elements,
-            }
-        )
-    )
+    sizes = set(requested_sizes)
+    if qualification.auto_enabled:
+        sizes.update((qualification.min_elements - 1, qualification.min_elements))
+    return tuple(sorted(sizes))
 
 
 @dataclass(frozen=True)
@@ -661,6 +687,98 @@ def _prepare_ortho_inverse(cp: Any, n: int, rng: np.random.Generator) -> Benchma
     )
 
 
+def _prepare_gnom_inverse(
+    cp: Any,
+    n: int,
+    rng: np.random.Generator,
+    *,
+    origin: str,
+) -> BenchmarkCase:
+    """Prepare the production spherical Gnom inverse guard and cold edges."""
+    from vibeproj import Transformer
+
+    latitude_origin = 0.0 if origin == "equatorial" else 45.0
+    name = f"gnom-inverse-{origin}"
+    radius = EARTH_RADIUS_M
+    target_crs = f"+proj=gnom +lat_0={latitude_origin:.17g} +lon_0=0 +R=6378137 +units=m +type=crs"
+    rho_squared = rng.uniform(1e-12, np.nextafter(0.02, 0.0), n)
+    azimuth = rng.uniform(-math.pi, math.pi, n)
+    rho = np.sqrt(rho_squared) * radius
+    easting = (rho * np.cos(azimuth)).astype(np.float64)
+    northing = (rho * np.sin(azimuth)).astype(np.float64)
+
+    minimum_radius = 1e-12
+    maximum_radius = math.sqrt(0.02)
+    diagonal = math.sqrt(0.5)
+    edge_normalized_x = np.asarray(
+        [
+            0.0,
+            -0.0,
+            0.05,
+            0.0,
+            diagonal * np.nextafter(minimum_radius, 0.0),
+            diagonal * minimum_radius,
+            diagonal * np.nextafter(minimum_radius, math.inf),
+            diagonal * np.nextafter(maximum_radius, 0.0),
+            diagonal * maximum_radius,
+            diagonal * np.nextafter(maximum_radius, math.inf),
+            0.2,
+            math.inf,
+            -math.inf,
+            math.nan,
+        ],
+        dtype=np.float64,
+    )
+    edge_normalized_y = np.asarray(
+        [
+            0.0,
+            -0.0,
+            0.0,
+            0.05,
+            diagonal * np.nextafter(minimum_radius, 0.0),
+            diagonal * minimum_radius,
+            diagonal * np.nextafter(minimum_radius, math.inf),
+            diagonal * np.nextafter(maximum_radius, 0.0),
+            diagonal * maximum_radius,
+            diagonal * np.nextafter(maximum_radius, math.inf),
+            0.2,
+            0.0,
+            0.0,
+            0.0,
+        ],
+        dtype=np.float64,
+    )
+    edge_easting = edge_normalized_x * radius
+    edge_northing = edge_normalized_y * radius
+    return BenchmarkCase(
+        name=name,
+        family="gnom",
+        direction="FORWARD",
+        transformer=Transformer.from_crs(target_crs, _SPHERICAL_LONG_LAT_CRS, always_xy=True),
+        input_x=cp.asarray(easting),
+        input_y=cp.asarray(northing),
+        host_x=easting,
+        host_y=northing,
+        edge_host_x=edge_easting,
+        edge_host_y=edge_northing,
+        domain={
+            "crs": f"{target_crs} -> {_SPHERICAL_LONG_LAT_CRS}",
+            "normalized_rho_squared_sampling_interval": "[1e-12, 0.02)",
+            "accelerated_guard": "1e-24 < rho_squared <= 0.02; non-axis finite points",
+            "origin_mode": origin,
+            "minimum_abs_cos_phi0": 0.5,
+        },
+        edges={
+            "easting_m": _json_edge_values(edge_easting),
+            "northing_m": _json_edge_values(edge_northing),
+        },
+        output_is_geographic=True,
+        oracle_from_crs=target_crs,
+        oracle_to_crs=_SPHERICAL_LONG_LAT_CRS,
+        qualification=QUALIFICATION_SPECS[name],
+    )
+
+
 def _earth_crs_parts(geometry: str) -> tuple[str, float, float]:
     if geometry == "spherical":
         return "+R=6378137", EARTH_RADIUS_M, EARTH_RADIUS_M
@@ -1024,6 +1142,8 @@ def _prepare_case(cp: Any, name: str, n: int, seed: int) -> BenchmarkCase:
         return _prepare_ortho_forward(cp, n, rng)
     if name == "ortho-inverse":
         return _prepare_ortho_inverse(cp, n, rng)
+    if name.startswith("gnom-inverse-"):
+        return _prepare_gnom_inverse(cp, n, rng, origin=name.rsplit("-", maxsplit=1)[1])
     if name.startswith("geos-forward-"):
         _, _, geometry, _, sweep = name.split("-")
         return _prepare_geos_forward(cp, n, rng, geometry=geometry, sweep=sweep)
@@ -1326,25 +1446,34 @@ def _kernel_resources(cp: Any, case: BenchmarkCase) -> dict[str, Any]:
     return result
 
 
-def _ortho_inverse_fallback_sweep(
+def _guarded_inverse_fallback_sweep(
     cp: Any,
     case: BenchmarkCase,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     """Measure deliberately mixed per-lane native fallback percentages."""
-    if case.name != "ortho-inverse":
+    if case.name != "ortho-inverse" and not case.name.startswith("gnom-inverse-"):
         return {"required": False, "rows": []}
 
-    n = min(args.n, 1_000_000)
+    n = args.n if case.family == "gnom" else min(args.n, 1_000_000)
     rng = np.random.default_rng(args.seed + 50_000)
     azimuth = rng.uniform(-math.pi, math.pi, n)
-    safe_radius = np.sqrt(rng.uniform(0.05, 0.88, n)) * EARTH_RADIUS_M
+    if case.family == "gnom":
+        safe_radius_squared = rng.uniform(0.001, 0.019, n)
+        fallback_radius_squared = rng.uniform(
+            np.nextafter(0.02, math.inf), np.nextafter(0.04, 0.0), n
+        )
+        fallback_pattern = "normalized rho_squared > 0.02"
+    else:
+        safe_radius_squared = rng.uniform(0.05, 0.88, n)
+        fallback_radius_squared = rng.uniform(
+            np.nextafter(0.99, math.inf), np.nextafter(1.0, 0.0), n
+        )
+        fallback_pattern = "0.99 < normalized rho_squared < 1.0"
+    safe_radius = np.sqrt(safe_radius_squared) * EARTH_RADIUS_M
     safe_x = safe_radius * np.cos(azimuth)
     safe_y = safe_radius * np.sin(azimuth)
-    fallback_radius = (
-        np.sqrt(rng.uniform(np.nextafter(0.99, math.inf), np.nextafter(1.0, 0.0), n))
-        * EARTH_RADIUS_M
-    )
+    fallback_radius = np.sqrt(fallback_radius_squared) * EARTH_RADIUS_M
     fallback_x = fallback_radius * np.cos(azimuth)
     fallback_y = fallback_radius * np.sin(azimuth)
     rows = []
@@ -1375,8 +1504,8 @@ def _ortho_inverse_fallback_sweep(
             cp,
             {policy: lambda policy=policy: invoke(policy) for policy in outputs},
             n=n,
-            warmup=min(args.warmup, 5),
-            iterations=min(args.iterations, 20),
+            warmup=args.warmup if case.family == "gnom" else min(args.warmup, 5),
+            iterations=args.iterations if case.family == "gnom" else min(args.iterations, 20),
             repeats=args.repeats,
         )
         invoke("native")
@@ -1401,10 +1530,7 @@ def _ortho_inverse_fallback_sweep(
     return {
         "required": True,
         "n": n,
-        "pattern": (
-            "random lane mixture; fallback points are valid outer-disk coordinates "
-            "with 0.99 < normalized rho_squared < 1.0"
-        ),
+        "pattern": f"random lane mixture; valid fallback points use {fallback_pattern}",
         "rows": rows,
         "all_fallback_lanes_bitwise_native": all(
             row["fallback_lanes_bitwise_native"] for row in rows
@@ -1534,8 +1660,9 @@ def _scale_guard_behavior(cp: Any, case: BenchmarkCase, precision: str) -> dict[
         physical_scale = float(raw_scale)
         source_crs = f"+proj=longlat +R={physical_scale:.17g} +type=crs"
         projection_parameters = f"+proj={case.family} +lon_0=0"
-        if case.family == "ortho":
-            projection_parameters += " +lat_0=0" if case.name == "ortho-inverse" else " +lat_0=45"
+        if case.family in {"ortho", "gnom"}:
+            equatorial_inverse = case.name == "ortho-inverse" or case.name.endswith("-equatorial")
+            projection_parameters += " +lat_0=0" if equatorial_inverse else " +lat_0=45"
         elif case.family == "laea":
             latitude_origin = 90 if case.name.endswith("-north") else -90
             projection_parameters += f" +lat_0={latitude_origin}"
@@ -1552,7 +1679,7 @@ def _scale_guard_behavior(cp: Any, case: BenchmarkCase, precision: str) -> dict[
             else f"+R={physical_scale:.17g}"
         )
         target_crs = f"{projection_parameters} {earth} +units=m +type=crs"
-        if case.name == "ortho-inverse" or case.family == "stere":
+        if case.name == "ortho-inverse" or case.family in {"gnom", "stere"}:
             transformer = Transformer.from_crs(target_crs, source_crs, always_xy=True)
             first_host = (
                 np.asarray([0.1, -0.3, 0.7, 0.0, np.inf, np.nan], dtype=np.float64) * physical_scale
@@ -1814,7 +1941,7 @@ def _run_case(cp: Any, case: BenchmarkCase, args: argparse.Namespace) -> dict[st
     scale_guard = _scale_guard_behavior(cp, case, args.precision)
     parameter_guard = _stere_inverse_e_guard_behavior(cp, case, args)
     kernel_resources = _kernel_resources(cp, case)
-    fallback_sweep = _ortho_inverse_fallback_sweep(cp, case, args)
+    fallback_sweep = _guarded_inverse_fallback_sweep(cp, case, args)
 
     strategies = {
         policy: _resolved_strategy(
@@ -1832,7 +1959,9 @@ def _run_case(cp: Any, case: BenchmarkCase, args: argparse.Namespace) -> dict[st
     expected_accelerated_ids = [qualification.implementation_id]
     expected_auto_id = (
         qualification.implementation_id
-        if not accelerated_is_native and args.n >= qualification.min_elements
+        if qualification.auto_enabled
+        and not accelerated_is_native
+        and args.n >= qualification.min_elements
         else NATIVE_LIBDEVICE
     )
     repeat_speedups = timing["accelerated"]["repeat_speedups_vs_native"]
@@ -2122,8 +2251,12 @@ def _run_workload_grid(
             }
             accelerated_id = qualification.implementation_id
             min_elements = qualification.min_elements
-            below_crossover = n < min_elements
-            expected_auto_id = NATIVE_LIBDEVICE if below_crossover else accelerated_id
+            below_crossover = qualification.auto_enabled and n < min_elements
+            expected_auto_id = (
+                accelerated_id
+                if qualification.auto_enabled and not below_crossover
+                else NATIVE_LIBDEVICE
+            )
             auto_speedup = timing["auto"]["speedup_vs_native"]
             auto_repeat_speedups = timing["auto"]["repeat_speedups_vs_native"]
             gates = {
@@ -2135,13 +2268,18 @@ def _run_workload_grid(
                 == [expected_auto_id],
                 # Identical native execution can jitter around 1.0 at tiny N.
                 # Bound aggregate noise to 2% and every repeat to 5%.
-                "small_auto_no_wall_regression_pass": not below_crossover
+                "small_auto_no_wall_regression_pass": (
+                    qualification.auto_enabled and not below_crossover
+                )
                 or (
                     auto_speedup >= 0.98
                     and all(speedup >= 0.95 for speedup in auto_repeat_speedups)
                 ),
-                "qualified_auto_wall_median_pass": below_crossover or auto_speedup >= 1.05,
-                "qualified_auto_wall_three_repeat_pass": below_crossover
+                "qualified_auto_wall_median_pass": not qualification.auto_enabled
+                or below_crossover
+                or auto_speedup >= 1.05,
+                "qualified_auto_wall_three_repeat_pass": not qualification.auto_enabled
+                or below_crossover
                 or all(speedup >= 1.05 for speedup in auto_repeat_speedups),
             }
             gates["qualification_pass"] = all(gates.values())
@@ -2152,7 +2290,9 @@ def _run_workload_grid(
                     "precision": args.precision,
                     "qualified_implementation_id": accelerated_id,
                     "min_elements": min_elements,
-                    "threshold_boundary": n in {min_elements - 1, min_elements},
+                    "threshold_boundary": qualification.auto_enabled
+                    and n in {min_elements - 1, min_elements},
+                    "auto_enabled": qualification.auto_enabled,
                     "below_crossover": below_crossover,
                     "strategies": strategies,
                     "wall_timing": timing,
