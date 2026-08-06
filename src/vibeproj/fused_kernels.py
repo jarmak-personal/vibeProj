@@ -1460,6 +1460,10 @@ _KROVAK_FORWARD_SOURCE = (
 ) {{"""
     + _FWD_PREAMBLE
     + """
+    const bool finite_input = isfinite(phi) && isfinite(lam);
+    const bool nan_input = isnan(phi) || isnan(lam);
+    if (!finite_input) {{ phi = ({real_t})0.0; lam = ({real_t})0.0; }}
+
     // Gaussian conformal sphere
     {real_t} sin_phi = sin(phi);
     {real_t} e_sin = e * sin_phi;
@@ -1485,6 +1489,13 @@ _KROVAK_FORWARD_SOURCE = (
     // North Orientated: negate
     double easting  = (double)(-r_norm * sin_theta) * (double)a + (double)x0;
     double northing = (double)(-r_norm * cos_theta) * (double)a + (double)y0;
+    if (!finite_input) {{
+        if (nan_input) {{ easting = northing = nan(""); }}
+        else {{
+            easting = copysign(1.0 / 0.0, x_unit_to_m);
+            northing = copysign(1.0 / 0.0, y_unit_to_m);
+        }}
+    }}
 """
     + _FWD_POSTAMBLE
     + "}}"
@@ -1501,6 +1512,10 @@ _KROVAK_INVERSE_SOURCE = (
 ) {{"""
     + _INV_PREAMBLE
     + """
+    const bool finite_input = isfinite(cx) && isfinite(cy);
+    const bool nan_input = isnan(cx) || isnan(cy);
+    if (!finite_input) {{ cx = ({real_t})0.0; cy = ({real_t})0.0; }}
+
     // Undo North Orientated negation (cx, cy already normalised)
     {real_t} r_norm = sqrt(cx * cx + cy * cy);
     {real_t} theta = atan2(-cx, -cy);
@@ -1532,6 +1547,10 @@ _KROVAK_INVERSE_SOURCE = (
     }}
 
     {real_t} lam = -V / B;
+    if (!finite_input) {{
+        if (nan_input) {{ phi = lam = ({real_t})nan(""); }}
+        else {{ phi = lam = ({real_t})(1.0 / 0.0); }}
+    }}
 """
     + _INV_POSTAMBLE
     + "}}"
@@ -2974,8 +2993,8 @@ def fused_transform(
     # Build args per projection
     base = (arg1, arg2, out_x, out_y)
     unit_args = (
-        np.float64(computed.get("x_unit_to_m", 1.0)),
-        np.float64(computed.get("y_unit_to_m", 1.0)),
+        np.float64(computed.get("easting_axis_sign", 1.0) * computed.get("x_unit_to_m", 1.0)),
+        np.float64(computed.get("northing_axis_sign", 1.0) * computed.get("y_unit_to_m", 1.0)),
     )
 
     def _with_units(*params):

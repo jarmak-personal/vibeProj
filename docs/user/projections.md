@@ -28,7 +28,7 @@ element-wise implementation and a fused NVRTC GPU kernel.
 | Azimuthal Equidistant (spherical) | `aeqd` | -- | Requires an explicit spherical CRS (`+R`) |
 | Geostationary Satellite | `geos` | -- | Sweep X/Y and custom satellite height |
 | Oblique Mercator (Hotine) | `omerc` | 3375 | Variants A/B |
-| Krovak | `krovak` | 5514 | North-orientated variant |
+| Krovak | `krovak` | 5513, 5514 | Regular Southing/Westing and north-oriented Easting/Northing |
 | Eckert IV | `eck4` | -- | Pseudocylindrical equal-area |
 | Eckert VI | `eck6` | -- | Pseudocylindrical equal-area |
 
@@ -104,6 +104,20 @@ declared satellite height `+h`. Height must be positive and no more than
 `1e10` equatorial radii. Forward points behind the visible ellipsoid limb and
 inverse points outside the Earth-intersection disk or principal scan-angle
 range return non-finite sentinels.
+
+Krovak uses one north-oriented mathematical core for both public variants.
+EPSG:5514 exposes Easting/Northing. EPSG:5513 applies the declared negative
+axes and exposes X=Southing, Y=Westing. Because those are explicit X/Y axes,
+PROJ visualization order—and therefore `always_xy=True`—keeps Southing first
+and Westing second rather than relabeling them as conventional E/N. Krovak's
+false easting and northing parameters follow its method-specific subtractive
+convention; metre and non-metre units retain positive public unit factors.
+For custom nonzero offsets, vibeProj matches PROJ forward coordinates and
+applies the same convention symmetrically in inverse transforms, so its inverse
+exactly undoes its forward result. This intentionally avoids the asymmetric
+custom-offset inverse behavior exposed by legacy PROJ pipelines through 9.5.
+The authoritative EPSG:5513 and EPSG:5514 definitions use zero offsets and are
+unaffected by this compatibility distinction.
 
 ## Datum shifting
 

@@ -47,6 +47,13 @@ class ProjectionParams:
     # Exact coordinate-operation method retained for strategy-domain planning.
     # Appended to preserve the public positional construction order above.
     operation_method: str | None = None
+    # Direction of the projected coordinate components relative to canonical
+    # east/north projection math.  Westing and southing axes use -1.
+    easting_axis_sign: float = 1.0
+    northing_axis_sign: float = 1.0
+    # Component order after PROJ-style visualization normalization.  Usually
+    # east/west first, except CRSes whose projected axes explicitly use X/Y.
+    visualization_north_first: bool = False
 
 
 @dataclass(frozen=True)
@@ -208,33 +215,96 @@ def _get_linear_param(params_list, name, default=0.0):
     return default
 
 
-def _get_axis_unit_factors(crs: CRS, *, first_is_north: bool) -> tuple[float, float]:
-    """Return (easting_unit_to_m, northing_unit_to_m) for projected CRS axes."""
+def _axis_component(axis, *, index: int) -> str:
+    """Classify an axis as the east/west or north/south component."""
+    name = (axis.name or "").strip().lower()
+    if "easting" in name or "westing" in name:
+        return "easting"
+    if "northing" in name or "southing" in name:
+        return "northing"
+
+    abbreviation = (axis.abbrev or "").strip().lower()
+    if abbreviation in ("e", "w", "lon"):
+        return "easting"
+    if abbreviation in ("n", "s", "lat"):
+        return "northing"
+
+    direction = (axis.direction or "").lower()
+    if direction in ("east", "west"):
+        return "easting"
+    if direction in ("north", "south"):
+        return "northing"
+
+    if abbreviation == "x":
+        return "easting"
+    if abbreviation == "y":
+        return "northing"
+    return "easting" if index == 0 else "northing"
+
+
+def _axis_component_sign(axis) -> float:
+    """Return the sign of a named projected component without polar-axis traps."""
+    name = (axis.name or "").strip().lower()
+    if "westing" in name or "southing" in name:
+        return -1.0
+    if "easting" in name or "northing" in name:
+        return 1.0
+
+    abbreviation = (axis.abbrev or "").strip().lower()
+    if abbreviation in ("w", "s"):
+        return -1.0
+    if abbreviation in ("e", "n", "lon", "lat"):
+        return 1.0
+
+    # Direction is only a last resort.  Polar projected CRSes describe the
+    # meridian orientation of axes as north/south while their named coordinate
+    # components remain ordinary positive Easting/Northing.
+    return -1.0 if (axis.direction or "").lower() in ("west", "south") else 1.0
+
+
+def _get_projected_axis_metadata(
+    crs: CRS,
+) -> tuple[bool, bool, float, float, float, float]:
+    """Return order, signs, and positive unit factors for projected components."""
     if not crs.is_projected:
-        return 1.0, 1.0
+        return False, False, 1.0, 1.0, 1.0, 1.0
 
     x_unit_to_m = 1.0
     y_unit_to_m = 1.0
+    easting_sign = 1.0
+    northing_sign = 1.0
     axes = crs.axis_info
-
-    for axis in axes:
-        direction = axis.direction.lower()
-        factor = axis.unit_conversion_factor or 1.0
-        if direction in ("east", "west"):
+    first_is_north = False
+    visualization_north_first = False
+    for index, axis in enumerate(axes[:2]):
+        component = _axis_component(axis, index=index)
+        factor = abs(axis.unit_conversion_factor or 1.0)
+        sign = _axis_component_sign(axis)
+        if index == 0:
+            first_is_north = component == "northing"
+        if (axis.abbrev or "").strip().lower() == "x":
+            visualization_north_first = component == "northing"
+        if component == "easting":
             x_unit_to_m = factor
-        elif direction in ("north", "south"):
+            easting_sign = sign
+        else:
             y_unit_to_m = factor
+            northing_sign = sign
 
-    # Fallback when the CRS axis directions are generic (e.g. X/Y).
-    if len(axes) >= 2:
-        first_factor = axes[0].unit_conversion_factor or 1.0
-        second_factor = axes[1].unit_conversion_factor or 1.0
-        if x_unit_to_m == 1.0 and y_unit_to_m == 1.0:
-            if first_is_north:
-                return second_factor, first_factor
-            return first_factor, second_factor
+    # PROJ visualization normalization preserves the declared order for
+    # westing/southing systems (notably regular Krovak X=Southing,Y=Westing)
+    # instead of reinterpreting them as conventional positive E/N axes.
+    if easting_sign < 0.0 or northing_sign < 0.0:
+        visualization_north_first = first_is_north
 
-    return x_unit_to_m, y_unit_to_m
+    return (
+        first_is_north,
+        visualization_north_first,
+        easting_sign,
+        northing_sign,
+        x_unit_to_m,
+        y_unit_to_m,
+    )
 
 
 def resolve_projection_params(crs: CRS) -> ProjectionParams:
@@ -243,11 +313,8 @@ def resolve_projection_params(crs: CRS) -> ProjectionParams:
     Returns a ProjectionParams object describing the projection type and its parameters.
     For geographic CRS (lat/lon), returns projection_name="longlat".
     """
-    # Detect axis order: is first axis northing/latitude?
-    # Use abbreviation: 'Lat', 'N', 'Y' = northing-first; 'Lon', 'E', 'X' = easting-first
     axes = crs.axis_info
-    first_is_north = len(axes) >= 1 and axes[0].abbrev in ("Lat", "N", "Y")
-    x_unit_to_m, y_unit_to_m = _get_axis_unit_factors(crs, first_is_north=first_is_north)
+    first_is_north = len(axes) >= 1 and _axis_component(axes[0], index=0) == "northing"
 
     if crs.is_geographic:
         return ProjectionParams(
@@ -258,6 +325,15 @@ def resolve_projection_params(crs: CRS) -> ProjectionParams:
 
     if not crs.is_projected:
         raise CRSResolutionError(f"Unsupported CRS type: {crs}")
+
+    (
+        first_is_north,
+        visualization_north_first,
+        easting_axis_sign,
+        northing_axis_sign,
+        x_unit_to_m,
+        y_unit_to_m,
+    ) = _get_projected_axis_metadata(crs)
 
     cf = crs.coordinate_operation
     if cf is None:
@@ -393,6 +469,9 @@ def resolve_projection_params(crs: CRS) -> ProjectionParams:
         y_unit_to_m=y_unit_to_m,
         north_first=first_is_north,
         operation_method=method_name,
+        easting_axis_sign=easting_axis_sign,
+        northing_axis_sign=northing_axis_sign,
+        visualization_north_first=visualization_north_first,
     )
 
     if proj_name == "geos":

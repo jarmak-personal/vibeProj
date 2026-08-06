@@ -195,6 +195,9 @@ params = ProjectionParams(
     x_0=0.0,                   # false easting (meters)
     y_0=0.0,                   # false northing (meters)
     north_first=False,         # axis order flag
+    easting_axis_sign=1.0,     # -1 for a Westing component
+    northing_axis_sign=1.0,    # -1 for a Southing component
+    visualization_north_first=False,  # projected PROJ X/Y display order
     extra={},                  # projection-specific params
 )
 ```
@@ -205,6 +208,11 @@ zero remains a valid supplied standard parallel. Winkel Tripel uses
 `acos(2/pi)` only when `lat_1` is `None`, while CEA and Equidistant
 Cylindrical treat omission as zero. Mercator variant B requires `lat_1`, and
 therefore accepts an explicit `lat_1=0.0` but not `None`.
+
+Projected axis signs are independent from component order and unit magnitude.
+Resolved unit factors remain positive; Westing and Southing are represented by
+the two sign fields. `always_xy=True` follows PROJ visualization order. In
+particular, EPSG:5513 retains X=Southing, Y=Westing under both axis settings.
 
 ### `TransformPipeline`
 

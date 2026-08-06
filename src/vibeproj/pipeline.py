@@ -463,11 +463,17 @@ class TransformPipeline:
             self.computed = _setup_projection(self.projection, self.proj_params)
             self.computed.setdefault("x_unit_to_m", self.proj_params.x_unit_to_m)
             self.computed.setdefault("y_unit_to_m", self.proj_params.y_unit_to_m)
+            self.computed.setdefault("easting_axis_sign", self.proj_params.easting_axis_sign)
+            self.computed.setdefault("northing_axis_sign", self.proj_params.northing_axis_sign)
         elif self.mode == "proj_to_proj":
             self.src_computed.setdefault("x_unit_to_m", self.src.x_unit_to_m)
             self.src_computed.setdefault("y_unit_to_m", self.src.y_unit_to_m)
+            self.src_computed.setdefault("easting_axis_sign", self.src.easting_axis_sign)
+            self.src_computed.setdefault("northing_axis_sign", self.src.northing_axis_sign)
             self.dst_computed.setdefault("x_unit_to_m", self.dst.x_unit_to_m)
             self.dst_computed.setdefault("y_unit_to_m", self.dst.y_unit_to_m)
+            self.dst_computed.setdefault("easting_axis_sign", self.dst.easting_axis_sign)
+            self.dst_computed.setdefault("northing_axis_sign", self.dst.northing_axis_sign)
             self._p2p_inv: TransformPipeline | None = None
             self._p2p_fwd: TransformPipeline | None = None
             self._p2p_lock = threading.RLock()
@@ -772,6 +778,8 @@ class TransformPipeline:
         y0 = computed.get("y0", self.proj_params.y_0)
         x_unit_to_m = computed.get("x_unit_to_m", self.proj_params.x_unit_to_m)
         y_unit_to_m = computed.get("y_unit_to_m", self.proj_params.y_unit_to_m)
+        easting_axis_sign = computed.get("easting_axis_sign", self.proj_params.easting_axis_sign)
+        northing_axis_sign = computed.get("northing_axis_sign", self.proj_params.northing_axis_sign)
         lam0 = computed.get("lam0", math.radians(self.proj_params.lon_0))
 
         # Convert to radians
@@ -789,8 +797,8 @@ class TransformPipeline:
         northing = northing * a + y0
 
         # Projected CRS I/O stays in the CRS native linear units.
-        easting = easting / x_unit_to_m
-        northing = northing / y_unit_to_m
+        easting = easting / (easting_axis_sign * x_unit_to_m)
+        northing = northing / (northing_axis_sign * y_unit_to_m)
 
         # Output in destination CRS axis order
         if self.dst_north_first:
@@ -950,11 +958,13 @@ class TransformPipeline:
         y0 = computed.get("y0", self.proj_params.y_0)
         x_unit_to_m = computed.get("x_unit_to_m", self.proj_params.x_unit_to_m)
         y_unit_to_m = computed.get("y_unit_to_m", self.proj_params.y_unit_to_m)
+        easting_axis_sign = computed.get("easting_axis_sign", self.proj_params.easting_axis_sign)
+        northing_axis_sign = computed.get("northing_axis_sign", self.proj_params.northing_axis_sign)
         lam0 = computed.get("lam0", math.radians(self.proj_params.lon_0))
 
         # Projected CRS inputs are expressed in the CRS native linear units.
-        easting = easting * x_unit_to_m
-        northing = northing * y_unit_to_m
+        easting = easting * (easting_axis_sign * x_unit_to_m)
+        northing = northing * (northing_axis_sign * y_unit_to_m)
 
         # Remove false easting/northing and scale
         x = (easting - x0) / a

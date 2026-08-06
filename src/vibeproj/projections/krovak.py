@@ -1,7 +1,9 @@
 """Krovak projection.
 
 Oblique conformal conic projection used for Czech/Slovak national grids.
-Implements the Krovak North Orientated variant (EPSG method 1041).
+The projection core is north oriented. CRS axis metadata exposes either regular
+Krovak (EPSG:5513, X=Southing/Y=Westing) or Krovak North Orientated
+(EPSG:5514, Easting/Northing).
 
 Math follows PROJ krovak.cpp and EPSG Guidance Note 7-2, section 2.4.4.
 """
@@ -71,11 +73,22 @@ class Krovak(Projection):
             "sin_alpha_c": math.sin(alpha_c),
             "cos_alpha_c": math.cos(alpha_c),
             "lam0": lam_0,
-            "x0": params.x_0,
-            "y0": params.y_0,
+            # Krovak's false-origin convention subtracts these values from
+            # the north-oriented core coordinates (opposite the generic EPSG
+            # false-easting/northing convention used by other projections).
+            # Keep the negation in shared setup so generic forward and inverse
+            # apply one symmetric offset contract. This matches PROJ forward
+            # coordinates for custom nonzero offsets while deliberately
+            # avoiding the asymmetric inverse exposed by legacy PROJ pipelines.
+            "x0": -params.x_0,
+            "y0": -params.y_0,
         }
 
     def forward(self, lam, phi, params, computed, xp):
+        finite_input = xp.isfinite(lam) & xp.isfinite(phi)
+        nan_input = xp.isnan(lam) | xp.isnan(phi)
+        lam = xp.where(finite_input, lam, 0.0)
+        phi = xp.where(finite_input, phi, 0.0)
         e = computed["e"]
         B = computed["B"]
         k = computed["k"]
@@ -112,9 +125,17 @@ class Krovak(Projection):
         # Step 4: Grid coordinates (North Orientated → negate)
         x = -r_norm * xp.sin(theta)
         y = -r_norm * xp.cos(theta)
+        invalid_x = xp.where(nan_input, xp.nan, xp.inf * params.easting_axis_sign)
+        invalid_y = xp.where(nan_input, xp.nan, xp.inf * params.northing_axis_sign)
+        x = xp.where(finite_input, x, invalid_x)
+        y = xp.where(finite_input, y, invalid_y)
         return x, y
 
     def inverse(self, x, y, params, computed, xp):
+        finite_input = xp.isfinite(x) & xp.isfinite(y)
+        nan_input = xp.isnan(x) | xp.isnan(y)
+        x = xp.where(finite_input, x, 0.0)
+        y = xp.where(finite_input, y, 0.0)
         e = computed["e"]
         B = computed["B"]
         k = computed["k"]
@@ -165,6 +186,10 @@ class Krovak(Projection):
 
         # Step 5: recover lambda
         lam = -V / B
+
+        invalid = xp.where(nan_input, xp.nan, xp.inf)
+        lam = xp.where(finite_input, lam, invalid)
+        phi = xp.where(finite_input, phi, invalid)
 
         return lam, phi
 

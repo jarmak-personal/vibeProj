@@ -118,7 +118,10 @@ class Transformer:
         crs_from, crs_to :
             EPSG integer (4326), string ("EPSG:4326"), or pyproj CRS.
         always_xy : bool, default True
-            If True, input/output order is (x, y) = (lon, lat).
+            If True, use PROJ visualization order: (lon, lat) for geographic
+            CRSes and their declared X/Y order for projected CRSes. Most
+            projected CRSes use (easting, northing); EPSG:5513 deliberately
+            remains X=Southing, Y=Westing, matching pyproj.
         datum_shift : {"accurate", "fast"}, default "accurate"
             "accurate" uses 15-param time-dependent Helmert + SVD corrections
             when available. "fast" uses base 7-param Helmert only.
@@ -230,11 +233,16 @@ class Transformer:
                 stacklevel=2,
             )
 
-        # always_xy=True forces (x, y) = (lon, lat) / (easting, northing) order,
-        # matching shapely/geopandas conventions regardless of CRS native axis order.
+        # always_xy=True follows PROJ visualization order. Most projected CRSes
+        # become (easting, northing), while EPSG:5513 retains its explicit
+        # X=Southing, Y=Westing order under both settings.
         if always_xy:
-            src_params = dataclasses.replace(src_params, north_first=False)
-            dst_params = dataclasses.replace(dst_params, north_first=False)
+            src_params = dataclasses.replace(
+                src_params, north_first=src_params.visualization_north_first
+            )
+            dst_params = dataclasses.replace(
+                dst_params, north_first=dst_params.visualization_north_first
+            )
 
         self._pipeline = TransformPipeline(
             src_params,
@@ -277,7 +285,9 @@ class Transformer:
         always_xy : bool, default True
             If True, input/output axis order is always (x, y) — i.e.
             (longitude, latitude) for geographic CRS and (easting, northing)
-            for projected CRS. This matches shapely and geopandas conventions.
+            for most projected CRS. Projected X/Y declarations are preserved:
+            EPSG:5513 remains X=Southing, Y=Westing, matching pyproj. This
+            otherwise follows shapely and geopandas conventions.
             If False, uses the CRS native axis order (pyproj default).
         datum_shift : str, default "accurate"
             "accurate" — use 15-parameter time-dependent Helmert when available,
@@ -613,7 +623,9 @@ class Transformer:
         ----------
         x, y : scalar, list, numpy array, or cupy array
             Input coordinates. With always_xy=True (default): x=longitude, y=latitude
-            for geographic CRS. With always_xy=False: native CRS axis order.
+            for geographic CRS and PROJ visualization order for projected CRS.
+            EPSG:5513 remains X=Southing, Y=Westing. With always_xy=False:
+            native CRS axis order.
         z : scalar, list, numpy array, or cupy array, optional
             Ellipsoidal height in meters. When a Helmert datum shift is active,
             z is transformed through the ECEF intermediate (correctness fix).

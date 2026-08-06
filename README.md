@@ -45,7 +45,7 @@ All 24 projections run in under 3 ms at 1M coordinates. See full benchmark in th
 | Azimuthal Equidistant (spherical `+R`) | `aeqd` | — |
 | Geostationary Satellite | `geos` | — |
 | Oblique Mercator (Hotine) | `omerc` | 3375 |
-| Krovak | `krovak` | 5514 |
+| Krovak | `krovak` | 5513, 5514 |
 | Eckert IV | `eck4` | — |
 | Eckert VI | `eck6` | — |
 

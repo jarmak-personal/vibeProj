@@ -29,6 +29,7 @@ extern "C" __global__ void my_forward(
     double* __restrict__ out_y,
     // projection-specific scalar parameters
     double lam0, double a, double x0, double y0,
+    double x_unit_to_m, double y_unit_to_m,
     int src_north_first, int dst_north_first, int n
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -55,6 +56,12 @@ extern "C" __global__ void my_forward(
     else                 { out_x[idx] = easting;  out_y[idx] = northing; }
 }
 ```
+
+Projected westing/southing signs are folded into the two existing unit-factor
+arguments on the host. This preserves the kernel ABI and per-thread operation
+count: forward kernels divide by a signed factor and inverse kernels multiply
+by it. Public `ProjectionParams` retains positive unit magnitudes and stores
+component signs separately.
 
 ## Preamble/postamble macros
 
