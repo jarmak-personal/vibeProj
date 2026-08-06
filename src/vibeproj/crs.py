@@ -28,8 +28,10 @@ class ProjectionParams:
     # Common parameters (not all apply to every projection)
     lon_0: float = 0.0  # central meridian (degrees)
     lat_0: float = 0.0  # latitude of origin (degrees)
-    lat_1: float = 0.0  # first standard parallel (degrees)
-    lat_2: float = 0.0  # second standard parallel (degrees)
+    # ``None`` means the coordinate operation omitted the parameter.  Zero is
+    # a valid, explicit standard parallel and must not be used as a sentinel.
+    lat_1: float | None = None  # first standard parallel (degrees)
+    lat_2: float | None = None  # second standard parallel (degrees)
     k_0: float = 1.0  # scale factor
     x_0: float = 0.0  # false easting (meters)
     y_0: float = 0.0  # false northing (meters)
@@ -279,10 +281,14 @@ def resolve_projection_params(crs: CRS) -> ProjectionParams:
         )
 
     ellipsoid = _get_ellipsoid(crs)
-    if proj_name == "aeqd" and ellipsoid.es != 0.0:
+    if proj_name in ("aeqd", "gnom") and ellipsoid.es != 0.0:
+        display_name = {
+            "aeqd": "Azimuthal Equidistant",
+            "gnom": "Gnomonic",
+        }[proj_name]
         raise UnsupportedProjectionError(
             f"Ellipsoidal projection method '{method_name}' is not implemented. "
-            "vibeProj supports spherical Azimuthal Equidistant only; use an explicit "
+            f"vibeProj supports spherical {display_name} only; use an explicit "
             "spherical CRS (+R) when those semantics are intended."
         )
 
@@ -327,10 +333,10 @@ def resolve_projection_params(crs: CRS) -> ProjectionParams:
         _get_param(
             pl,
             "Latitude of standard parallel",
-            _get_param(pl, "Latitude of true scale", 0.0),
+            _get_param(pl, "Latitude of true scale", None),
         ),
     )
-    lat_2 = _get_param(pl, "Latitude of 2nd standard parallel", 0.0)
+    lat_2 = _get_param(pl, "Latitude of 2nd standard parallel", None)
     k_0 = _get_param(
         pl,
         "Scale factor at natural origin",
@@ -345,6 +351,10 @@ def resolve_projection_params(crs: CRS) -> ProjectionParams:
         ),
     )
     if proj_name == "merc" and method_name in ("Mercator (variant B)", "Mercator (2SP)"):
+        if lat_1 is None:
+            raise CRSResolutionError(
+                f"Projection method '{method_name}' requires a latitude of standard parallel"
+            )
         latitude_standard_parallel = math.radians(lat_1)
         sin_latitude = math.sin(latitude_standard_parallel)
         k_0 = math.cos(latitude_standard_parallel) / math.sqrt(

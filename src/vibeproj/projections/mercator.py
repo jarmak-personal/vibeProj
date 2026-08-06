@@ -11,6 +11,7 @@ import warnings
 from typing import TYPE_CHECKING
 
 from vibeproj.projections import register
+from vibeproj.exceptions import CRSResolutionError
 from vibeproj.projections.base import Projection
 
 if TYPE_CHECKING:
@@ -31,6 +32,10 @@ class Mercator(Projection):
         variant = _mercator_variant(params.operation_method)
         k0 = params.k_0
         if variant == "variant_b":
+            if params.lat_1 is None:
+                raise CRSResolutionError(
+                    "Mercator variant B requires an explicit latitude of standard parallel"
+                )
             latitude_standard_parallel = math.radians(params.lat_1)
             sin_latitude = math.sin(latitude_standard_parallel)
             k0 = math.cos(latitude_standard_parallel) / math.sqrt(

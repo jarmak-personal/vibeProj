@@ -37,7 +37,7 @@ GEOS_FORWARD_FIXED_Q62_MIN_ELEMENTS = 2_097_152
 LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS = 1_048_576
 
 _EXACT_DOMAIN_FAMILIES = frozenset(
-    {"aeqd", "geos", "laea", "merc", "ortho", "sinu", "stere", "sterea", "webmerc"}
+    {"aeqd", "geos", "gnom", "laea", "merc", "ortho", "sinu", "stere", "sterea", "webmerc"}
 )
 
 
@@ -95,6 +95,8 @@ def projection_strategy_domain(projection: str, direction: str, computed: dict) 
         return f"laea.{direction}.{geometry}.{mode}"
     if projection == "ortho":
         return f"ortho.{direction}.{geometry}.{_origin_mode(computed)}"
+    if projection == "gnom":
+        return f"gnom.{direction}.{geometry}.{_origin_mode(computed)}"
     if projection == "aeqd":
         if method == "Guam Projection":
             semantics = "guam"
@@ -124,6 +126,11 @@ def projection_strategy_domains(projection: str, direction: str) -> tuple[str, .
     """Return registry domains module-level warm-up must resolve for a target."""
     if projection == "tmerc" and direction == "forward":
         return ("global", "utm")
+    if projection == "gnom":
+        return tuple(
+            f"gnom.{direction}.spherical.{mode}"
+            for mode in ("equatorial", "north_pole", "oblique", "south_pole")
+        )
     prefix = f"{projection}.{direction}"
     registered = {
         domain

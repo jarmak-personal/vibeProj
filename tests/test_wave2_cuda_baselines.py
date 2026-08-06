@@ -538,7 +538,7 @@ extern "C" __global__ void ea_fraction_test(
 )
 def test_all_fused_inverse_paths_preserve_nonfinite_longitude(projection):
     extra = {"h": 35_785_831.0, "sweep_axis": "x"} if projection == "geos" else {}
-    ellipsoid = SPHERE if projection == "aeqd" else WGS84
+    ellipsoid = SPHERE if projection in ("aeqd", "gnom") else WGS84
     projected = ProjectionParams(
         projection_name=projection,
         ellipsoid=ellipsoid,

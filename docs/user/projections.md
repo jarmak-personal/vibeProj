@@ -73,6 +73,14 @@ pipe = TransformPipeline(src, params)
 x, y = pipe.transform(lat_array, lon_array, np)  # or cp for GPU
 ```
 
+Gnomonic is spherical-only. Define it with an explicit spherical ellipsoid
+(`+R` in a CRS definition, or `SPHERE` in `ProjectionParams`). Ellipsoidal
+Gnomonic definitions raise `UnsupportedProjectionError`; vibeProj does not
+silently substitute spherical equations. Forward points at or behind the
+horizon are outside the projection domain and return non-finite coordinates,
+matching PROJ. The inverse remains stable at the projection center and for
+very large finite projected radii.
+
 Sinusoidal supports both explicit spherical definitions and ellipsoidal CRS
 definitions such as `ESRI:54008`; the ellipsoidal path uses meridional distance
 and the ellipsoidal prime-vertical radius in both CPU and fused CUDA execution.

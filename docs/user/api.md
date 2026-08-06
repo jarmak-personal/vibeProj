@@ -189,8 +189,8 @@ params = ProjectionParams(
     ellipsoid=WGS84,           # reference ellipsoid
     lon_0=0.0,                 # central meridian (degrees)
     lat_0=45.0,                # latitude of origin (degrees)
-    lat_1=0.0,                 # first standard parallel
-    lat_2=0.0,                 # second standard parallel
+    lat_1=None,                # first standard parallel; None means omitted
+    lat_2=None,                # second standard parallel; None means omitted
     k_0=1.0,                   # scale factor
     x_0=0.0,                   # false easting (meters)
     y_0=0.0,                   # false northing (meters)
@@ -198,6 +198,13 @@ params = ProjectionParams(
     extra={},                  # projection-specific params
 )
 ```
+
+`lat_1` and `lat_2` distinguish omission from an explicit zero. Conic
+projections apply their method-specific fallback only when a value is `None`;
+zero remains a valid supplied standard parallel. Winkel Tripel uses
+`acos(2/pi)` only when `lat_1` is `None`, while CEA and Equidistant
+Cylindrical treat omission as zero. Mercator variant B requires `lat_1`, and
+therefore accepts an explicit `lat_1=0.0` but not `None`.
 
 ### `TransformPipeline`
 

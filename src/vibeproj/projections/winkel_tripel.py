@@ -23,7 +23,7 @@ class WinkelTripel(Projection):
 
     def setup(self, params: ProjectionParams) -> dict:
         # Standard parallel (default: acos(2/pi) ≈ 50.46°)
-        lat1 = math.radians(params.lat_1) if params.lat_1 != 0 else math.acos(2.0 / math.pi)
+        lat1 = math.radians(params.lat_1) if params.lat_1 is not None else math.acos(2.0 / math.pi)
         return {
             "a": params.ellipsoid.a,
             "cos_phi1": math.cos(lat1),

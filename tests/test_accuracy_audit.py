@@ -288,7 +288,7 @@ class TestEPSGProjections:
 
 def _vibeproj_forward(proj_name, lat, lon, lat_0=0.0, lon_0=0.0, extra=None):
     """Run a vibeProj forward transform via TransformPipeline."""
-    ellipsoid = SPHERE if proj_name in ("aeqd", "sinu") else WGS84
+    ellipsoid = SPHERE if proj_name in ("aeqd", "gnom", "sinu") else WGS84
     params = ProjectionParams(
         projection_name=proj_name,
         ellipsoid=ellipsoid,
@@ -304,7 +304,7 @@ def _vibeproj_forward(proj_name, lat, lon, lat_0=0.0, lon_0=0.0, extra=None):
 
 def _vibeproj_inverse(proj_name, x, y, lat_0=0.0, lon_0=0.0, extra=None):
     """Run a vibeProj inverse transform via TransformPipeline."""
-    ellipsoid = SPHERE if proj_name in ("aeqd", "sinu") else WGS84
+    ellipsoid = SPHERE if proj_name in ("aeqd", "gnom", "sinu") else WGS84
     params = ProjectionParams(
         projection_name=proj_name,
         ellipsoid=ellipsoid,

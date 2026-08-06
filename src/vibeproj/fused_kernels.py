@@ -16,6 +16,7 @@ import warnings
 
 import numpy as np
 
+from vibeproj.projections.gnomonic import GNOM_MIN_COS_C
 from vibeproj.transcendentals import (
     GEOS_FORWARD_FIXED_Q62,
     HELMERT_FIXED_Q62,
@@ -39,6 +40,8 @@ _GEOS_DEVICE_NUMERIC_CONTRACT = (
     f"{GEOS_FP64_DISCRIMINANT_TOLERANCE:.17g}\n"
     f"#define VP_GEOS_SCAN_ANGLE_LIMIT {GEOS_SCAN_ANGLE_LIMIT:.17g}\n"
 )
+
+_GNOM_DEVICE_NUMERIC_CONTRACT = f"#define VP_GNOM_MIN_COS_C {GNOM_MIN_COS_C:.17g}\n"
 
 # Kernel cache: (projection, direction, dtype, implementation_id) -> RawKernel
 # Protected by _kernel_cache_lock for thread-safe compilation.
@@ -1229,7 +1232,7 @@ _ORTHO_INVERSE_SOURCE = (
 # Gnomonic kernels
 # ===================================================================
 
-_GNOM_FORWARD_SOURCE = (
+_GNOM_FORWARD_SOURCE = _GNOM_DEVICE_NUMERIC_CONTRACT + (
     _FWD_SIGNATURE.format(func="gnom_forward", real_t="{real_t}")
     + """
     {real_t} sin_phi0, {real_t} cos_phi0,
@@ -1243,14 +1246,25 @@ _GNOM_FORWARD_SOURCE = (
     {real_t} sin_lam, cos_lam;
     vp_native_sincos(lam, &sin_lam, &cos_lam);
     {real_t} cos_c = sin_phi0 * sin_phi + cos_phi0 * cos_phi * cos_lam;
-    double easting  = (double)(cos_phi * sin_lam / cos_c) * (double)a + (double)x0;
-    double northing = (double)((cos_phi0 * sin_phi - sin_phi0 * cos_phi * cos_lam) / cos_c) * (double)a + (double)y0;
+    const bool visible = cos_c >= ({real_t})VP_GNOM_MIN_COS_C;
+    const {real_t} safe_cos_c = visible ? cos_c : ({real_t})1.0;
+    double easting = (double)(cos_phi * sin_lam / safe_cos_c) * (double)a + (double)x0;
+    double northing = (double)(
+        (cos_phi0 * sin_phi - sin_phi0 * cos_phi * cos_lam) / safe_cos_c
+    ) * (double)a + (double)y0;
+    if (!visible) {{
+        if (isnan(phi) || isnan(lam)) {{
+            easting = northing = nan("");
+        }} else {{
+            easting = northing = 1.0 / 0.0;
+        }}
+    }}
 """
     + _FWD_POSTAMBLE
     + "}}"
 )
 
-_GNOM_INVERSE_SOURCE = (
+_GNOM_INVERSE_SOURCE = _GNOM_DEVICE_NUMERIC_CONTRACT + (
     _INV_SIGNATURE.format(func="gnom_inverse", real_t="{real_t}")
     + """
     {real_t} sin_phi0, {real_t} cos_phi0,
@@ -1259,13 +1273,29 @@ _GNOM_INVERSE_SOURCE = (
 ) {{"""
     + _INV_PREAMBLE
     + """
-    {real_t} rho = sqrt(cx*cx + cy*cy);
-    {real_t} c = atan(rho);
-    {real_t} sin_c, cos_c;
-    vp_native_sincos(c, &sin_c, &cos_c);
-    {real_t} safe_rho = fmax(rho, ({real_t})1e-30);
-    {real_t} phi = asin(cos_c * sin_phi0 + cy * sin_c * cos_phi0 / safe_rho);
-    {real_t} lam = atan2(cx * sin_c, safe_rho * cos_phi0 * cos_c - cy * sin_phi0 * sin_c);
+    const bool finite = isfinite(cx) && isfinite(cy);
+    const {real_t} work_x = finite ? cx : ({real_t})0.0;
+    const {real_t} work_y = finite ? cy : ({real_t})0.0;
+    const {real_t} rho = hypot(work_x, work_y);
+    const {real_t} norm = hypot(({real_t})1.0, rho);
+    const {real_t} sin_c = rho / norm;
+    const {real_t} cos_c = ({real_t})1.0 / norm;
+    const {real_t} safe_rho = rho == ({real_t})0.0 ? ({real_t})1.0 : rho;
+    const {real_t} unit_x = work_x / safe_rho;
+    const {real_t} unit_y = work_y / safe_rho;
+    const {real_t} phi_argument = cos_c * sin_phi0 + unit_y * sin_c * cos_phi0;
+    {real_t} phi = asin(fmin(fmax(phi_argument, ({real_t})-1.0), ({real_t})1.0));
+    {real_t} lam = atan2(
+        unit_x * sin_c,
+        cos_phi0 * cos_c - unit_y * sin_phi0 * sin_c
+    );
+    if (!finite) {{
+        if (isnan(cx) || isnan(cy)) {{
+            phi = lam = nan("");
+        }} else {{
+            phi = lam = ({real_t})(1.0 / 0.0);
+        }}
+    }}
 """
     + _INV_POSTAMBLE
     + "}}"

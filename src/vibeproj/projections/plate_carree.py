@@ -22,7 +22,7 @@ class PlateCarree(Projection):
     name = "eqc"
 
     def setup(self, params: ProjectionParams) -> dict:
-        lat_ts = math.radians(params.lat_1) if params.lat_1 != 0 else 0.0
+        lat_ts = math.radians(params.lat_1) if params.lat_1 is not None else 0.0
         return {
             "a": params.ellipsoid.a,
             "cos_lat_ts": math.cos(lat_ts),

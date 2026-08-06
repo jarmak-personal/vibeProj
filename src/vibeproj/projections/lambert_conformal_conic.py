@@ -66,8 +66,8 @@ class LambertConformalConic(Projection):
         ec = e.e
 
         phi0 = math.radians(params.lat_0)
-        phi1 = math.radians(params.lat_1) if params.lat_1 != 0 else phi0
-        phi2 = math.radians(params.lat_2) if params.lat_2 != 0 else phi1
+        phi1 = math.radians(params.lat_1) if params.lat_1 is not None else phi0
+        phi2 = math.radians(params.lat_2) if params.lat_2 is not None else phi1
 
         sin_phi1 = math.sin(phi1)
         cos_phi1 = math.cos(phi1)

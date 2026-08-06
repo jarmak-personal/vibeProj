@@ -502,17 +502,17 @@ def test_ortho_fused_roundtrip():
 
 def test_gnom_fused_roundtrip():
     from vibeproj.crs import ProjectionParams
-    from vibeproj.ellipsoid import WGS84
+    from vibeproj.ellipsoid import SPHERE
     from vibeproj.pipeline import TransformPipeline
 
     params = ProjectionParams(
         projection_name="gnom",
-        ellipsoid=WGS84,
+        ellipsoid=SPHERE,
         lon_0=0.0,
         lat_0=45.0,
         north_first=False,
     )
-    src = ProjectionParams(projection_name="longlat", ellipsoid=WGS84, north_first=True)
+    src = ProjectionParams(projection_name="longlat", ellipsoid=SPHERE, north_first=True)
     pipe = TransformPipeline(src, params)
 
     lat = cp.array([43.0, 47.0, 45.0], dtype=cp.float64)

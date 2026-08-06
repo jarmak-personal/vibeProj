@@ -28,7 +28,7 @@ class CylindricalEqualArea(Projection):
     name = "cea"
 
     def setup(self, params: ProjectionParams) -> dict:
-        lat_ts = math.radians(params.lat_1) if params.lat_1 != 0 else 0.0
+        lat_ts = math.radians(params.lat_1) if params.lat_1 is not None else 0.0
         e = params.ellipsoid
         k0 = math.cos(lat_ts) / math.sqrt(1.0 - e.es * math.sin(lat_ts) ** 2)
         qp = authalic_q_scalar(1.0, e.e)
