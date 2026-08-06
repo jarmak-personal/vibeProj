@@ -124,6 +124,12 @@ QUALIFICATION_SPECS = {
         direction="forward",
         min_elements=TMERC_FIXED_Q62_MIN_ELEMENTS,
         coordinate_contract_m=1e-8,
+        auto_enabled=False,
+        auto_disabled_reason=(
+            "host dispatch cannot prove coordinates are within the in-zone guard; "
+            "broad-longitude workloads regress on RTX 4090"
+        ),
+        explicit_performance_min_elements=TMERC_FIXED_Q62_MIN_ELEMENTS,
     ),
     "tmerc-inverse": QualificationSpec(
         implementation_id=NATIVE_LIBDEVICE,
@@ -4743,11 +4749,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
 def _requires_default_workload_grid(case: str) -> bool:
     """Whether enforced qualification requires the full historical 20-size grid."""
-    return (
-        case not in {"merc", "lcc", "krovak-inverse"}
-        and not case.startswith("sinu-inverse")
-        and not case.startswith("krovak-inverse-")
-    )
+    if (
+        case in {"merc", "lcc", "krovak-inverse"}
+        or case.startswith("sinu-inverse")
+        or case.startswith("krovak-inverse-")
+    ):
+        return False
+    selected_cases = CASES if case == "all" else CASE_GROUPS.get(case, (case,))
+    return any(QUALIFICATION_SPECS[name].auto_enabled for name in selected_cases)
 
 
 def main() -> None:

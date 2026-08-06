@@ -107,7 +107,7 @@ def _mercator_variant(operation_method: str | None) -> str:
         "Mercator (variant B)": "variant_b",
         "Mercator (2SP)": "variant_b",
     }
-    return variants.get(operation_method, "custom")
+    return variants.get(operation_method, "custom") if operation_method is not None else "custom"
 
 
 class WebMercator(Projection):

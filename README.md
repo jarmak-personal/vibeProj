@@ -101,8 +101,8 @@ print(t.explain_strategy(transcendentals="accelerated"))
 
 `transcendentals="accelerated"` uses an accuracy-qualified implementation when
 the transform and GPU are supported, and explicitly falls back to native math
-otherwise. Automatic acceleration currently covers bounded Helmert, forward
-UTM, spherical-sinusoidal-forward, ellipsoidal-sinusoidal-inverse,
+otherwise. Automatic acceleration currently covers bounded Helmert,
+spherical-sinusoidal-forward, ellipsoidal-sinusoidal-inverse,
 orthographic-forward, and spherical-equatorial
 orthographic-inverse, GEOS-forward (sphere/ellipsoid and sweep x/y), and
 spherical-polar LAEA-forward, ellipsoidal Polar Stereographic inverse,
@@ -131,6 +131,13 @@ Spherical Gnomonic inverse also has an Ada-qualified bounded reframe for expert
 `transcendentals="accelerated"` opt-in. It is intentionally excluded from `"auto"`:
 mixed in/out-of-guard radius distributions can regress, and the host planner cannot
 inspect coordinate values before dispatch.
+
+Forward UTM has a similar expert opt-in. `transcendentals="accelerated"`
+selects its fixed-Q62 path on qualified Ada GPUs when inputs stay within 0.06
+radians of the UTM central meridian (the normal +/-3-degree zone fits).
+`"auto"` stays native because broad or incorrectly zoned inputs can spend enough
+time in the guarded fallback to erase the gain. The measured explicit-path
+crossover is 256 coordinates.
 
 Ellipsoidal regular-Mercator forward is likewise an explicit accelerated
 option. Its polar cap falls back exactly to native math, but mixed polar-cap

@@ -14,7 +14,7 @@ import dataclasses
 import threading
 import warnings
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Literal, overload
+from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 import numpy as np
 
@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from vibeproj.crs import CRSInput
     from vibeproj.transcendentals import (
         DeviceCapability,
+        ExecutionContext,
         StrategyExplanation,
         TranscendentalPolicy,
     )
@@ -266,6 +267,9 @@ class Transformer:
         # historical per-device device-buffer cache.
         self._device_buffer_cache: dict[int, dict[str, Any]] = {}
         self._device_buffer_cache_lock = self._chunk_workspaces_lock
+        self._execution_context_last: (
+            tuple[tuple[int, str, str, int, str, int | None], ExecutionContext] | None
+        ) = None
 
     @staticmethod
     def from_crs(
@@ -574,14 +578,33 @@ class Transformer:
         precision: str,
         transcendentals: str,
         workload_size: int,
-    ):
-        return pipeline.build_execution_context(
+    ) -> ExecutionContext:
+        module_name = getattr(xp, "__name__", "").split(".", 1)[0]
+        device_id = int(x.device.id) if module_name == "cupy" else None
+        key = (
+            id(pipeline),
+            precision,
+            transcendentals,
+            workload_size,
+            module_name,
+            device_id,
+        )
+        cached = self._execution_context_last
+        if cached is not None and cached[0] == key:
+            return cached[1]
+
+        context: ExecutionContext = pipeline.build_execution_context(
             precision=precision,
             transcendentals=transcendentals,
             device=self._input_device_capability(x, xp),
             workload_size=workload_size,
             _normalized=True,
         )
+        # ExecutionContext is immutable. Publishing one complete tuple is safe
+        # across threads; a racing call with a different key can only evict this
+        # one-entry fast cache, never return the wrong plan.
+        self._execution_context_last = (key, context)
+        return context
 
     @overload
     def transform(
@@ -674,6 +697,9 @@ class Transformer:
             if not xp.issubdtype(y.dtype, xp.floating):  # type: ignore[union-attr]
                 y = y.astype(xp.float64)  # type: ignore[union-attr]
 
+        x_array = cast(Any, x)
+        y_array = cast(Any, y)
+
         # Prepare z for pipeline: only route through Helmert when active
         z_pipeline = None  # z to pass into pipeline (None = no z transform)
         z_passthrough = z  # z to return as-is when not routing through pipeline
@@ -695,20 +721,24 @@ class Transformer:
                 z_passthrough = z_passthrough.astype(xp.float64)
 
         pipeline = self._pipeline_for_direction(direction)
-        execution_context = self._build_execution_context(
-            pipeline,
-            x,
-            xp,
-            precision=precision,
-            transcendentals=transcendentals,
-            workload_size=int(x.size),
+        execution_context = (
+            None
+            if pipeline.is_identity
+            else self._build_execution_context(
+                pipeline,
+                x_array,
+                xp,
+                precision=precision,
+                transcendentals=transcendentals,
+                workload_size=int(x_array.size),
+            )
         )
         is_cupy = getattr(xp, "__name__", "").split(".", 1)[0] == "cupy"
         if is_cupy:
-            with xp.cuda.Device(int(x.device.id)):
+            with xp.cuda.Device(int(x_array.device.id)):
                 result = pipeline.transform(
-                    x,
-                    y,
+                    x_array,
+                    y_array,
                     xp,
                     z=z_pipeline,
                     precision=precision,
@@ -717,8 +747,8 @@ class Transformer:
                 )
         else:
             result = pipeline.transform(
-                x,
-                y,
+                x_array,
+                y_array,
                 xp,
                 z=z_pipeline,
                 precision=precision,
@@ -855,25 +885,31 @@ class Transformer:
 
         precision = normalize_compute_precision(precision)
         transcendentals = normalize_transcendental_policy(transcendentals)
-        xp = get_array_module(x)
+        x_array = cast(Any, x)
+        y_array = cast(Any, y)
+        xp = get_array_module(x_array)
         is_cupy = getattr(xp, "__name__", "").split(".", 1)[0] == "cupy"
         if is_cupy:
-            stream = self._normalize_cuda_stream(x, xp, stream)
+            stream = self._normalize_cuda_stream(x_array, xp, stream)
 
         if direction not in ("FORWARD", "INVERSE"):
             raise ValueError(f"Invalid direction: {direction}")
 
         pipeline = self._pipeline_for_direction(direction)
-        execution_context = self._build_execution_context(
-            pipeline,
-            x,
-            xp,
-            precision=precision,
-            transcendentals=transcendentals,
-            workload_size=int(x.size),
+        execution_context = (
+            None
+            if pipeline.is_identity
+            else self._build_execution_context(
+                pipeline,
+                x_array,
+                xp,
+                precision=precision,
+                transcendentals=transcendentals,
+                workload_size=int(x_array.size),
+            )
         )
 
-        with self._transform_scratch_context(x, xp, pipeline, stream) as scratch:
+        with self._transform_scratch_context(x_array, xp, pipeline, stream) as scratch:
             kwargs = dict(
                 z=z,
                 out_x=out_x,
@@ -886,9 +922,11 @@ class Transformer:
                 stream=stream,
             )
             if stream is not None and is_cupy:
-                with xp.cuda.Device(int(x.device.id)), stream:
-                    return pipeline.transform(x, y, xp, **kwargs)
-            return pipeline.transform(x, y, xp, **kwargs)
+                with xp.cuda.Device(int(x_array.device.id)), stream:
+                    result = pipeline.transform(x_array, y_array, xp, **kwargs)
+            else:
+                result = pipeline.transform(x_array, y_array, xp, **kwargs)
+            return cast(tuple[Any, Any] | tuple[Any, Any, Any], result)
 
     @contextmanager
     def _transform_scratch_context(self, x, xp, pipeline, stream):
@@ -1128,7 +1166,7 @@ class Transformer:
         buf_size: int,
         precision: str,
         transcendentals: str,
-    ):
+    ) -> tuple[np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Execute one serialized call using persistent two-stream resources."""
         from vibeproj.transcendentals import detect_device_capability
 
@@ -1170,6 +1208,7 @@ class Transformer:
             out_x[start:end] = pin["out_x"][:size]
             out_y[start:end] = pin["out_y"][:size]
             if chunk_z:
+                assert out_z is not None
                 out_z[start:end] = pin["out_z"][:size]
             pending[slot_index] = None
             pending_z_ref[slot_index] = None
@@ -1186,6 +1225,7 @@ class Transformer:
             pin["in_x"][:size] = x[start:end]
             pin["in_y"][:size] = y[start:end]
             if chunk_z:
+                assert z_arr is not None
                 pin["in_z"][:size] = z_arr[start:end]
 
             nbytes = size * np.dtype(np.float64).itemsize
@@ -1241,7 +1281,10 @@ class Transformer:
         flush_slot(0)
         flush_slot(1)
         if z_arr is not None:
-            return (out_x, out_y, out_z) if chunk_z else (out_x, out_y, z_arr)
+            if chunk_z:
+                assert out_z is not None
+                return out_x, out_y, out_z
+            return out_x, out_y, z_arr
         return out_x, out_y
 
     @overload
@@ -1329,13 +1372,27 @@ class Transformer:
         try:
             import cupy as cp
         except ImportError:
-            return self.transform(  # type: ignore[arg-type,misc]
-                x,
-                y,
-                z=z,
-                direction=direction,
-                precision=precision,
-                transcendentals=transcendentals,
+            fallback: tuple[Any, Any] | tuple[Any, Any, Any]
+            if z is None:
+                fallback = self.transform(
+                    x,
+                    y,
+                    direction=direction,
+                    precision=precision,
+                    transcendentals=transcendentals,
+                )
+            else:
+                fallback = self.transform(
+                    x,
+                    y,
+                    z=z,
+                    direction=direction,
+                    precision=precision,
+                    transcendentals=transcendentals,
+                )
+            return cast(
+                tuple[np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, np.ndarray],
+                fallback,
             )
 
         if direction not in ("FORWARD", "INVERSE"):

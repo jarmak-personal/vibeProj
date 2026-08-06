@@ -99,7 +99,7 @@ The user-facing coverage matrix is intentionally narrower than the inventory:
 |---|---|---|---|---|---:|---|
 | `native.libdevice` | `*` | forward/inverse/Helmert | all supported | universal fallback | 0 | all special math |
 | `helmert.fixed_q62` | `helmert` | datum shift | all public modes (Helmert kernel stays fp64) | Ada `sm_89`, weak-native-fp64 consumer class | 131,072 | `sin`, `cos`; `|angle| <= pi`, near-pole native guard |
-| `tmerc.forward.fixed_q62` | `tmerc` | forward UTM | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 256 | paired `sin`/`cos`, TM `atan2` correction, `asinh`; per-operation guards above |
+| `tmerc.forward.fixed_q62` | `tmerc` | forward UTM | fp64 | Ada `sm_89`, weak-native-fp64 consumer class; explicit `accelerated` only | n/a | paired `sin`/`cos`, TM `atan2` correction, `asinh`; per-operation guards above; measured explicit crossover 256 elements |
 | `sinu.forward.fixed_q62` | `sinu` | spherical forward | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 524,288 | Q1.62 `cos(phi)`; valid latitude/wrapped longitude and `0 < scale <= 6,400,000 m`, native otherwise |
 | `sinu.inverse.convergent_newton` | `sinu` | ellipsoidal inverse | fp64 | Ada `sm_89`, weak-native-fp64 consumer class; `auto` only | 1 | native meridional/derivative expressions and ten-step cap with `fabs(delta)<1e-14` convergence termination; full native coordinate and sentinel domain |
 | `sinu.inverse.meridional_recurrence` | `sinu` | ellipsoidal inverse hot domain | fp64 | Ada `sm_89`, weak-native-fp64 consumer class; explicit `accelerated` only | n/a | two `sincos(2phi)` recurrence steps, one native-shaped correction, final paired `sincos`; exact setup and ±89.9°/wrapped-longitude complete-warp guards |
@@ -265,14 +265,15 @@ warmed public call and completion synchronization:
 | forward Helmert | 4.0851 / 4.0866 / 4.0889 ms | 3.7725 / 3.7735 / 3.7753 ms | 1.083x | 1.083x, 1.083x, 1.083x |
 | inverse Helmert | 4.0846 / 4.0861 / 4.0878 ms | 3.7724 / 3.7734 / 3.7750 ms | 1.083x | 1.083x, 1.083x, 1.083x |
 
-The size grid qualified the conservative automatic crossovers below. Every
-smaller grid row resolved native and passed the no-wall-regression noise bound;
-every row from the threshold through 5,000,000 elements exceeded 1.05x in all
-three repeats.
+The size grid established the conservative crossovers below. The UTM crossover
+is guidance for explicit callers: a later broad-longitude suite showed enough
+guard fallback to regress, so it is not an automatic threshold. Helmert remains
+automatic. Every row from the stated minimum through 5,000,000 elements
+exceeded 1.05x in all three repeats.
 
-| Operation | Last tested size below threshold | Auto minimum | Native / auto wall p50 at threshold | Threshold repeat speedups | Auto speedup at 5M |
+| Operation | Last tested size below threshold | Policy minimum | Native / selected wall p50 at threshold | Threshold repeat speedups | Selected speedup at 5M |
 |---|---:|---:|---:|---|---:|
-| forward UTM | 128 | 256 | 0.03019 / 0.02764 ms | 1.091x, 1.089x, 1.094x | 1.548x |
+| forward UTM (explicit only) | 128 | 256 | 0.03019 / 0.02764 ms | 1.091x, 1.089x, 1.094x | 1.548x |
 | forward Helmert | 65,536 | 131,072 | 0.11974 / 0.11187 ms | 1.068x, 1.072x, 1.071x | 1.083x |
 | inverse Helmert | 65,536 | 131,072 | 0.11977 / 0.11185 ms | 1.071x, 1.071x, 1.072x | 1.083x |
 

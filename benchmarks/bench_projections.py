@@ -183,6 +183,8 @@ def cmd_compare(args):
         print(f"\n{'=' * 60}")
         print(f" {device.upper()} Performance Comparison")
         print(f" base: {args.base}  vs  current: {args.current}")
+        absolute_floor_us = args.cpu_absolute_us if device == "cpu" else args.gpu_absolute_us
+        print(f" gate: >{threshold}% and >{absolute_floor_us:g} us slower")
         print(f"{'=' * 60}")
         print(
             f"{'Projection':<12} {'Base (ms)':>10} {'Current (ms)':>12} {'Change':>10} {'Status':>8}"
@@ -191,6 +193,7 @@ def cmd_compare(args):
 
         base_d = base[device]
         curr_d = current[device]
+        absolute_floor_ms = absolute_floor_us / 1000.0
 
         for proj in base_d:
             if proj not in curr_d:
@@ -204,10 +207,13 @@ def cmd_compare(args):
             else:
                 pct = 0.0
 
-            if pct > threshold:
+            delta_ms = c - b
+            if pct > threshold and delta_ms > absolute_floor_ms:
                 status = "REGRESS"
                 has_regression = True
-            elif pct < -threshold:
+            elif pct > threshold:
+                status = "NOISE"
+            elif pct < -threshold and -delta_ms > absolute_floor_ms:
                 status = "FASTER"
             else:
                 status = "OK"
@@ -217,10 +223,14 @@ def cmd_compare(args):
 
     print()
     if has_regression:
-        print(f"FAIL: Regressions detected (>{threshold}% slower)")
+        print(f"FAIL: Regressions detected (>{threshold}% and above absolute noise floors)")
         sys.exit(1)
     else:
-        print(f"PASS: No regressions (threshold: {threshold}%)")
+        print(
+            f"PASS: No regressions (threshold: {threshold}%; "
+            f"CPU floor: {args.cpu_absolute_us:g} us; "
+            f"GPU floor: {args.gpu_absolute_us:g} us)"
+        )
 
 
 def main():
@@ -239,6 +249,18 @@ def main():
         type=float,
         default=15.0,
         help="Regression threshold percentage (default: 15%%)",
+    )
+    cmp_p.add_argument(
+        "--cpu-absolute-us",
+        type=float,
+        default=200.0,
+        help="Ignore CPU changes no larger than this absolute noise floor",
+    )
+    cmp_p.add_argument(
+        "--gpu-absolute-us",
+        type=float,
+        default=20.0,
+        help="Ignore GPU changes no larger than this absolute noise floor",
     )
 
     args = parser.parse_args()

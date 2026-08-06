@@ -109,11 +109,12 @@ def projection_strategy_domain(projection: str, direction: str, computed: dict) 
         return f"{projection}.{direction}"
 
     geometry = str(computed.get("_strategy_geometry", "unspecified"))
-    method = computed.get("_strategy_operation_method")
+    raw_method = computed.get("_strategy_operation_method")
+    method = raw_method if isinstance(raw_method, str) else None
     if projection == "sinu":
         if direction == "inverse" and geometry == "ellipsoidal":
             coefficients = computed.get("meridional_coefficients", ())
-            setup_names = (
+            setup_names: tuple[str, ...] = (
                 "es",
                 "lam0",
                 "a",
@@ -147,7 +148,7 @@ def projection_strategy_domain(projection: str, direction: str, computed: dict) 
             "Mercator (variant B)": "variant_b",
             "Mercator (2SP)": "variant_b",
         }
-        variant = variants.get(method, "custom")
+        variant = variants.get(method, "custom") if method is not None else "custom"
         return f"merc.{direction}.{geometry}.{variant}"
     if projection == "lcc":
         variant = str(computed.get("lcc_variant", "unknown"))
@@ -228,7 +229,7 @@ def projection_strategy_domain(projection: str, direction: str, computed: dict) 
             "Polar Stereographic (variant B)": "variant_b",
             "Polar Stereographic (variant C)": "variant_c",
         }
-        variant = variants.get(method, "custom")
+        variant = variants.get(method, "custom") if method is not None else "custom"
         hemisphere = "south" if computed.get("is_south", False) else "north"
         return f"stere.{direction}.{geometry}.{variant}.{hemisphere}"
     if projection == "sterea":
@@ -262,7 +263,7 @@ def projection_strategy_domains(projection: str, direction: str) -> tuple[str, .
             "sinu.inverse.spherical",
         )
     if projection == "lcc":
-        domains = []
+        domains: list[str] = []
         for geometry in ("spherical", "ellipsoidal"):
             for variant in ("1sp", "2sp"):
                 prefix = f"lcc.{direction}.{geometry}.{variant}"
@@ -396,12 +397,14 @@ class ExecutionContext:
     helmert_implementation: str
     decisions: tuple[StrategyDecision, ...]
 
-    def projection_implementation(self, projection: str, direction: str, domain: str) -> str:
+    def projection_implementation(
+        self, projection: str, direction: str, domain: str | None = None
+    ) -> str:
         for implementation in self.projection_implementations:
             if (
                 implementation.projection == projection
                 and implementation.direction == direction
-                and implementation.domain == domain
+                and (domain is None or implementation.domain == domain)
             ):
                 return implementation.implementation_id
         return NATIVE_LIBDEVICE
@@ -946,7 +949,7 @@ _REGISTRY = (
         implementation_id=TMERC_FIXED_Q62,
         operation=TranscendentalOperation.TMERC_FORWARD,
         family="qualified_utm_transcendentals",
-        supported_policies=("auto", "accelerated"),
+        supported_policies=("accelerated",),
         supported_backends=("cuda",),
         supported_compute_capabilities=((8, 9),),
         min_fp32_to_fp64_ratio=16,
@@ -1031,6 +1034,7 @@ def _detect_cuda_device_capability(cp, device_id: int) -> DeviceCapability:
         minor = int(properties.get("minor", properties.get(b"minor", 0)))
         ratio = int(device.attributes.get("SingleToDoublePrecisionPerfRatio", 0))
         raw_name = properties.get("name", properties.get(b"name"))
+        name: str | None
         if isinstance(raw_name, bytes):
             name = raw_name.decode(errors="replace")
         else:

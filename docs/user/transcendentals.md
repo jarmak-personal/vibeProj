@@ -58,9 +58,10 @@ Transform calls always resolve `auto` with the concrete input size. An
 `explain_strategy()` or `compile()` call with no workload size describes or
 precompiles the hardware-qualified variant without imposing the crossover;
 pass `workload_size=` to make introspection match a planned transform exactly.
-Module-level `warm_up(["tmerc"])` has no CRS domain to inspect, so on a
-qualified `auto` or `accelerated` device it compiles both generic-TM native and
-forward-UTM accelerated variants, plus the native inverse. A Transformer's
+Module-level `warm_up(["tmerc"])` has no CRS domain to inspect. On a qualified
+device it compiles generic-TM native plus the native inverse for `auto`; an
+explicit `accelerated` warm-up also includes the forward-UTM accelerated
+variant. A Transformer's
 `compile()` uses its concrete CRS domains and compiles only the deduplicated
 variants reachable in either transform direction.
 
@@ -72,7 +73,7 @@ The initial accelerated coverage is deliberately small:
 |---|---|---|---|---:|
 | `native.libdevice` | Every fused family/direction and Helmert | CUDA native special math, including paired native `sincos` where implemented | All devices and CPU/no-GPU fallback | n/a |
 | `helmert.fixed_q62` | Helmert datum shift | Bounded sine/cosine only; ECEF, square root, and `atan2` remain native fp64 | Ada `sm_89` consumer GPUs | 131,072 |
-| `tmerc.forward.fixed_q62` | Forward UTM only | Bounded sine/cosine, the TM latitude correction, and bounded `asinh`; remaining math stays fp64 | Ada `sm_89` consumer GPUs | 256 |
+| `tmerc.forward.fixed_q62` | Forward UTM only | Bounded sine/cosine, the TM latitude correction, and bounded `asinh`; remaining math stays fp64 | Ada `sm_89` consumer GPUs; explicit `accelerated` only | n/a |
 | `sinu.forward.fixed_q62` | Spherical Sinusoidal forward only | Guarded Q1.62 cosine; remaining arithmetic stays fp64 | Ada `sm_89` consumer GPUs | 524,288 |
 | `sinu.inverse.convergent_newton` | Ellipsoidal Sinusoidal inverse | Native ten-step Newton expressions with a `1e-14` convergence break; full native coordinate/sentinel domain | Ada `sm_89` consumer GPUs; `auto` only | 1 |
 | `sinu.inverse.meridional_recurrence` | Ellipsoidal Sinusoidal inverse hot domain | Two recurrence Newton steps, one native-shaped correction, and paired final `sincos`; a cold lane makes the complete warp native | Ada `sm_89` consumer GPUs; explicit `accelerated` only | n/a |
@@ -95,7 +96,7 @@ spherical inverse about 1.80x, and ellipsoidal inverse about 8.35x. Maximum
 native-relative error was zero for spherical paths, 7.451 nm for ellipsoidal
 forward, and 6.328 nm for ellipsoidal inverse.
 
-On a qualified RTX 4090, `"auto"` resolves the specialized implementations at
+On a qualified RTX 4090, `"auto"` resolves the automatically qualified specialized implementations at
 or above the listed sizes; below them it resolves native. Explicit
 `"accelerated"` can select the specialized implementation at any size. Generic
 Transverse Mercator, inverse UTM, spherical Sinusoidal inverse, Orthographic inverse
@@ -111,7 +112,16 @@ are fp64-only; `precision="fp32"` and `precision="ds"` stay native. Planning
 calls with `precision="auto"` may select them because the corresponding fused
 kernel resolves to fp64.
 
-Gnomonic inverse is the deliberate exception to automatic selection. Its bounded
+Forward UTM is an explicit-only strategy. Its fixed-Q62 path wins when inputs
+stay in the normal in-zone domain (`|longitude - central_meridian| <= 0.06`
+radians; a UTM zone's usual +/-3 degrees fits), but broad or incorrectly zoned
+inputs can spend enough time in the native guard fallback to lose the advantage.
+Use `transcendentals="accelerated"` when that input-domain invariant is known;
+`"auto"` remains native for Tmerc at every workload size. The measured launch
+crossover is 256 coordinates, so expert callers should also keep smaller calls
+on native math.
+
+Gnomonic inverse is a deliberate exception to automatic selection. Its bounded
 hot domain is materially faster, but host dispatch cannot inspect each coordinate's
 normalized radius. A random 10% mixture outside the guard measured about 0.92x native
 on RTX 4090, so `"auto"` remains native at every size. Expert callers who know their

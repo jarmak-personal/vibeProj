@@ -163,6 +163,7 @@ def test_resolver_selects_an_exact_domain_candidate_from_registry(monkeypatch):
         implementation_id="synthetic.forward.fixed_q62",
         operation=TranscendentalOperation.PROJECTION,
         domains=("synthetic.forward",),
+        supported_policies=("auto", "accelerated"),
         min_elements=17,
     )
     monkeypatch.setattr(
@@ -662,12 +663,6 @@ def test_resolver_uses_priority_then_rejects_equal_priority_overlap(monkeypatch)
     ("operation", "domain", "threshold", "accelerated_id"),
     [
         (
-            TranscendentalOperation.TMERC_FORWARD,
-            "utm",
-            TMERC_FIXED_Q62_MIN_ELEMENTS,
-            TMERC_FIXED_Q62,
-        ),
-        (
             TranscendentalOperation.HELMERT,
             "global",
             HELMERT_FIXED_Q62_MIN_ELEMENTS,
@@ -741,7 +736,6 @@ def test_auto_strategy_uses_exact_workload_crossover(operation, domain, threshol
     ("operation", "domain", "expected"),
     [
         (TranscendentalOperation.HELMERT, "global", HELMERT_FIXED_Q62),
-        (TranscendentalOperation.TMERC_FORWARD, "utm", TMERC_FIXED_Q62),
         (
             TranscendentalOperation.PROJECTION,
             "sinu.forward.spherical",
@@ -764,6 +758,29 @@ def test_ada_auto_selects_qualified_implementations(operation, domain, expected)
     decision = resolve_transcendental_strategy(operation, device=ADA, domain=domain)
     assert decision.implementation_id == expected
     assert decision.fallback is False
+
+
+@pytest.mark.parametrize("workload_size", [1, TMERC_FIXED_Q62_MIN_ELEMENTS, 5_000_000])
+def test_tmerc_fixed_q62_is_explicit_only(workload_size):
+    automatic = resolve_transcendental_strategy(
+        TranscendentalOperation.TMERC_FORWARD,
+        "auto",
+        device=ADA,
+        domain="utm",
+        workload_size=workload_size,
+    )
+    explicit = resolve_transcendental_strategy(
+        TranscendentalOperation.TMERC_FORWARD,
+        "accelerated",
+        device=ADA,
+        domain="utm",
+        workload_size=workload_size,
+    )
+
+    assert automatic.implementation_id == NATIVE_LIBDEVICE
+    assert automatic.fallback is False
+    assert explicit.implementation_id == TMERC_FIXED_Q62
+    assert explicit.fallback is False
 
 
 @pytest.mark.parametrize(
@@ -943,7 +960,7 @@ def test_helmert_explanation_includes_projection_and_datum_stage():
 @pytest.mark.parametrize(
     ("precision", "policy", "expected"),
     [
-        ("auto", "auto", TMERC_FIXED_Q62),
+        ("auto", "auto", NATIVE_LIBDEVICE),
         ("fp64", "accelerated", TMERC_FIXED_Q62),
         ("fp32", "accelerated", NATIVE_LIBDEVICE),
         ("fp64", "native", NATIVE_LIBDEVICE),
@@ -974,7 +991,7 @@ def test_compile_resolves_exact_tmerc_cache_variant(monkeypatch, precision, poli
     ("source", "target"),
     [(GLOBAL_TM_0, UTM_TM_31), (UTM_TM_31, GLOBAL_TM_0)],
 )
-def test_compile_mixed_global_and_utm_tmerc_keeps_both_forward_variants(
+def test_auto_compile_mixed_global_and_utm_tmerc_deduplicates_native_forward(
     monkeypatch, source, target
 ):
     observed = []
@@ -989,7 +1006,6 @@ def test_compile_mixed_global_and_utm_tmerc_keeps_both_forward_variants(
     assert observed == [
         (
             ("tmerc", "forward", NATIVE_LIBDEVICE),
-            ("tmerc", "forward", TMERC_FIXED_Q62),
             ("tmerc", "inverse", NATIVE_LIBDEVICE),
         )
     ]
@@ -1002,7 +1018,7 @@ def test_compile_mixed_global_and_utm_tmerc_keeps_both_forward_variants(
             UTM_TM_31,
             UTM_TM_32,
             (
-                ("tmerc", "forward", TMERC_FIXED_Q62),
+                ("tmerc", "forward", NATIVE_LIBDEVICE),
                 ("tmerc", "inverse", NATIVE_LIBDEVICE),
             ),
         ),
@@ -1770,7 +1786,7 @@ def test_chunk_device_buffers_are_cached_per_cuda_device(monkeypatch):
     assert set(transformer._device_buffer_cache) == {0, 1}
 
 
-def test_transform_buffers_resolves_one_immutable_context_from_input_device(monkeypatch):
+def test_transform_buffers_reuses_one_immutable_context_from_input_device(monkeypatch):
     transformer = Transformer.from_crs("EPSG:4326", "EPSG:32631")
     fake_cp = _FakeCupy()
     fake_cp.ndarray = np.ndarray
@@ -1793,9 +1809,11 @@ def test_transform_buffers_resolves_one_immutable_context_from_input_device(monk
     out_x = np.empty(32)
     out_y = np.empty(32)
     transformer.transform_buffers(coordinate, coordinate, out_x=out_x, out_y=out_y)
+    transformer.transform_buffers(coordinate, coordinate, out_x=out_x, out_y=out_y)
 
     assert detections == [(fake_cp, 7)]
-    assert len(observed) == 1
+    assert len(observed) == 2
+    assert observed[0] is observed[1]
     assert observed[0].device.device_id == 7
     assert observed[0].workload_size == 32
     with pytest.raises(dataclasses.FrozenInstanceError):

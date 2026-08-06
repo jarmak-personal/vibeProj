@@ -20,7 +20,7 @@
 #   ./benchmarks/bench_compare.sh                    # default: 15% threshold, 1M coords
 #   ./benchmarks/bench_compare.sh --threshold 10     # stricter
 #   ./benchmarks/bench_compare.sh --n 500000         # fewer coords (faster)
-#   ./benchmarks/bench_compare.sh --strict            # 5% threshold (same-datum zero-overhead)
+#   ./benchmarks/bench_compare.sh --strict            # 5% plus 200 us CPU / 20 us GPU floors
 
 set -euo pipefail
 
@@ -40,6 +40,7 @@ done
 
 REPO_ROOT=$(git rev-parse --show-toplevel)
 BENCH_SCRIPT="$REPO_ROOT/benchmarks/bench_projections.py"
+PYTHON_BIN="$REPO_ROOT/.venv/bin/python"
 TMPDIR=$(mktemp -d)
 CURRENT_JSON="$TMPDIR/current.json"
 BASE_JSON="$TMPDIR/base.json"
@@ -48,7 +49,7 @@ cleanup() {
     # Restore current vibeproj in the venv
     echo "Restoring current vibeproj..."
     cd "$REPO_ROOT"
-    uv pip install -e . --quiet 2>/dev/null || true
+    uv pip install --python "$PYTHON_BIN" -e . --quiet 2>/dev/null || true
     # Remove worktree if it exists
     if [ -n "${WORKTREE_DIR:-}" ] && [ -d "$WORKTREE_DIR" ]; then
         git worktree remove --force "$WORKTREE_DIR" 2>/dev/null || true
@@ -58,6 +59,11 @@ cleanup() {
 trap cleanup EXIT
 
 cd "$REPO_ROOT"
+
+if [ ! -x "$PYTHON_BIN" ]; then
+    echo "Expected project interpreter at $PYTHON_BIN; run 'uv sync' first." >&2
+    exit 1
+fi
 
 # ── Step 1: Determine baseline commit ─────────────────────────────────
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
@@ -78,7 +84,7 @@ echo ""
 echo "═══════════════════════════════════════════════════════"
 echo " Benchmarking CURRENT state"
 echo "═══════════════════════════════════════════════════════"
-uv run "$BENCH_SCRIPT" run --n "$N_COORDS" --output "$CURRENT_JSON"
+"$PYTHON_BIN" "$BENCH_SCRIPT" run --n "$N_COORDS" --output "$CURRENT_JSON"
 
 # ── Step 3: Swap to baseline code and benchmark ───────────────────────
 echo ""
@@ -92,17 +98,17 @@ git worktree add --detach "$WORKTREE_DIR" "$BASE_REF" --quiet
 # Install baseline vibeproj into the CURRENT venv (swaps only the library code).
 # This keeps CuPy, numpy, pyproj etc. identical between both runs.
 echo "Installing baseline vibeproj into current venv..."
-uv pip install -e "$WORKTREE_DIR" --quiet
+uv pip install --python "$PYTHON_BIN" -e "$WORKTREE_DIR" --quiet
 
 # Run benchmark using the current bench script (it may not exist in the baseline)
 # but with the baseline vibeproj code installed in the venv.
 cd "$REPO_ROOT"
-uv run "$BENCH_SCRIPT" run --n "$N_COORDS" --output "$BASE_JSON"
+"$PYTHON_BIN" "$BENCH_SCRIPT" run --n "$N_COORDS" --output "$BASE_JSON"
 
 # ── Step 4: Restore current code and compare ──────────────────────────
 echo ""
 echo "Restoring current vibeproj..."
-uv pip install -e "$REPO_ROOT" --quiet
+uv pip install --python "$PYTHON_BIN" -e "$REPO_ROOT" --quiet
 
 echo ""
-uv run "$BENCH_SCRIPT" compare "$BASE_JSON" "$CURRENT_JSON" --threshold "$THRESHOLD"
+"$PYTHON_BIN" "$BENCH_SCRIPT" compare "$BASE_JSON" "$CURRENT_JSON" --threshold "$THRESHOLD"

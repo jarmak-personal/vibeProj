@@ -17,7 +17,9 @@ import math
 import threading
 import warnings
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
+
+import numpy as np
 
 from vibeproj.projections import get_projection
 
@@ -37,10 +39,10 @@ _cupy_module = None
 class TransformScratch:
     """Reusable device intermediates owned and synchronized by Transformer."""
 
-    first_x: object
-    first_y: object
-    second_x: object
-    second_y: object
+    first_x: Any
+    first_y: Any
+    second_x: Any
+    second_y: Any
 
     def pair(self, index: int, size: int):
         if index == 0:
@@ -117,18 +119,17 @@ def _try_fused(
         return None
     if not can_fuse(projection_name, direction):
         return None
-    from vibeproj.transcendentals import projection_strategy_domain
-
-    domain = projection_strategy_domain(projection_name, direction, computed)
     if execution_context is None:
         # Compatibility for direct private-helper callers. Public entry points
         # construct one immutable plan and pass it through every stage.
         from vibeproj.transcendentals import (
             TranscendentalOperation,
             detect_device_capability,
+            projection_strategy_domain,
             resolve_transcendental_strategy,
         )
 
+        domain = projection_strategy_domain(projection_name, direction, computed)
         operation = (
             TranscendentalOperation.TMERC_FORWARD
             if projection_name == "tmerc" and direction == "forward"
@@ -148,7 +149,7 @@ def _try_fused(
         ).implementation_id
     else:
         transcendental_impl = execution_context.projection_implementation(
-            projection_name, direction, domain
+            projection_name, direction
         )
     return fused_transform(
         arg1,
@@ -169,10 +170,17 @@ def _try_fused(
 
 def _wrap_to_pi(angle, xp):
     """Wrap angle to [-pi, pi]."""
-    finite = xp.isfinite(angle)
-    safe_angle = xp.where(finite, angle, 0.0)
-    wrapped = safe_angle - 2.0 * math.pi * xp.round(safe_angle / (2.0 * math.pi))
-    return xp.where(finite, wrapped, angle)
+    if xp is np:
+        with np.errstate(invalid="ignore"):
+            wrapped = angle - 2.0 * math.pi * np.round(angle / (2.0 * math.pi))
+        finite = np.isfinite(angle)
+        if finite.all():
+            return wrapped
+        np.copyto(wrapped, angle, where=~finite)
+        return wrapped
+
+    wrapped = angle - 2.0 * math.pi * xp.round(angle / (2.0 * math.pi))
+    return xp.where(xp.isfinite(angle), wrapped, angle)
 
 
 def _apply_datum_shift(
@@ -320,6 +328,15 @@ class TransformPipeline:
     """
 
     @property
+    def is_identity(self) -> bool:
+        """Whether this pipeline only copies geographic coordinates."""
+        return (
+            self.mode == "longlat_to_longlat"
+            and self._helmert is None
+            and self._svd_correction is None
+        )
+
+    @property
     def needs_scratch(self) -> bool:
         """Whether zero-allocation fused execution needs intermediate buffers."""
         if self.mode == "proj_to_proj":
@@ -340,8 +357,10 @@ class TransformPipeline:
         """Resolve every implementation once at the public-call boundary."""
         from vibeproj.transcendentals import (
             NATIVE_LIBDEVICE,
+            ComputePrecision,
             ExecutionContext,
             ProjectionImplementation,
+            TranscendentalPolicy,
             TranscendentalOperation,
             normalize_compute_precision,
             normalize_transcendental_policy,
@@ -350,8 +369,8 @@ class TransformPipeline:
         )
 
         if _normalized:
-            normalized_precision = precision
-            normalized_policy = transcendentals
+            normalized_precision = cast(ComputePrecision, precision)
+            normalized_policy = cast(TranscendentalPolicy, transcendentals)
         else:
             normalized_precision = normalize_compute_precision(precision)
             normalized_policy = normalize_transcendental_policy(transcendentals)
@@ -513,6 +532,20 @@ class TransformPipeline:
 
         Returns 2-tuple when z is None, 3-tuple when z is provided.
         """
+        if self.is_identity:
+            if out_x is not None:
+                out_x[:] = x
+                x = out_x
+            if out_y is not None:
+                out_y[:] = y
+                y = out_y
+            if z is not None:
+                if out_z is not None:
+                    out_z[:] = z
+                    z = out_z
+                return x, y, z
+            return x, y
+
         if execution_context is None:
             from vibeproj.transcendentals import detect_device_capability
 
@@ -637,19 +670,7 @@ class TransformPipeline:
                     return rx, ry, z_out
                 return rx, ry
 
-            # Identity: write into pre-allocated buffers when provided
-            if out_x is not None:
-                out_x[:] = x
-                x = out_x
-            if out_y is not None:
-                out_y[:] = y
-                y = out_y
-            if z is not None:
-                if out_z is not None:
-                    out_z[:] = z
-                    z = out_z
-                return x, y, z
-            return x, y
+            raise AssertionError("unreachable identity pipeline")
 
     def _forward(
         self,

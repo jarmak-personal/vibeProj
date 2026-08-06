@@ -145,10 +145,10 @@ series evaluation, scale, and offset while accelerating three bounded pieces:
   error `2e-17`.
 
 Every guard is per-coordinate. Wider TM coordinates, non-finite values, and
-unknown devices use paired native fp64 behavior. Automatic selection is
-restricted to UTM forward transforms on validated Ada consumer GPUs; generic
-TM CRSs, Hopper, and other architectures use the native strategy pending
-independent benchmarks. An internal
+unknown devices use paired native fp64 behavior. Public selection is explicit
+for UTM forward transforms on validated Ada consumer GPUs because the host
+cannot prove coordinates are in-zone; `auto`, generic TM CRSs, Hopper, and
+other architectures use the native strategy pending independent benchmarks. An internal
 `tmerc_mode="fp64"|"int64"` override supports accuracy and A/B testing.
 
 On the validation RTX 4090, `benchmarks/bench_tmerc_int64.py` measured 5M

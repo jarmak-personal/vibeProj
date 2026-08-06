@@ -603,12 +603,6 @@ def test_resolver_reuses_decisions_but_keys_cache_by_complete_device_context():
     "operation,domain,accelerated_id,min_elements",
     [
         (
-            TranscendentalOperation.TMERC_FORWARD,
-            "utm",
-            TMERC_FIXED_Q62,
-            TMERC_FIXED_Q62_MIN_ELEMENTS,
-        ),
-        (
             TranscendentalOperation.HELMERT,
             "global",
             HELMERT_FIXED_Q62,
@@ -761,7 +755,6 @@ def test_gnom_explicit_only_does_not_change_sinu_auto_contract():
 @pytest.mark.parametrize(
     "crs_to,min_elements,accelerated_id",
     [
-        ("EPSG:32631", TMERC_FIXED_Q62_MIN_ELEMENTS, TMERC_FIXED_Q62),
         ("EPSG:4277", HELMERT_FIXED_Q62_MIN_ELEMENTS, HELMERT_FIXED_Q62),
     ],
 )
@@ -814,9 +807,12 @@ def test_all_48_fused_paths_resolve_nonempty_decisions_for_every_policy(device):
                 )
                 assert decision.implementation_id == expected
                 assert decision.fallback is False
+            elif device == ADA_4090 and (family, direction) == ("tmerc", "forward"):
+                expected = TMERC_FIXED_Q62 if policy == "accelerated" else NATIVE_LIBDEVICE
+                assert decision.implementation_id == expected
+                assert decision.fallback is False
             elif device == ADA_4090 and (family, direction) in {
                 ("geos", "forward"),
-                ("tmerc", "forward"),
                 ("sinu", "forward"),
                 ("ortho", "forward"),
                 ("stere", "inverse"),
@@ -824,7 +820,6 @@ def test_all_48_fused_paths_resolve_nonempty_decisions_for_every_policy(device):
             }:
                 expected = {
                     "geos": GEOS_FORWARD_FIXED_Q62,
-                    "tmerc": TMERC_FIXED_Q62,
                     "sinu": SINU_FORWARD_FIXED_Q62,
                     "ortho": ORTHO_FORWARD_FIXED_Q62,
                     "stere": STERE_INVERSE_FIXED_Q62,
@@ -943,7 +938,10 @@ def test_auto_hopper_remains_native_without_4090_inference():
         )
         assert decision.implementation_id == NATIVE_LIBDEVICE
         assert decision.fallback is False
-        assert "not accuracy-qualified" in decision.reason
+        if operation == TranscendentalOperation.HELMERT:
+            assert "not accuracy-qualified" in decision.reason
+        else:
+            assert "policy 'auto' is not supported" in decision.reason
 
 
 def test_tmerc_asinh_degree11_operation_contract():
@@ -1058,7 +1056,6 @@ def test_documented_auto_thresholds_match_registry_exactly():
         ORTHO_INVERSE_GUARDED_REFRAME: ORTHO_INVERSE_GUARDED_REFRAME_MIN_ELEMENTS,
         SINU_FORWARD_FIXED_Q62: SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
         STERE_INVERSE_FIXED_Q62: STERE_INVERSE_FIXED_Q62_MIN_ELEMENTS,
-        TMERC_FIXED_Q62: TMERC_FIXED_Q62_MIN_ELEMENTS,
     }
     for relative_path, heading in (
         ("docs/user/transcendentals.md", "## Qualified hardware and coverage"),
@@ -1114,6 +1111,22 @@ def test_benchmark_native_identity_noise_gate_uses_only_same_id_wall_evidence():
             **passing,
             "wall_repeat_speedups": [math.nextafter(0.95, 0.0), 1.0, 1.0],
         }
+    )
+
+
+def test_tmerc_forward_benchmark_encodes_explicit_only_policy():
+    benchmark = _load_policy_benchmark_module()
+    specification = benchmark.QUALIFICATION_SPECS["tmerc-forward"]
+
+    assert specification.implementation_id == TMERC_FIXED_Q62
+    assert specification.min_elements == TMERC_FIXED_Q62_MIN_ELEMENTS
+    assert specification.auto_enabled is False
+    assert "in-zone guard" in specification.auto_disabled_reason
+    assert specification.explicit_performance_min_elements == TMERC_FIXED_Q62_MIN_ELEMENTS
+    assert benchmark._requires_default_workload_grid("tmerc-forward") is False
+    assert benchmark._qualification_workload_sizes((5_000_000,), specification) == (
+        TMERC_FIXED_Q62_MIN_ELEMENTS,
+        5_000_000,
     )
 
 

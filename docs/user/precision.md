@@ -38,9 +38,10 @@ instruction sequences, which are expensive on consumer GPUs with weak fp64
 throughput.
 
 On validated Ada `sm_89` consumer GPUs, auto dispatch accelerates bounded
-Helmert, forward UTM, spherical-sinusoidal-forward, and orthographic-forward
-transcendentals with table-free Q1.62 trig. Forward UTM also uses bounded
-fp64-accurate correction polynomials for `atan2` and `asinh`. Sinusoidal and
+Helmert, spherical-sinusoidal-forward, and orthographic-forward
+transcendentals with table-free Q1.62 trig. Forward UTM offers an explicit-only
+accelerated path with bounded fp64-accurate correction polynomials for `atan2`
+and `asinh`; auto stays native because it cannot prove coordinates are in-zone. Sinusoidal and
 orthographic remain fp64-only and use native math above the qualified
 6,400,000 m physical scale. Regular Mercator automatically uses an exact
 spherical-forward specialization and a shared conformal-series inverse path.
