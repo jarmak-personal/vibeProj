@@ -11,6 +11,7 @@ from pyproj import CRS
 from pyproj import Transformer as PyProjTransformer
 
 from vibeproj import Transformer, UnsupportedProjectionError
+from vibeproj._conformal import conformal_to_geodetic_coefficients
 from vibeproj.crs import ProjectionParams, resolve_projection_params
 from vibeproj.ellipsoid import SPHERE, Ellipsoid
 from vibeproj.pipeline import TransformPipeline
@@ -119,6 +120,50 @@ def test_sinu_and_merc_randomized_cpu_forward_inverse_match_pyproj(target_input)
 def test_mercator_crs_resolution_honors_variant_scale(target_input, expected_k0):
     params = resolve_projection_params(CRS.from_user_input(target_input))
     assert params.k_0 == pytest.approx(expected_k0, rel=0.0, abs=2e-15)
+
+
+def test_mercator_reuses_transverse_mercator_conformal_inverse_coefficients():
+    mercator = Transformer.from_crs("EPSG:4326", "EPSG:3395", always_xy=True)
+    transverse = Transformer.from_crs("EPSG:4326", "EPSG:32631", always_xy=True)
+
+    transverse_coefficients = transverse._pipeline.computed["cgb"]
+    assert isinstance(transverse_coefficients, list)
+    assert mercator._pipeline.computed["conformal_to_geodetic"] == tuple(transverse_coefficients)
+
+    sphere = Transformer.from_crs(
+        "+proj=longlat +R=6371000 +type=crs",
+        "+proj=merc +R=6371000 +type=crs",
+        always_xy=True,
+    )
+    assert sphere._pipeline.computed["conformal_to_geodetic"] == (0.0,) * 6
+
+
+@pytest.mark.parametrize("n", [0.0, 1 / 3.0, 0.00363341959, 1 / 298.257223563])
+def test_shared_conformal_coefficients_are_bitwise_legacy_tmerc(n):
+    power = n
+    expected = [
+        n
+        * (2 + n * (-2 / 3.0 + n * (-2 + n * (116 / 45.0 + n * (26 / 45.0 + n * (-2854 / 675.0))))))
+    ]
+    power *= n
+    expected.append(
+        power
+        * (7 / 3.0 + n * (-8 / 5.0 + n * (-227 / 45.0 + n * (2704 / 315.0 + n * (2323 / 945.0)))))
+    )
+    power *= n
+    expected.append(
+        power * (56 / 15.0 + n * (-136 / 35.0 + n * (-1262 / 105.0 + n * (73814 / 2835.0))))
+    )
+    power *= n
+    expected.append(power * (4279 / 630.0 + n * (-332 / 35.0 + n * (-399572 / 14175.0))))
+    power *= n
+    expected.append(power * (4174 / 315.0 + n * (-144838 / 6237.0)))
+    power *= n
+    expected.append(power * (601676 / 22275.0))
+
+    actual_bits = np.asarray(conformal_to_geodetic_coefficients(n)).view(np.uint64)
+    expected_bits = np.asarray(expected).view(np.uint64)
+    assert_array_equal(actual_bits, expected_bits)
 
 
 @pytest.mark.parametrize(

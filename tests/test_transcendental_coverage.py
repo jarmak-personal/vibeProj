@@ -26,6 +26,11 @@ from vibeproj.transcendentals import (
     HELMERT_FIXED_Q62_MIN_ELEMENTS,
     LAEA_FORWARD_POLAR_FIXED_Q62,
     LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS,
+    MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY,
+    MERC_FORWARD_SPHERICAL_PRODUCT_POLY,
+    MERC_FORWARD_SPHERICAL_PRODUCT_POLY_MIN_ELEMENTS,
+    MERC_INVERSE_EXP_SERIES,
+    MERC_INVERSE_EXP_SERIES_MIN_ELEMENTS,
     NATIVE_LIBDEVICE,
     ORTHO_FORWARD_FIXED_Q62,
     ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
@@ -178,6 +183,41 @@ EXPECTED_REGISTRY_MATRIX = frozenset(
             LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS,
         ),
         (
+            MERC_FORWARD_SPHERICAL_PRODUCT_POLY,
+            TranscendentalOperation.PROJECTION,
+            (
+                "merc.forward.spherical.variant_a",
+                "merc.forward.spherical.variant_b",
+            ),
+            ((8, 9),),
+            ("auto", "fp64"),
+            MERC_FORWARD_SPHERICAL_PRODUCT_POLY_MIN_ELEMENTS,
+        ),
+        (
+            MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY,
+            TranscendentalOperation.PROJECTION,
+            (
+                "merc.forward.ellipsoidal.variant_a",
+                "merc.forward.ellipsoidal.variant_b",
+            ),
+            ((8, 9),),
+            ("auto", "fp64"),
+            0,
+        ),
+        (
+            MERC_INVERSE_EXP_SERIES,
+            TranscendentalOperation.PROJECTION,
+            (
+                "merc.inverse.spherical.variant_a",
+                "merc.inverse.spherical.variant_b",
+                "merc.inverse.ellipsoidal.variant_a",
+                "merc.inverse.ellipsoidal.variant_b",
+            ),
+            ((8, 9),),
+            ("auto", "fp64"),
+            MERC_INVERSE_EXP_SERIES_MIN_ELEMENTS,
+        ),
+        (
             HELMERT_FIXED_Q62,
             TranscendentalOperation.HELMERT,
             ("global",),
@@ -297,6 +337,54 @@ def test_registry_exactly_matches_documented_coverage_matrix():
     assert isinstance(registry, tuple)
     with pytest.raises(FrozenInstanceError):
         registry[0].family = "mutated"  # type: ignore[misc]
+
+
+def test_merc_forward_geometry_split_prevents_auto_leakage():
+    registry = {entry.implementation_id: entry for entry in list_transcendental_strategies()}
+    spherical = registry[MERC_FORWARD_SPHERICAL_PRODUCT_POLY]
+    ellipsoidal = registry[MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY]
+    assert spherical.supported_policies == ("auto", "accelerated")
+    assert spherical.min_elements == MERC_FORWARD_SPHERICAL_PRODUCT_POLY_MIN_ELEMENTS
+    assert ellipsoidal.supported_policies == ("accelerated",)
+    assert ellipsoidal.min_elements == 0
+
+    spherical_below = resolve_transcendental_strategy(
+        TranscendentalOperation.PROJECTION,
+        "auto",
+        device=ADA_4090,
+        domain="merc.forward.spherical.variant_a",
+        precision="fp64",
+        workload_size=MERC_FORWARD_SPHERICAL_PRODUCT_POLY_MIN_ELEMENTS - 1,
+    )
+    spherical_at = resolve_transcendental_strategy(
+        TranscendentalOperation.PROJECTION,
+        "auto",
+        device=ADA_4090,
+        domain="merc.forward.spherical.variant_a",
+        precision="fp64",
+        workload_size=MERC_FORWARD_SPHERICAL_PRODUCT_POLY_MIN_ELEMENTS,
+    )
+    ellipsoidal_auto = resolve_transcendental_strategy(
+        TranscendentalOperation.PROJECTION,
+        "auto",
+        device=ADA_4090,
+        domain="merc.forward.ellipsoidal.variant_a",
+        precision="fp64",
+        workload_size=5_000_000,
+    )
+    ellipsoidal_explicit = resolve_transcendental_strategy(
+        TranscendentalOperation.PROJECTION,
+        "accelerated",
+        device=ADA_4090,
+        domain="merc.forward.ellipsoidal.variant_a",
+        precision="fp64",
+        workload_size=5_000_000,
+    )
+    assert spherical_below.implementation_id == NATIVE_LIBDEVICE
+    assert spherical_at.implementation_id == MERC_FORWARD_SPHERICAL_PRODUCT_POLY
+    assert ellipsoidal_auto.implementation_id == NATIVE_LIBDEVICE
+    assert ellipsoidal_auto.fallback is False
+    assert ellipsoidal_explicit.implementation_id == MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY
 
 
 def test_wave1_registry_entries_expose_exact_public_contracts():
@@ -587,12 +675,21 @@ def test_all_48_fused_paths_resolve_nonempty_decisions_for_every_policy(device):
             if policy == "native":
                 assert decision.implementation_id == NATIVE_LIBDEVICE
                 assert decision.fallback is False
+            elif device == ADA_4090 and (family, direction) == ("merc", "forward"):
+                expected = (
+                    MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY
+                    if policy == "accelerated"
+                    else NATIVE_LIBDEVICE
+                )
+                assert decision.implementation_id == expected
+                assert decision.fallback is False
             elif device == ADA_4090 and (family, direction) in {
                 ("geos", "forward"),
                 ("tmerc", "forward"),
                 ("sinu", "forward"),
                 ("ortho", "forward"),
                 ("stere", "inverse"),
+                ("merc", "inverse"),
             }:
                 expected = {
                     "geos": GEOS_FORWARD_FIXED_Q62,
@@ -600,6 +697,7 @@ def test_all_48_fused_paths_resolve_nonempty_decisions_for_every_policy(device):
                     "sinu": SINU_FORWARD_FIXED_Q62,
                     "ortho": ORTHO_FORWARD_FIXED_Q62,
                     "stere": STERE_INVERSE_FIXED_Q62,
+                    "merc": MERC_INVERSE_EXP_SERIES,
                 }[family]
                 assert decision.implementation_id == expected
                 assert decision.fallback is False
@@ -821,6 +919,8 @@ def test_documented_auto_thresholds_match_registry_exactly():
         GEOS_FORWARD_FIXED_Q62: GEOS_FORWARD_FIXED_Q62_MIN_ELEMENTS,
         HELMERT_FIXED_Q62: HELMERT_FIXED_Q62_MIN_ELEMENTS,
         LAEA_FORWARD_POLAR_FIXED_Q62: LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS,
+        MERC_FORWARD_SPHERICAL_PRODUCT_POLY: MERC_FORWARD_SPHERICAL_PRODUCT_POLY_MIN_ELEMENTS,
+        MERC_INVERSE_EXP_SERIES: MERC_INVERSE_EXP_SERIES_MIN_ELEMENTS,
         ORTHO_FORWARD_FIXED_Q62: ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
         ORTHO_INVERSE_GUARDED_REFRAME: ORTHO_INVERSE_GUARDED_REFRAME_MIN_ELEMENTS,
         SINU_FORWARD_FIXED_Q62: SINU_FORWARD_FIXED_Q62_MIN_ELEMENTS,
@@ -862,6 +962,27 @@ def test_benchmark_enforced_grid_error_reports_current_default_bounds(monkeypatc
 
     message = capsys.readouterr().err
     assert "every default workload size from 1 to 5000000" in message
+
+
+def test_benchmark_native_identity_noise_gate_omits_only_event_aggregate():
+    benchmark_module = _load_policy_benchmark_module()
+    gate = benchmark_module._native_identity_noise_pass
+    passing = {
+        "auto_implementation_ids": [NATIVE_LIBDEVICE],
+        "native_implementation_ids": [NATIVE_LIBDEVICE],
+        "wall_speedup": 0.98,
+        "wall_repeat_speedups": [0.95, 1.0, 1.05],
+        "device_repeat_speedups": [0.95, 0.97, 1.0],
+    }
+    assert gate(**passing)
+    assert not gate(**{**passing, "auto_implementation_ids": [MERC_INVERSE_EXP_SERIES]})
+    assert not gate(**{**passing, "wall_speedup": math.nextafter(0.98, 0.0)})
+    assert not gate(
+        **{
+            **passing,
+            "device_repeat_speedups": [math.nextafter(0.95, 0.0), 1.0, 1.0],
+        }
+    )
 
 
 def test_wave1_benchmark_specs_enforce_complete_public_qualification_surface():
@@ -999,6 +1120,67 @@ def test_wave3a_gnom_inverse_benchmark_specs_are_explicit_only():
         assert np.all(np.isfinite(case.host_y))
         assert np.any(~np.isfinite(case.edge_host_x))
         assert case.qualification is specification
+
+
+def test_wave3b_merc_benchmark_specs_cover_all_public_domains():
+    benchmark_module = _load_policy_benchmark_module()
+    expected_cases = {
+        f"merc-{direction}-{geometry}-variant-{variant}"
+        for direction in ("forward", "inverse")
+        for geometry in ("spherical", "ellipsoidal")
+        for variant in ("a", "b")
+    }
+    assert set(benchmark_module.MERC_CASES) == expected_cases
+    assert set(benchmark_module.CASE_GROUPS["merc"]) == expected_cases
+
+    for index, case_name in enumerate(sorted(expected_cases)):
+        specification = benchmark_module.QUALIFICATION_SPECS[case_name]
+        direction = "forward" if "-forward-" in case_name else "inverse"
+        geometry = "spherical" if "-spherical-" in case_name else "ellipsoidal"
+        expected_id = (
+            (
+                MERC_FORWARD_SPHERICAL_PRODUCT_POLY
+                if geometry == "spherical"
+                else MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY
+            )
+            if direction == "forward"
+            else MERC_INVERSE_EXP_SERIES
+        )
+        expected_minimum = (
+            (MERC_FORWARD_SPHERICAL_PRODUCT_POLY_MIN_ELEMENTS if geometry == "spherical" else 0)
+            if direction == "forward"
+            else MERC_INVERSE_EXP_SERIES_MIN_ELEMENTS
+        )
+        assert specification.implementation_id == expected_id
+        assert specification.min_elements == expected_minimum
+        assert specification.direction == direction
+        assert specification.coordinate_contract_m == 1e-8
+        assert specification.max_physical_scale_m == PROJECTION_FIXED_Q62_MAX_SCALE_M
+        expected_workloads = (
+            (MERC_FORWARD_SPHERICAL_PRODUCT_POLY_MIN_ELEMENTS, 5_000_000)
+            if not specification.auto_enabled
+            else (expected_minimum - 1, expected_minimum, 5_000_000)
+        )
+        assert (
+            benchmark_module._qualification_workload_sizes((5_000_000,), specification)
+            == expected_workloads
+        )
+        assert specification.auto_enabled is not (
+            direction == "forward" and geometry == "ellipsoidal"
+        )
+        assert specification.explicit_performance_min_elements == (
+            MERC_FORWARD_SPHERICAL_PRODUCT_POLY_MIN_ELEMENTS
+            if direction == "forward" and geometry == "ellipsoidal"
+            else None
+        )
+
+        case = benchmark_module._prepare_case(np, case_name, 128, 20260806 + index)
+        assert case.family == "merc"
+        assert case.qualification is specification
+        assert np.all(np.isfinite(case.host_x))
+        assert np.all(np.isfinite(case.host_y))
+        assert np.any(~np.isfinite(case.edge_host_x))
+        assert np.any(~np.isfinite(case.edge_host_y))
 
 
 @pytest.mark.parametrize("geometry", ["spherical", "ellipsoidal"])

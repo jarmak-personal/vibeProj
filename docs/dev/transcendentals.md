@@ -39,8 +39,8 @@ shared native pairing helper (or the equivalent double-single helper).
 | `eqc` | inverse | none | n/a | none | arithmetic only | none | T0 |
 | `sinu` | forward | `cos(phi)` plus ellipsoidal meridional series | kernel-boundary `phi`: unknown; spherical accelerated guard requires finite `|phi| <= pi/2`, wrapped `|lambda| <= pi`, and `0 < scale <= 6,400,000 m`; all setup requires finite `0 < a <= 6,400,000 m`, and ellipsoidal setup additionally requires finite `0 < es <= 0.012` | none | `native.libdevice`, or spherical-only `sinu.forward.fixed_q62` | qualified guarded spherical implementation; supported ellipsoidal domains native; larger/more-eccentric custom bodies rejected during setup | T2 |
 | `sinu` | inverse | `cos(phi)` plus ellipsoidal meridional inverse | inverse `phi`: unknown; setup requires finite `0 < a <= 6,400,000 m` and `0 <= es <= 0.012` | none | `native.libdevice` | native only for supported ellipsoids; larger/more-eccentric custom bodies rejected during setup | T3 |
-| `merc` | forward | `sin`, `tan`, `pow`, `log` | `phi` and singular distance to poles: unknown | none | `native.libdevice` | native only | T3 |
-| `merc` | inverse | `exp`, `atan`, iterative `sin`/`pow` | normalized northing and exponent: unbounded | none | `native.libdevice` | native only | T3 |
+| `merc` | forward | `sin`, `tan`, `pow`, `log` | spherical automatic path requires `e=0`; ellipsoidal explicit path requires `0<e<=0.1` and hot `|phi|<=89.9 degrees`; both require finite raw/derived coordinates, nonzero units, `0<k0<=1`, and `0<a<=6,400,000 m` | none | `native.libdevice`, `merc.forward.spherical.product_poly`, or explicit-only `merc.forward.ellipsoidal.product_poly` | spherical zero-exponent `pow` removal is exact; ellipsoidal product polynomial has complete-warp exact native fallback | T2 |
+| `merc` | inverse | `exp`, `atan`, iterative `sin`/`pow` | accelerated setup requires finite nonzero units, `0 <= e <= 0.1`, finite `k0 > 0`, and `0 < a <= 6,400,000 m`; raw and normalized coordinates, longitude, and series coefficients finite | none | `native.libdevice`, or `merc.inverse.exp_series` in spherical/ellipsoidal A/B domains | shared sixth-order conformal-to-geodetic series; complete-warp exact native fallback | T2 |
 | `webmerc` | forward | `tan`, `log` | `phi` and singular distance to poles: unknown | none | `native.libdevice` | native only | T3 |
 | `webmerc` | inverse | `exp`, `atan` | normalized northing and exponent: unbounded | none | `native.libdevice` | native only | T3 |
 | `tmerc` | forward | three `sin`+`cos` arguments, `rsqrt`, `atan2`, `asinh` | general TM derived arguments: unknown; qualified UTM guard: `|lambda| <= 0.06`, `|asinh_arg| <= 0.06` with error `<= 2e-17`, `|atan_delta| <= 9.01e-4` with error `<= 2.3e-16 rad`; Q1.62 angles guarded to `[-pi, pi]` | pair `2phi`, Gaussian latitude, and `lambda` | native paired `sincos`/libdevice, or `tmerc.forward.fixed_q62` | qualified guarded implementation; native otherwise | T2 |
@@ -107,6 +107,9 @@ The user-facing coverage matrix is intentionally narrower than the inventory:
 | `stere.inverse.fixed_q62` | `stere` | inverse, ellipsoidal A/B north/south and C south | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 1,000,000 | Q1.62 sine inside `phi2`; CRS setup proves positive `akm1` and sign, uniform `0.05 <= e <= 0.2` and `a <= 6,400,000 m` guards, per-angle native fallback |
 | `geos.forward.fixed_q62` | `geos` | forward, sphere/ellipsoid, sweep x/y | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 2,097,152 | Q1.62 pairs for geocentric latitude and longitude; complete-native visibility-uncertainty fallback plus launch-uniform finite geometry/`a <= 6,400,000 m` guard |
 | `laea.forward.polar.fixed_q62` | `laea` | forward, spherical north/south polar only | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 1,048,576 | Q1.62 paired longitude trig; exact pole/antipode/non-finite handling and `a <= 6,400,000 m` guard |
+| `merc.forward.spherical.product_poly` | `merc` | spherical forward A/B | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 262,144 | removes the zero-exponent `pow`; `e==0` device guard and full-domain bitwise-native result |
+| `merc.forward.ellipsoidal.product_poly` | `merc` | ellipsoidal forward A/B | fp64 | Ada `sm_89`, weak-native-fp64 consumer class; explicit `accelerated` only | n/a | product reframe and degree-eight exponential polynomial; `0<e<=0.1`, `|phi|<=89.9 degrees`, and bounded setup guards; `auto` disabled by polar-cap mixture regression |
+| `merc.inverse.exp_series` | `merc` | inverse, spherical/ellipsoidal A/B | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 65,536 | native `exp`/`atan` conformal seed followed by reusable sixth-order Poder/Engsager recovery; finite raw/normalized/setup/coefficients guard |
 
 `tests/test_transcendental_coverage.py` binds these IDs and capabilities to
 the public registry and resolver. Adding a documented accelerated row without
@@ -419,6 +422,53 @@ ordering or inspect data on the host. `benchmarks/wave2c_rejection.py` retains
 these forward no-go results and deterministic guard/warp profiles. The earlier
 Oblique Stereographic inverse screen was reversed twice and is intentionally
 absent from all retained claims.
+
+### Wave 3B regular Mercator evidence
+
+The final public replay covered spherical and ellipsoidal variants A/B in both
+directions on the qualified RTX 4090. It used preallocated public
+`transform_buffers()` calls, 5,000,000 coordinates, 10 warm-ups, three repeats
+of 30 iterations, and device-event plus synchronized-wall timing. The workload
+grid added N-1/N for automatic crossovers and 262,144/5,000,000 for the
+explicit ellipsoidal-forward performance contract. All eight main cases, all
+22 grid rows, setup/coordinate/scale guards, pyproj comparisons, graph
+topology, allocation, output-identity, and retained mixture sweeps passed.
+
+| Case group | Policy / minimum | Device / wall at 5M | Max / p99 error | Minimum qualified repeat, device / wall |
+|---|---|---:|---:|---:|
+| spherical forward A/B | auto, 262,144 | 1.129x / 1.128x | exact / exact | 1.124x / 1.105x |
+| ellipsoidal forward A/B | explicit only, performance screened from 262,144 | 1.261x / 1.259x | 7.451 / 0.699 nm | 1.224x / 1.188x |
+| spherical inverse A/B | auto, 65,536 | 1.805x / 1.792x | exact / exact | 1.625x / 1.302x |
+| ellipsoidal inverse A/B | auto, 65,536 | 8.349x / 8.243x | 6.328 / 3.164 nm | 6.983x / 4.232x |
+
+Both forward kernels use 36 registers, 40 bytes local memory, zero shared
+memory, and calculated full occupancy. The inverse series reduces native's 38
+registers to 36 while retaining 40 bytes local and zero shared. The native
+inverse ABI remains unchanged; six reusable conformal-to-geodetic coefficients
+are added only to the accelerated inverse source and argument pack.
+
+Ellipsoidal forward is deliberately excluded from `auto`. A uniform
+`e=0.1`, `a=6,400,000 m` five-million-point screen found 14.901 nm one-ULP
+differences inside the extreme polar cap. Native `exp(-correction)` and a
+degree-ten polynomial reproduced the same four failures; subtracting the
+correction after `log` produced 280. The production hot domain therefore ends
+at `|latitude|=89.9 degrees`, and a warp containing any coordinate beyond that
+bound executes the exact native expression. At both 262,144 and 5,000,000,
+retained random-lane cap fractions of 0%, 0.1%, 1%, 10%, 50%, and 100% kept
+every cold lane bitwise-native and the complete output below 10 nm. Hot-only
+speedup was about 1.27x, but 10% and 50% mixtures measured about 0.962-0.969x;
+that negative result is an enforced benchmark gate and is why only explicit
+callers may select the ellipsoidal-forward ID.
+
+Replay the immutable qualification artifact with:
+
+```console
+flock /tmp/vibeproj-wave3-gpu.lock -c 'uv run python \
+  benchmarks/bench_transcendental_policy.py --case merc --n 5000000 \
+  --workload-sizes 5000000 --warmup 10 --iterations 30 --repeats 3 \
+  --oracle-n 100000 --precision fp64 --seed 42 --enforce-gates \
+  --json /tmp/wave3b_merc_public_qualification.json'
+```
 
 ### Go/no-go gates
 

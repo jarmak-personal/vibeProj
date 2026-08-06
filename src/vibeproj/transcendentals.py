@@ -27,6 +27,9 @@ GNOM_INVERSE_GUARDED_RSQRT_REFRAME = "gnom.inverse.guarded_rsqrt_reframe"
 STERE_INVERSE_FIXED_Q62 = "stere.inverse.fixed_q62"
 GEOS_FORWARD_FIXED_Q62 = "geos.forward.fixed_q62"
 LAEA_FORWARD_POLAR_FIXED_Q62 = "laea.forward.polar.fixed_q62"
+MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY = "merc.forward.ellipsoidal.product_poly"
+MERC_FORWARD_SPHERICAL_PRODUCT_POLY = "merc.forward.spherical.product_poly"
+MERC_INVERSE_EXP_SERIES = "merc.inverse.exp_series"
 PROJECTION_FIXED_Q62_MAX_SCALE_M = 6_400_000.0
 TMERC_FIXED_Q62_MIN_ELEMENTS = 256
 HELMERT_FIXED_Q62_MIN_ELEMENTS = 131_072
@@ -36,6 +39,8 @@ ORTHO_INVERSE_GUARDED_REFRAME_MIN_ELEMENTS = 524_288
 STERE_INVERSE_FIXED_Q62_MIN_ELEMENTS = 1_000_000
 GEOS_FORWARD_FIXED_Q62_MIN_ELEMENTS = 2_097_152
 LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS = 1_048_576
+MERC_FORWARD_SPHERICAL_PRODUCT_POLY_MIN_ELEMENTS = 262_144
+MERC_INVERSE_EXP_SERIES_MIN_ELEMENTS = 65_536
 
 _EXACT_DOMAIN_FAMILIES = frozenset(
     {"aeqd", "geos", "gnom", "laea", "merc", "ortho", "sinu", "stere", "sterea", "webmerc"}
@@ -522,6 +527,104 @@ _REGISTRY = (
         native_fallback=True,
     ),
     StrategyImplementation(
+        implementation_id=MERC_FORWARD_SPHERICAL_PRODUCT_POLY,
+        operation=TranscendentalOperation.PROJECTION,
+        family="qualified_spherical_merc_forward_transcendentals",
+        supported_policies=("auto", "accelerated"),
+        supported_backends=("cuda",),
+        supported_compute_capabilities=((8, 9),),
+        min_fp32_to_fp64_ratio=16,
+        supported_compute_precisions=("auto", "fp64"),
+        min_elements=MERC_FORWARD_SPHERICAL_PRODUCT_POLY_MIN_ELEMENTS,
+        domains=(
+            "merc.forward.spherical.variant_a",
+            "merc.forward.spherical.variant_b",
+        ),
+        accuracy=AccuracyContract(
+            reference=NATIVE_LIBDEVICE,
+            max_horizontal_error_m=1e-8,
+            max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+            notes=(
+                "Spherical Mercator forward removes the zero-exponent pow while "
+                "preserving the native latitude clamp and log-tan expression. "
+                "Finite raw/derived coordinates and finite nonzero-unit setup with "
+                "e=0, 0<k0<=1, and 0<a<=6,400,000 m are qualified. Formal "
+                "native-relative coordinate error is bitwise zero."
+            ),
+        ),
+        native_fallback=True,
+    ),
+    StrategyImplementation(
+        implementation_id=MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY,
+        operation=TranscendentalOperation.PROJECTION,
+        family="qualified_ellipsoidal_merc_forward_transcendentals",
+        supported_policies=("accelerated",),
+        supported_backends=("cuda",),
+        supported_compute_capabilities=((8, 9),),
+        min_fp32_to_fp64_ratio=16,
+        supported_compute_precisions=("auto", "fp64"),
+        min_elements=0,
+        domains=(
+            "merc.forward.ellipsoidal.variant_a",
+            "merc.forward.ellipsoidal.variant_b",
+        ),
+        accuracy=AccuracyContract(
+            reference=NATIVE_LIBDEVICE,
+            max_horizontal_error_m=1e-8,
+            max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+            notes=(
+                "Ellipsoidal Mercator forward preserves the native latitude clamp and log-tan "
+                "form while replacing the ellipsoidal pow correction with "
+                "e*atanh(e*sin(phi)) and a degree-eight polynomial for its small "
+                "exponential. The launch setup guard requires finite parameters "
+                "and nonzero units, 0 < e <= 0.1, 0 < k0 <= 1, and "
+                "0 < a <= 6,400,000 m. Both raw and derived coordinates must be "
+                "finite and the forward hot latitude is bounded to +/-89.9 degrees; "
+                "any setup or coordinate failure sends the complete warp "
+                "through the exact native expression. Formal maximum/p99 "
+                "native-relative projected error: 7.451/0.931 nm. Automatic "
+                "selection is disabled because 10-50% random polar-cap mixtures "
+                "make warp-wide fallback slower than native."
+            ),
+        ),
+        native_fallback=True,
+    ),
+    StrategyImplementation(
+        implementation_id=MERC_INVERSE_EXP_SERIES,
+        operation=TranscendentalOperation.PROJECTION,
+        family="qualified_merc_inverse_transcendentals",
+        supported_policies=("auto", "accelerated"),
+        supported_backends=("cuda",),
+        supported_compute_capabilities=((8, 9),),
+        min_fp32_to_fp64_ratio=16,
+        supported_compute_precisions=("auto", "fp64"),
+        min_elements=MERC_INVERSE_EXP_SERIES_MIN_ELEMENTS,
+        domains=(
+            "merc.inverse.spherical.variant_a",
+            "merc.inverse.spherical.variant_b",
+            "merc.inverse.ellipsoidal.variant_a",
+            "merc.inverse.ellipsoidal.variant_b",
+        ),
+        accuracy=AccuracyContract(
+            reference=NATIVE_LIBDEVICE,
+            max_horizontal_error_m=1e-8,
+            max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+            notes=(
+                "Mercator inverse retains the native exp/atan conformal seed and "
+                "replaces the iterative ellipsoidal recovery with a reusable "
+                "sixth-order Poder/Engsager conformal-to-geodetic series. The "
+                "launch setup guard requires finite parameters and nonzero units, "
+                "0 <= e <= 0.1, finite k0 > 0, and 0 < a <= 6,400,000 m. All "
+                "finite raw coordinates whose normalized coordinates remain "
+                "finite, including signed zero and well-conditioned huge finite "
+                "northings, are qualified; any failure sends the complete warp "
+                "through the exact native expression. Formal maximum/p99 "
+                "native-relative horizontal error: 6.328/3.164 nm."
+            ),
+        ),
+        native_fallback=True,
+    ),
+    StrategyImplementation(
         implementation_id=HELMERT_FIXED_Q62,
         operation=TranscendentalOperation.HELMERT,
         family="bounded_q1_62",
@@ -934,6 +1037,11 @@ __all__ = [
     "HELMERT_FIXED_Q62_MIN_ELEMENTS",
     "LAEA_FORWARD_POLAR_FIXED_Q62",
     "LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS",
+    "MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY",
+    "MERC_FORWARD_SPHERICAL_PRODUCT_POLY",
+    "MERC_FORWARD_SPHERICAL_PRODUCT_POLY_MIN_ELEMENTS",
+    "MERC_INVERSE_EXP_SERIES",
+    "MERC_INVERSE_EXP_SERIES_MIN_ELEMENTS",
     "NATIVE_LIBDEVICE",
     "ORTHO_FORWARD_FIXED_Q62",
     "ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS",

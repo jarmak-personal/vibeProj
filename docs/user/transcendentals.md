@@ -80,6 +80,15 @@ The initial accelerated coverage is deliberately small:
 | `stere.inverse.fixed_q62` | Polar Stereographic inverse, public ellipsoidal A/B north/south and C south modes | Q1.62 sine inside the conformal-latitude iteration; scale, eccentricity, and iterative-angle guard failures use native fp64 | Ada `sm_89` consumer GPUs | 1,000,000 |
 | `geos.forward.fixed_q62` | Geostationary forward, sphere/ellipsoid and sweep x/y | Paired Q1.62 trig for geocentric latitude and longitude; uncertain limb visibility recomputes complete native output | Ada `sm_89` consumer GPUs | 2,097,152 |
 | `laea.forward.polar.fixed_q62` | Spherical polar LAEA forward, north/south origins | Q1.62 longitude sine/cosine; authalic and inverse paths remain native fp64 | Ada `sm_89` consumer GPUs | 1,048,576 |
+| `merc.forward.spherical.product_poly` | Spherical regular Mercator forward, variants A/B | Removes the zero-exponent `pow` while preserving the native clamp/log-tan result exactly | Ada `sm_89` consumer GPUs | 262,144 |
+| `merc.forward.ellipsoidal.product_poly` | Ellipsoidal regular Mercator forward, variants A/B | Native clamp/log-tan with a product reframe and degree-eight polynomial; polar cap uses exact native math | Ada `sm_89` consumer GPUs; explicit `accelerated` only | n/a |
+| `merc.inverse.exp_series` | Regular Mercator inverse, spherical/ellipsoidal variants A/B | Native conformal `exp`/`atan` seed followed by the shared sixth-order Poder/Engsager recovery series | Ada `sm_89` consumer GPUs | 65,536 |
+
+On the qualifying RTX 4090 at five million coordinates, spherical Mercator
+forward measured about 1.13x native, explicit ellipsoidal forward about 1.26x,
+spherical inverse about 1.80x, and ellipsoidal inverse about 8.35x. Maximum
+native-relative error was zero for spherical paths, 7.451 nm for ellipsoidal
+forward, and 6.328 nm for ellipsoidal inverse.
 
 On a qualified RTX 4090, `"auto"` resolves the specialized implementations at
 or above the listed sizes; below them it resolves native. Explicit
@@ -87,7 +96,7 @@ or above the listed sizes; below them it resolves native. Explicit
 Transverse Mercator, inverse UTM, sinusoidal inverse, Orthographic inverse
 outside the exact spherical-equatorial origin domain, LAEA outside spherical
 polar forward, Polar Stereographic outside the five listed inverse domains,
-GEOS inverse, all other projection families, unsupported
+GEOS inverse, Web Mercator in both directions, all other projection families, unsupported
 precision combinations, and unknown devices resolve or fall back to
 `native.libdevice`. Guarded input values do not
 change the host decision: a selected fixed `StrategyDecision` remains selected
@@ -132,6 +141,22 @@ against native policy. The current release gates are:
   `[-pi/2, pi/2]` with wrapped longitude in `[-pi, pi]`. Other coordinates use
   native cosine. The complete projected result must differ from native by
   `< 1e-8 m`; final WGS84 qualification measured 3.725/1.863 nm maximum/p99.
+- Spherical regular Mercator forward: automatic selection removes the
+  zero-exponent `pow` and is bitwise exact across the full finite domain.
+- Ellipsoidal regular Mercator forward: explicit acceleration requires finite parameters and
+  nonzero units, `0 < e <= 0.1`, `0 < k0 <= 1`, and
+  `0 < a <= 6,400,000 m`. Raw and derived longitude/latitude values must be
+  finite and the hot latitude is bounded to `+/-89.9` degrees. The remaining
+  polar cap uses the exact native expression. The native latitude clamp and
+  log-tan form are unchanged; the complete projected result must differ from
+  native by `< 1e-8 m`. It is excluded from `"auto"`: random workloads with
+  10-50% of coordinates in the polar cap make warp-wide fallback slower than
+  native-only execution.
+- Regular Mercator inverse: the same finite setup, unit, eccentricity, and
+  scale guards apply, while any finite `k0 > 0` is accepted. Raw coordinates,
+  normalized coordinates, longitude, and all six conformal-series coefficients
+  must remain finite. The complete geographic result must differ from native
+  by `< 1e-8 m` after angular error is scaled by the ellipsoid radius.
 - Orthographic forward: at physical scale `0 < scale <= 6,400,000 m`, both
   latitude and wrapped-longitude sine/cosine pairs use one atomic guard over
   `[-pi/2, pi/2]` and `[-pi, pi]`. If either argument is invalid, both pairs

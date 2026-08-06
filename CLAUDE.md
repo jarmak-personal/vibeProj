@@ -35,8 +35,8 @@ GPU-accelerated coordinate projection library. 24 projections, each with a fused
   Fitting tool: `tools/fit_datum_corrections.py`.
 - **Transcendental registry** (`src/vibeproj/transcendentals.py`) — resolves the independent public
   `transcendentals="auto"|"native"|"accelerated"` policy from operation, domain, precision,
-  workload size, and device capability. Qualified bounded implementations are currently limited to Helmert and
-  forward UTM on Ada `sm_89`; unsupported, datacenter, and unknown devices explicitly use native
+  workload size, and device capability. Qualified bounded implementations cover selected projection
+  domains and Helmert on Ada `sm_89`; unsupported, datacenter, and unknown devices explicitly use native
   libdevice behavior. `Transformer.explain_strategy()` exposes every decision.
 - **Fixed-point trig** (`src/vibeproj/_fixed_trig_device_fns.py`) — table-free Q1.62 `sin`/`cos` for
   bounded Helmert and forward-TM angles, using nearest-quadrant reduction and degree-17/18

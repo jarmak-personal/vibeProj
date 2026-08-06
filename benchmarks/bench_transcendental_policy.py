@@ -41,6 +41,11 @@ from vibeproj.transcendentals import (
     HELMERT_FIXED_Q62_MIN_ELEMENTS,
     LAEA_FORWARD_POLAR_FIXED_Q62,
     LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS,
+    MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY,
+    MERC_FORWARD_SPHERICAL_PRODUCT_POLY,
+    MERC_FORWARD_SPHERICAL_PRODUCT_POLY_MIN_ELEMENTS,
+    MERC_INVERSE_EXP_SERIES,
+    MERC_INVERSE_EXP_SERIES_MIN_ELEMENTS,
     NATIVE_LIBDEVICE,
     ORTHO_FORWARD_FIXED_Q62,
     ORTHO_FORWARD_FIXED_Q62_MIN_ELEMENTS,
@@ -96,6 +101,7 @@ class QualificationSpec:
     expected_kernel_nodes: int = 1
     auto_enabled: bool = True
     auto_disabled_reason: str | None = None
+    explicit_performance_min_elements: int | None = None
 
 
 QUALIFICATION_SPECS = {
@@ -230,8 +236,48 @@ QUALIFICATION_SPECS = {
             ("variant_c", "south"),
         )
     },
+    **{
+        f"merc-{direction}-{geometry}-variant-{variant}": QualificationSpec(
+            implementation_id=(
+                (
+                    MERC_FORWARD_SPHERICAL_PRODUCT_POLY
+                    if geometry == "spherical"
+                    else MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY
+                )
+                if direction == "forward"
+                else MERC_INVERSE_EXP_SERIES
+            ),
+            operation="projection",
+            domain=f"merc.{direction}.{geometry}.variant_{variant}",
+            direction=direction,
+            min_elements=(
+                (MERC_FORWARD_SPHERICAL_PRODUCT_POLY_MIN_ELEMENTS if geometry == "spherical" else 0)
+                if direction == "forward"
+                else MERC_INVERSE_EXP_SERIES_MIN_ELEMENTS
+            ),
+            coordinate_contract_m=1e-8,
+            max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
+            auto_enabled=direction != "forward" or geometry == "spherical",
+            auto_disabled_reason=(
+                "10-50% random polar-cap mixtures make warp-wide native fallback "
+                "slower than native-only execution"
+                if direction == "forward" and geometry == "ellipsoidal"
+                else None
+            ),
+            explicit_performance_min_elements=(
+                MERC_FORWARD_SPHERICAL_PRODUCT_POLY_MIN_ELEMENTS
+                if direction == "forward" and geometry == "ellipsoidal"
+                else None
+            ),
+        )
+        for direction in ("forward", "inverse")
+        for geometry in ("spherical", "ellipsoidal")
+        for variant in ("a", "b")
+    },
 }
 CASES = tuple(QUALIFICATION_SPECS)
+MERC_CASES = tuple(name for name in CASES if name.startswith("merc-"))
+CASE_GROUPS = {"merc": MERC_CASES}
 WORKLOAD_GRID_CASES = tuple(
     name
     for name, qualification in QUALIFICATION_SPECS.items()
@@ -279,6 +325,8 @@ def _qualification_workload_sizes(
     sizes = set(requested_sizes)
     if qualification.auto_enabled:
         sizes.update((qualification.min_elements - 1, qualification.min_elements))
+    if qualification.explicit_performance_min_elements is not None:
+        sizes.add(qualification.explicit_performance_min_elements)
     return tuple(sorted(sizes))
 
 
@@ -1071,6 +1119,7 @@ def _prepare_stere_inverse(
     t = np.tan(0.5 * (math.pi / 2.0 - phi_adjusted)) / ((1.0 - e_sin) / (1.0 + e_sin)) ** (
         0.5 * computed["e"]
     )
+
     rho = computed["akm1"] * t
     easting = computed["x0"] + computed["a"] * rho * np.sin(longitude)
     northing = computed["y0"] - sign * computed["a"] * rho * np.cos(longitude)
@@ -1126,6 +1175,159 @@ def _prepare_stere_inverse(
     )
 
 
+def _prepare_merc(
+    cp: Any,
+    n: int,
+    rng: np.random.Generator,
+    *,
+    direction: str,
+    geometry: str,
+    variant: str,
+) -> BenchmarkCase:
+    """Prepare one full-domain regular Mercator public qualification case."""
+    from pyproj import CRS
+    from vibeproj import Transformer
+
+    targets = {
+        ("ellipsoidal", "a"): "EPSG:3395",
+        ("ellipsoidal", "b"): "EPSG:3994",
+        (
+            "spherical",
+            "a",
+        ): "+proj=merc +k=0.87 +lon_0=12 +R=6371000 +units=m +type=crs",
+        (
+            "spherical",
+            "b",
+        ): "+proj=merc +lat_ts=33 +lon_0=12 +R=6371000 +units=m +type=crs",
+    }
+    target = CRS.from_user_input(targets[(geometry, variant)])
+    source = target.geodetic_crs
+    name = f"merc-{direction}-{geometry}-variant-{variant}"
+    forward = Transformer.from_crs(source, target, always_xy=True)
+    computed = forward._pipeline.computed
+    a = float(computed["a"])
+    k0 = float(computed["k0"])
+    lam0_degrees = math.degrees(float(computed["lam0"]))
+    x0 = float(computed["x0"])
+    y0 = float(computed["y0"])
+
+    longitude = rng.uniform(lam0_degrees - 179.0, lam0_degrees + 179.0, n).astype(np.float64)
+    latitude = rng.uniform(-89.999, 89.999, n).astype(np.float64)
+    if n:
+        latitude[0] = 0.0
+    if n > 1:
+        latitude[1] = -0.0
+
+    clamp = 89.999
+    if direction == "forward":
+        transformer = forward
+        input_x, input_y = longitude, latitude
+        edge_x = np.asarray(
+            [
+                lam0_degrees,
+                -0.0,
+                1e300,
+                math.nan,
+                math.inf,
+                -math.inf,
+                lam0_degrees,
+                lam0_degrees,
+                lam0_degrees,
+                lam0_degrees,
+                lam0_degrees,
+                lam0_degrees,
+            ],
+            dtype=np.float64,
+        )
+        edge_y = np.asarray(
+            [
+                0.0,
+                -0.0,
+                1e300,
+                0.0,
+                0.0,
+                0.0,
+                math.nextafter(clamp, -math.inf),
+                clamp,
+                math.nextafter(clamp, math.inf),
+                math.nan,
+                math.inf,
+                -math.inf,
+            ],
+            dtype=np.float64,
+        )
+        output_is_geographic = False
+        oracle_from, oracle_to = source, target
+        domain = {
+            "crs": f"{source.name} -> {target.name}",
+            "longitude_degrees": [lam0_degrees - 179.0, lam0_degrees + 179.0],
+            "latitude_degrees": [-89.999, 89.999],
+            "includes_signed_zero_and_clamp_nextafters": True,
+            "accelerated_hot_latitude_degrees": [-89.9, 89.9],
+        }
+    else:
+        transformer = Transformer.from_crs(target, source, always_xy=True)
+        normalized_x = rng.uniform(-math.pi, math.pi, n)
+        normalized_psi = rng.uniform(-4.0, 4.0, n)
+        extreme = np.arange(n) % 10 == 0
+        normalized_psi[extreme] = rng.uniform(-750.0, 750.0, int(np.count_nonzero(extreme)))
+        if n:
+            normalized_psi[0] = 0.0
+        if n > 1:
+            normalized_psi[1] = -0.0
+        input_x = normalized_x * (a * k0) + x0
+        input_y = normalized_psi * (a * k0) + y0
+        edge_x = np.asarray(
+            [x0, -0.0, 1e300, math.nan, math.inf, -math.inf, x0, x0, x0, x0, x0],
+            dtype=np.float64,
+        )
+        edge_y = np.asarray(
+            [
+                y0,
+                -0.0,
+                1e300,
+                y0,
+                y0,
+                y0,
+                -1e300,
+                math.nextafter(y0, math.inf),
+                math.nan,
+                math.inf,
+                -math.inf,
+            ],
+            dtype=np.float64,
+        )
+        output_is_geographic = True
+        oracle_from, oracle_to = target, source
+        domain = {
+            "crs": f"{target.name} -> {source.name}",
+            "normalized_psi_typical": [-4.0, 4.0],
+            "normalized_psi_extreme": [-750.0, 750.0],
+            "extreme_fraction": 0.1,
+            "includes_signed_zero": True,
+        }
+
+    return BenchmarkCase(
+        name=name,
+        family="merc",
+        direction="FORWARD",
+        transformer=transformer,
+        input_x=cp.asarray(input_x),
+        input_y=cp.asarray(input_y),
+        host_x=np.asarray(input_x, dtype=np.float64),
+        host_y=np.asarray(input_y, dtype=np.float64),
+        edge_host_x=edge_x,
+        edge_host_y=edge_y,
+        domain=domain,
+        edges={"first": _json_edge_values(edge_x), "second": _json_edge_values(edge_y)},
+        output_is_geographic=output_is_geographic,
+        oracle_from_crs=oracle_from,
+        oracle_to_crs=oracle_to,
+        qualification=QUALIFICATION_SPECS[name],
+        geographic_scale_m=a,
+    )
+
+
 def _prepare_case(cp: Any, name: str, n: int, seed: int) -> BenchmarkCase:
     rng = np.random.default_rng(seed)
     if name == "tmerc-forward":
@@ -1153,6 +1355,16 @@ def _prepare_case(cp: Any, name: str, n: int, seed: int) -> BenchmarkCase:
     if name.startswith("stere-inverse-"):
         _, _, variant, hemisphere = name.split("-")
         return _prepare_stere_inverse(cp, n, rng, variant=variant, hemisphere=hemisphere)
+    if name.startswith("merc-"):
+        _, direction, geometry, _, variant = name.split("-")
+        return _prepare_merc(
+            cp,
+            n,
+            rng,
+            direction=direction,
+            geometry=geometry,
+            variant=variant,
+        )
     raise ValueError(f"Unknown benchmark case: {name}")
 
 
@@ -1207,6 +1419,26 @@ def _distribution(samples: list[float], n: int) -> dict[str, Any]:
         "stdev_ms": statistics.pstdev(samples),
         "mcoords_per_s": n / median / 1000.0,
     }
+
+
+def _native_identity_noise_pass(
+    *,
+    auto_implementation_ids: list[str],
+    native_implementation_ids: list[str],
+    wall_speedup: float,
+    wall_repeat_speedups: list[float],
+    device_repeat_speedups: list[float],
+) -> bool:
+    """Gate identical-native AUTO timing without a quantized event aggregate."""
+    identical_native_variant = (
+        auto_implementation_ids == native_implementation_ids == [NATIVE_LIBDEVICE]
+    )
+    return (
+        identical_native_variant
+        and wall_speedup >= 0.98
+        and all(speedup >= 0.95 for speedup in wall_repeat_speedups)
+        and all(speedup >= 0.95 for speedup in device_repeat_speedups)
+    )
 
 
 def _time_interleaved(
@@ -1446,12 +1678,129 @@ def _kernel_resources(cp: Any, case: BenchmarkCase) -> dict[str, Any]:
     return result
 
 
+def _merc_forward_polar_cap_sweep(
+    cp: Any,
+    case: BenchmarkCase,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    """Retain the mixed polar-cap evidence that disables ellipsoidal auto."""
+    if not case.name.startswith("merc-forward-ellipsoidal-"):
+        return {"required": False, "rows": []}
+
+    threshold = case.qualification.explicit_performance_min_elements
+    if threshold is None:
+        raise RuntimeError("Ellipsoidal Mercator requires an explicit performance size")
+    workload_sizes = tuple(sorted({threshold, args.n}))
+    rows = []
+    for size_index, n in enumerate(workload_sizes):
+        rng = np.random.default_rng(args.seed + 70_000 + size_index)
+        base_longitude = rng.uniform(-179.0, 179.0, n)
+        hot_latitude = rng.uniform(-80.0, 80.0, n)
+        for fallback_fraction in (0.0, 0.001, 0.01, 0.10, 0.50, 1.0):
+            latitude = hot_latitude.copy()
+            fallback_count = round(fallback_fraction * n)
+            fallback_mask = np.zeros(n, dtype=bool)
+            if fallback_count:
+                selected = rng.choice(n, fallback_count, replace=False)
+                fallback_mask[selected] = True
+                latitude[selected] = rng.choice((-89.95, 89.95), fallback_count)
+            input_x = cp.asarray(base_longitude)
+            input_y = cp.asarray(latitude)
+            outputs = {
+                policy: (cp.empty(n, dtype=cp.float64), cp.empty(n, dtype=cp.float64))
+                for policy in ("native", "accelerated")
+            }
+
+            def invoke(policy: str) -> None:
+                case.transformer.transform_buffers(
+                    input_x,
+                    input_y,
+                    direction=case.direction,
+                    out_x=outputs[policy][0],
+                    out_y=outputs[policy][1],
+                    precision=args.precision,
+                    transcendentals=policy,
+                )
+
+            launches = {policy: lambda policy=policy: invoke(policy) for policy in outputs}
+            device_timing, _, _ = _time_interleaved(
+                cp,
+                launches,
+                n=n,
+                warmup=args.warmup,
+                iterations=args.iterations,
+                repeats=args.repeats,
+            )
+            wall_timing = _time_synchronized_wall_interleaved(
+                cp,
+                launches,
+                n=n,
+                warmup=args.warmup,
+                iterations=args.iterations,
+                repeats=args.repeats,
+            )
+            invoke("native")
+            invoke("accelerated")
+            cp.cuda.get_current_stream().synchronize()
+            native = tuple(cp.asnumpy(value) for value in outputs["native"])
+            accelerated = tuple(cp.asnumpy(value) for value in outputs["accelerated"])
+            cold_lanes_bitwise_native = all(
+                np.array_equal(
+                    actual[fallback_mask].view(np.uint64), expected[fallback_mask].view(np.uint64)
+                )
+                for actual, expected in zip(accelerated, native, strict=True)
+            )
+            error = _coordinate_error(
+                *accelerated,
+                *native,
+                geographic=False,
+            )
+            rows.append(
+                {
+                    "n": n,
+                    "fallback_fraction": fallback_fraction,
+                    "fallback_count": fallback_count,
+                    "pattern": "random lanes at +/-89.95 degrees; remaining latitudes uniform [-80,80]",
+                    "device_timing": device_timing,
+                    "wall_timing": wall_timing,
+                    "cold_lanes_bitwise_native": cold_lanes_bitwise_native,
+                    "error_vs_native_m": error,
+                }
+            )
+
+    negative_auto_evidence = any(
+        row["fallback_fraction"] in (0.10, 0.50)
+        and (
+            row["device_timing"]["accelerated"]["speedup_vs_native"] < 1.0
+            or row["wall_timing"]["accelerated"]["speedup_vs_native"] < 1.0
+        )
+        for row in rows
+    )
+    correctness_pass = all(
+        row["cold_lanes_bitwise_native"]
+        and row["error_vs_native_m"]["nonfinite_match"]
+        and row["error_vs_native_m"]["max_m"] <= case.qualification.coordinate_contract_m
+        for row in rows
+    )
+    return {
+        "required": True,
+        "workload_sizes": list(workload_sizes),
+        "fractions": [0.0, 0.001, 0.01, 0.10, 0.50, 1.0],
+        "rows": rows,
+        "all_cold_lanes_bitwise_native": all(row["cold_lanes_bitwise_native"] for row in rows),
+        "negative_auto_evidence_pass": negative_auto_evidence,
+        "qualification_pass": correctness_pass and negative_auto_evidence,
+    }
+
+
 def _guarded_inverse_fallback_sweep(
     cp: Any,
     case: BenchmarkCase,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     """Measure deliberately mixed per-lane native fallback percentages."""
+    if case.name.startswith("merc-forward-ellipsoidal-"):
+        return _merc_forward_polar_cap_sweep(cp, case, args)
     if case.name != "ortho-inverse" and not case.name.startswith("gnom-inverse-"):
         return {"required": False, "rows": []}
 
@@ -1535,6 +1884,7 @@ def _guarded_inverse_fallback_sweep(
         "all_fallback_lanes_bitwise_native": all(
             row["fallback_lanes_bitwise_native"] for row in rows
         ),
+        "qualification_pass": all(row["fallback_lanes_bitwise_native"] for row in rows),
     }
 
 
@@ -1614,22 +1964,45 @@ def _pyproj_reference(case: BenchmarkCase, limit: int) -> tuple[np.ndarray, np.n
 
 def _edge_accuracy(cp: Any, case: BenchmarkCase, precision: str) -> dict[str, Any]:
     """Run boundary/out-of-domain probes separately from the timed distribution."""
-    edge_x = cp.asarray(case.edge_host_x)
-    edge_y = cp.asarray(case.edge_host_y)
-    outputs: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-    for policy in ("native", "accelerated"):
-        out_x = cp.empty(edge_x.size, dtype=cp.float64)
-        out_y = cp.empty(edge_y.size, dtype=cp.float64)
-        case.transformer.transform_buffers(
-            edge_x,
-            edge_y,
-            direction=case.direction,
-            out_x=out_x,
-            out_y=out_y,
-            precision=precision,
-            transcendentals=policy,
+    # Mercator guards are warp-atomic. Launch each edge as one homogeneous
+    # warp so a NaN/Inf probe cannot make signed-zero, clamp, or huge-finite
+    # evidence vacuously execute the native path.
+    groups = (
+        tuple(
+            (
+                cp.full(32, first, dtype=cp.float64),
+                cp.full(32, second, dtype=cp.float64),
+            )
+            for first, second in zip(case.edge_host_x, case.edge_host_y, strict=True)
         )
-        outputs[policy] = (cp.asnumpy(out_x), cp.asnumpy(out_y))
+        if case.family == "merc"
+        else ((cp.asarray(case.edge_host_x), cp.asarray(case.edge_host_y)),)
+    )
+    host_groups: dict[str, list[tuple[np.ndarray, np.ndarray]]] = {
+        "native": [],
+        "accelerated": [],
+    }
+    for policy in host_groups:
+        for edge_x, edge_y in groups:
+            out_x = cp.empty(edge_x.size, dtype=cp.float64)
+            out_y = cp.empty(edge_y.size, dtype=cp.float64)
+            case.transformer.transform_buffers(
+                edge_x,
+                edge_y,
+                direction=case.direction,
+                out_x=out_x,
+                out_y=out_y,
+                precision=precision,
+                transcendentals=policy,
+            )
+            host_groups[policy].append((cp.asnumpy(out_x), cp.asnumpy(out_y)))
+    outputs = {
+        policy: (
+            np.concatenate([group[0] for group in results]),
+            np.concatenate([group[1] for group in results]),
+        )
+        for policy, results in host_groups.items()
+    }
     native_x, native_y = outputs["native"]
     accelerated_x, accelerated_y = outputs["accelerated"]
     return _coordinate_error(
@@ -1653,7 +2026,7 @@ def _scale_guard_behavior(cp: Any, case: BenchmarkCase, precision: str) -> dict[
     probes = []
     raw_scales = (
         (maximum_scale, np.nextafter(maximum_scale, math.inf), 1e12)
-        if case.family == "stere"
+        if case.family in {"merc", "stere"}
         else (np.nextafter(maximum_scale, math.inf), 1e12)
     )
     for raw_scale in raw_scales:
@@ -1673,13 +2046,24 @@ def _scale_guard_behavior(cp: Any, case: BenchmarkCase, precision: str) -> dict[
             latitude_origin = -90 if case.name.endswith("-south") else 90
             projection_parameters += f" +lat_0={latitude_origin} +k_0=0.994"
             source_crs = f"+proj=longlat +a={physical_scale:.17g} +rf=298.257223563 +type=crs"
+        elif case.family == "merc":
+            if case.name.endswith("variant-b"):
+                projection_parameters += " +lat_ts=33"
+            else:
+                projection_parameters += " +k=0.87"
+            if "ellipsoidal" in case.name:
+                source_crs = f"+proj=longlat +a={physical_scale:.17g} +rf=298.257223563 +type=crs"
         earth = (
             f"+a={physical_scale:.17g} +rf=298.257223563"
-            if case.family == "stere"
+            if case.family in {"merc", "stere"} and "ellipsoidal" in case.name
             else f"+R={physical_scale:.17g}"
         )
         target_crs = f"{projection_parameters} {earth} +units=m +type=crs"
-        if case.name == "ortho-inverse" or case.family in {"gnom", "stere"}:
+        if (
+            case.name == "ortho-inverse"
+            or case.family in {"gnom", "stere"}
+            or (case.family == "merc" and case.qualification.direction == "inverse")
+        ):
             transformer = Transformer.from_crs(target_crs, source_crs, always_xy=True)
             first_host = (
                 np.asarray([0.1, -0.3, 0.7, 0.0, np.inf, np.nan], dtype=np.float64) * physical_scale
@@ -1844,6 +2228,176 @@ def _stere_inverse_e_guard_behavior(
     }
 
 
+def _merc_parameter_guard_behavior(
+    cp: Any,
+    case: BenchmarkCase,
+    precision: str,
+) -> dict[str, Any]:
+    """Exercise Mercator setup and derived-conditioning fallbacks publicly."""
+    if case.family != "merc":
+        return {"required": False, "qualification_pass": True, "probes": []}
+
+    pipeline = case.transformer._pipeline_for_direction(case.direction)
+    original = pipeline.computed
+    n = 256
+    first = cp.resize(case.input_x, n)
+    second = cp.resize(case.input_y, n)
+    probes = []
+
+    def execute(input_first, input_second) -> dict[str, Any]:
+        outputs = {}
+        for policy in ("native", "accelerated"):
+            out_x = cp.empty(input_first.size, dtype=cp.float64)
+            out_y = cp.empty(input_second.size, dtype=cp.float64)
+            case.transformer.transform_buffers(
+                input_first,
+                input_second,
+                direction=case.direction,
+                out_x=out_x,
+                out_y=out_y,
+                precision=precision,
+                transcendentals=policy,
+            )
+            outputs[policy] = (cp.asnumpy(out_x), cp.asnumpy(out_y))
+        bitwise_native = all(
+            np.array_equal(actual.view(np.uint64), expected.view(np.uint64))
+            for actual, expected in zip(outputs["accelerated"], outputs["native"], strict=True)
+        )
+        error = _coordinate_error(
+            *outputs["accelerated"],
+            *outputs["native"],
+            geographic=case.output_is_geographic,
+            geographic_scale_m=case.geographic_scale_m,
+        )
+        return {"bitwise_native_outputs": bitwise_native, "error_vs_native_m": error}
+
+    if case.qualification.direction == "forward":
+        # Deterministic EPSG:3395 witness: the product-polynomial result is one
+        # binary64 ULP from the native pow expression at this polar latitude.
+        hot_first = cp.full(32, 23.5, dtype=cp.float64)
+        hot_second = cp.full(32, -89.35820071200712, dtype=cp.float64)
+    else:
+        # Deterministic inverse witness retained as a homogeneous warp so the
+        # warp-atomic guard cannot make branch evidence input-order dependent.
+        hot_first = cp.full(32, 11_478_839.31124818, dtype=cp.float64)
+        hot_second = cp.full(32, 4_691_815.763041037, dtype=cp.float64)
+    hot_probe = execute(hot_first, hot_second)
+    hot_probe["nonvacuous_pass"] = (
+        not hot_probe["bitwise_native_outputs"] if "ellipsoidal" in case.name else True
+    )
+
+    coordinate_fallback_probes = []
+    hot_first = float(case.host_x[min(2, case.host_x.size - 1)])
+    hot_second = float(case.host_y[min(2, case.host_y.size - 1)])
+    for component in (0, 1):
+        for label, value in (
+            ("nan", math.nan),
+            ("positive_inf", math.inf),
+            ("negative_inf", -math.inf),
+        ):
+            input_first = cp.full(32, hot_first, dtype=cp.float64)
+            input_second = cp.full(32, hot_second, dtype=cp.float64)
+            target = input_first if component == 0 else input_second
+            target.fill(value)
+            homogeneous = execute(input_first, input_second)
+            coordinate_fallback_probes.append(
+                {
+                    "name": f"component_{component}_{label}_homogeneous",
+                    **homogeneous,
+                }
+            )
+
+            input_first.fill(hot_first)
+            input_second.fill(hot_second)
+            target = input_first if component == 0 else input_second
+            target[0] = value
+            mixed = execute(input_first, input_second)
+            coordinate_fallback_probes.append(
+                {"name": f"component_{component}_{label}_mixed", **mixed}
+            )
+    mutations: list[tuple[str, dict[str, float]]] = [
+        ("eccentricity_nextabove", {"e": math.nextafter(0.1, math.inf)}),
+        (
+            "scale_nextabove",
+            {"a": math.nextafter(PROJECTION_FIXED_Q62_MAX_SCALE_M, math.inf)},
+        ),
+        ("nonfinite_central_meridian", {"lam0": math.inf}),
+        ("nonfinite_x_offset", {"x0": math.inf}),
+        ("nonfinite_y_offset", {"y0": math.nan}),
+        ("nonfinite_x_unit", {"x_unit_to_m": math.inf}),
+        ("zero_y_unit", {"y_unit_to_m": 0.0}),
+    ]
+    if case.qualification.direction == "forward":
+        mutations.extend(
+            [
+                ("scale_factor_nextabove", {"k0": math.nextafter(1.0, math.inf)}),
+            ]
+        )
+    else:
+        mutations.extend(
+            [
+                ("tiny_scale_factor_overflow", {"k0": math.ulp(0.0)}),
+                ("nonfinite_series_coefficient", {"conformal_to_geodetic": (math.nan,) * 6}),
+            ]
+        )
+
+    try:
+        for label, mutation in mutations:
+            pipeline.computed = {**original, **mutation}
+            result = execute(first, second)
+            probes.append(
+                {
+                    "name": label,
+                    "mutated_fields": sorted(mutation),
+                    **result,
+                }
+            )
+    finally:
+        pipeline.computed = original
+
+    if case.qualification.direction == "forward":
+        # Raw longitude and lam0 are both finite, but their subtraction after
+        # degree-to-radian conversion overflows. This pins the derived-value
+        # guard independently of the setup guard.
+        pipeline.computed = {**original, "lam0": np.finfo(np.float64).max}
+        overflow_first = cp.full(32, -np.finfo(np.float64).max, dtype=cp.float64)
+        overflow_second = cp.full(32, 45.0, dtype=cp.float64)
+        try:
+            result = execute(overflow_first, overflow_second)
+            probes.append(
+                {
+                    "name": "derived_longitude_overflow",
+                    "mutated_fields": ["lam0"],
+                    **result,
+                }
+            )
+        finally:
+            pipeline.computed = original
+
+    return {
+        "required": True,
+        "hot_probe": hot_probe,
+        "coordinate_fallback_probes": coordinate_fallback_probes,
+        "probes": probes,
+        "qualification_pass": (
+            hot_probe["nonvacuous_pass"]
+            and hot_probe["error_vs_native_m"]["max_m"] <= case.qualification.coordinate_contract_m
+            and all(probe["bitwise_native_outputs"] for probe in coordinate_fallback_probes)
+            and all(probe["bitwise_native_outputs"] for probe in probes)
+        ),
+    }
+
+
+def _parameter_guard_behavior(
+    cp: Any,
+    case: BenchmarkCase,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    if case.family == "merc":
+        return _merc_parameter_guard_behavior(cp, case, args.precision)
+    return _stere_inverse_e_guard_behavior(cp, case, args)
+
+
 def _run_case(cp: Any, case: BenchmarkCase, args: argparse.Namespace) -> dict[str, Any]:
     outputs = {
         policy: (
@@ -1939,7 +2493,7 @@ def _run_case(cp: Any, case: BenchmarkCase, args: argparse.Namespace) -> dict[st
     }
     edge_error_vs_native = _edge_accuracy(cp, case, args.precision)
     scale_guard = _scale_guard_behavior(cp, case, args.precision)
-    parameter_guard = _stere_inverse_e_guard_behavior(cp, case, args)
+    parameter_guard = _parameter_guard_behavior(cp, case, args)
     kernel_resources = _kernel_resources(cp, case)
     fallback_sweep = _guarded_inverse_fallback_sweep(cp, case, args)
 
@@ -2020,6 +2574,8 @@ def _run_case(cp: Any, case: BenchmarkCase, args: argparse.Namespace) -> dict[st
         and edge_error_vs_native["nonfinite_match"],
         "scale_guard_native_behavior_pass": scale_guard["qualification_pass"],
         "parameter_guard_native_behavior_pass": parameter_guard["qualification_pass"],
+        "fallback_sweep_qualification_pass": not fallback_sweep.get("required", False)
+        or bool(fallback_sweep.get("qualification_pass", False)),
         "no_pyproj_regression": accelerated_pyproj_error is not None
         and native_pyproj_error is not None
         and accelerated_pyproj_error <= native_pyproj_error + coordinate_contract_m
@@ -2045,6 +2601,7 @@ def _run_case(cp: Any, case: BenchmarkCase, args: argparse.Namespace) -> dict[st
         "edge_coordinate_contract_pass",
         "scale_guard_native_behavior_pass",
         "parameter_guard_native_behavior_pass",
+        "fallback_sweep_qualification_pass",
         "no_pyproj_regression",
     )
     gates["qualification_pass"] = all(bool(gates[name]) for name in required_gate_names)
@@ -2231,7 +2788,15 @@ def _run_workload_grid(
 
                 launches[policy] = launch
 
-            timing = _time_synchronized_wall_interleaved(
+            device_timing, _, _ = _time_interleaved(
+                cp,
+                launches,
+                n=n,
+                warmup=args.warmup,
+                iterations=args.iterations,
+                repeats=args.repeats,
+            )
+            wall_timing = _time_synchronized_wall_interleaved(
                 cp,
                 launches,
                 n=n,
@@ -2257,8 +2822,18 @@ def _run_workload_grid(
                 if qualification.auto_enabled and not below_crossover
                 else NATIVE_LIBDEVICE
             )
-            auto_speedup = timing["auto"]["speedup_vs_native"]
-            auto_repeat_speedups = timing["auto"]["repeat_speedups_vs_native"]
+            auto_wall_speedup = wall_timing["auto"]["speedup_vs_native"]
+            auto_wall_repeat_speedups = wall_timing["auto"]["repeat_speedups_vs_native"]
+            auto_device_speedup = device_timing["auto"]["speedup_vs_native"]
+            auto_device_repeat_speedups = device_timing["auto"]["repeat_speedups_vs_native"]
+            accelerated_wall = wall_timing["accelerated"]
+            accelerated_device = device_timing["accelerated"]
+            explicit_performance_required = (
+                qualification.auto_enabled and not below_crossover
+            ) or (
+                qualification.explicit_performance_min_elements is not None
+                and n >= qualification.explicit_performance_min_elements
+            )
             gates = {
                 "explicit_accelerated_override_pass": strategies["accelerated"][
                     "implementation_ids"
@@ -2267,20 +2842,43 @@ def _run_workload_grid(
                 "size_aware_auto_resolution_pass": strategies["auto"]["implementation_ids"]
                 == [expected_auto_id],
                 # Identical native execution can jitter around 1.0 at tiny N.
-                # Bound aggregate noise to 2% and every repeat to 5%.
-                "small_auto_no_wall_regression_pass": (
+                # Bound synchronized-wall aggregate noise to 2% and every
+                # wall/device repeat to 5%. CUDA-event aggregate medians at
+                # ~0.03 ms are quantized too coarsely for a separate 2% gate.
+                "small_auto_native_identity_noise_pass": (
                     qualification.auto_enabled and not below_crossover
                 )
-                or (
-                    auto_speedup >= 0.98
-                    and all(speedup >= 0.95 for speedup in auto_repeat_speedups)
+                or _native_identity_noise_pass(
+                    auto_implementation_ids=strategies["auto"]["implementation_ids"],
+                    native_implementation_ids=strategies["native"]["implementation_ids"],
+                    wall_speedup=auto_wall_speedup,
+                    wall_repeat_speedups=auto_wall_repeat_speedups,
+                    device_repeat_speedups=auto_device_repeat_speedups,
                 ),
                 "qualified_auto_wall_median_pass": not qualification.auto_enabled
                 or below_crossover
-                or auto_speedup >= 1.05,
+                or auto_wall_speedup >= 1.05,
                 "qualified_auto_wall_three_repeat_pass": not qualification.auto_enabled
                 or below_crossover
-                or all(speedup >= 1.05 for speedup in auto_repeat_speedups),
+                or all(speedup >= 1.05 for speedup in auto_wall_repeat_speedups),
+                "qualified_auto_device_median_pass": not qualification.auto_enabled
+                or below_crossover
+                or auto_device_speedup >= 1.05,
+                "qualified_auto_device_three_repeat_pass": not qualification.auto_enabled
+                or below_crossover
+                or all(speedup >= 1.05 for speedup in auto_device_repeat_speedups),
+                "qualified_explicit_wall_median_pass": not explicit_performance_required
+                or accelerated_wall["speedup_vs_native"] >= 1.05,
+                "qualified_explicit_wall_three_repeat_pass": not explicit_performance_required
+                or all(
+                    speedup >= 1.05 for speedup in accelerated_wall["repeat_speedups_vs_native"]
+                ),
+                "qualified_explicit_device_median_pass": not explicit_performance_required
+                or accelerated_device["speedup_vs_native"] >= 1.05,
+                "qualified_explicit_device_three_repeat_pass": not explicit_performance_required
+                or all(
+                    speedup >= 1.05 for speedup in accelerated_device["repeat_speedups_vs_native"]
+                ),
             }
             gates["qualification_pass"] = all(gates.values())
             rows.append(
@@ -2293,9 +2891,11 @@ def _run_workload_grid(
                     "threshold_boundary": qualification.auto_enabled
                     and n in {min_elements - 1, min_elements},
                     "auto_enabled": qualification.auto_enabled,
+                    "explicit_performance_required": explicit_performance_required,
                     "below_crossover": below_crossover,
                     "strategies": strategies,
-                    "wall_timing": timing,
+                    "device_timing": device_timing,
+                    "wall_timing": wall_timing,
                     "gates": gates,
                 }
             )
@@ -2394,7 +2994,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     cp.cuda.Device(args.device).use()
     cp.cuda.Device(args.device).synchronize()
-    selected_cases = CASES if args.case == "all" else (args.case,)
+    selected_cases = CASES if args.case == "all" else CASE_GROUPS.get(args.case, (args.case,))
     results = [
         _run_case(cp, _prepare_case(cp, name, args.n, args.seed + index), args)
         for index, name in enumerate(selected_cases)
@@ -2440,7 +3040,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--case", choices=("all", *CASES), default="all")
+    parser.add_argument("--case", choices=("all", *CASE_GROUPS, *CASES), default="all")
     parser.add_argument("--n", type=int, default=1_000_000, help="coordinates per case")
     parser.add_argument("--warmup", type=int, default=10, help="interleaved warmup rounds")
     parser.add_argument("--iterations", type=int, default=50, help="samples per repeat/policy")
@@ -2479,7 +3079,11 @@ def main() -> None:
         parser.error(
             "n, iterations, repeats, and oracle-n must be positive; warmup must be non-negative"
         )
-    if args.enforce_gates and not set(DEFAULT_WORKLOAD_SIZES).issubset(args.workload_sizes):
+    if (
+        args.enforce_gates
+        and args.case != "merc"
+        and not set(DEFAULT_WORKLOAD_SIZES).issubset(args.workload_sizes)
+    ):
         parser.error(
             "--enforce-gates requires every default workload size from "
             f"{DEFAULT_WORKLOAD_SIZES[0]} to {DEFAULT_WORKLOAD_SIZES[-1]}"
@@ -2500,7 +3104,9 @@ def main() -> None:
         probe["gates"]["qualification_pass"] for probe in results["topology_probes"]
     ):
         raise SystemExit("One or more CUDA topology qualification gates failed")
-    requires_workload_grid = args.case == "all" or args.case in WORKLOAD_GRID_CASES
+    requires_workload_grid = (
+        args.case == "all" or args.case in CASE_GROUPS or args.case in WORKLOAD_GRID_CASES
+    )
     if args.enforce_gates and requires_workload_grid and not results["workload_grid"]:
         raise SystemExit("The workload-size qualification grid is required by --enforce-gates")
     if args.enforce_gates and not all(

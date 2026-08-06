@@ -104,20 +104,26 @@ the transform and GPU are supported, and explicitly falls back to native math
 otherwise. Automatic acceleration currently covers bounded Helmert, forward
 UTM, spherical-sinusoidal-forward, orthographic-forward, and spherical-equatorial
 orthographic-inverse, GEOS-forward (sphere/ellipsoid and sweep x/y), and
-spherical-polar LAEA-forward, and ellipsoidal Polar Stereographic inverse
+spherical-polar LAEA-forward, ellipsoidal Polar Stereographic inverse,
+spherical regular-Mercator forward, and regular-Mercator inverse
 operations on validated Ada `sm_89` consumer GPUs
 above their measured workload-size crossovers. GEOS forward starts at 2,097,152
-coordinates, spherical-polar LAEA forward at 1,048,576, and Polar
-Stereographic inverse at 1,000,000; the canonical policy
-matrix lists every threshold. Hopper and unmeasured devices remain native. A selected
-accelerated kernel may still take its guarded native branch for individual
-out-of-domain coordinates or a uniformly unsupported physical scale. See the
+coordinates, spherical-polar LAEA forward at 1,048,576, Polar Stereographic
+inverse at 1,000,000, spherical Mercator forward at 262,144, and Mercator inverse at
+65,536; the canonical policy matrix lists every threshold. Hopper and
+unmeasured devices remain native. A selected
+accelerated kernel may still take its warp-atomic native branch when any lane
+is out of domain or the physical scale is unsupported. See the
 [transcendental policy](https://jarmak-personal.github.io/vibeProj/user/transcendentals.html).
 
 Spherical Gnomonic inverse also has an Ada-qualified bounded reframe for expert
 `transcendentals="accelerated"` opt-in. It is intentionally excluded from `"auto"`:
 mixed in/out-of-guard radius distributions can regress, and the host planner cannot
 inspect coordinate values before dispatch.
+
+Ellipsoidal regular-Mercator forward is likewise an explicit accelerated
+option. Its polar cap falls back exactly to native math, but mixed polar-cap
+workloads can regress, so automatic policy remains native for that geometry.
 
 ### Cross-datum transforms (Helmert)
 

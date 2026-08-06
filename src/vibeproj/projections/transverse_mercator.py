@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
+from vibeproj._conformal import conformal_to_geodetic_coefficients
 from vibeproj.projections import register
 from vibeproj.projections.base import Projection
 
@@ -110,35 +111,25 @@ class TransverseMercator(Projection):
         np_ = n  # running power of n
 
         # Coefficients: Gaussian -> Geodetic (cgb) and Geodetic -> Gaussian (cbg)
-        cgb = [0.0] * ETMERC_ORDER
+        cgb = list(conformal_to_geodetic_coefficients(n))
         cbg = [0.0] * ETMERC_ORDER
 
-        cgb[0] = n * (
-            2 + n * (-2 / 3.0 + n * (-2 + n * (116 / 45.0 + n * (26 / 45.0 + n * (-2854 / 675.0)))))
-        )
         cbg[0] = n * (
             -2
             + n
             * (2 / 3.0 + n * (4 / 3.0 + n * (-82 / 45.0 + n * (32 / 45.0 + n * (4642 / 4725.0)))))
         )
         np_ *= n
-        cgb[1] = np_ * (
-            7 / 3.0 + n * (-8 / 5.0 + n * (-227 / 45.0 + n * (2704 / 315.0 + n * (2323 / 945.0))))
-        )
         cbg[1] = np_ * (
             5 / 3.0 + n * (-16 / 15.0 + n * (-13 / 9.0 + n * (904 / 315.0 + n * (-1522 / 945.0))))
         )
         np_ *= n
-        cgb[2] = np_ * (56 / 15.0 + n * (-136 / 35.0 + n * (-1262 / 105.0 + n * (73814 / 2835.0))))
         cbg[2] = np_ * (-26 / 15.0 + n * (34 / 21.0 + n * (8 / 5.0 + n * (-12686 / 2835.0))))
         np_ *= n
-        cgb[3] = np_ * (4279 / 630.0 + n * (-332 / 35.0 + n * (-399572 / 14175.0)))
         cbg[3] = np_ * (1237 / 630.0 + n * (-12 / 5.0 + n * (-24832 / 14175.0)))
         np_ *= n
-        cgb[4] = np_ * (4174 / 315.0 + n * (-144838 / 6237.0))
         cbg[4] = np_ * (-734 / 315.0 + n * (109598 / 31185.0))
         np_ *= n
-        cgb[5] = np_ * (601676 / 22275.0)
         cbg[5] = np_ * (444337 / 155925.0)
 
         # Normalized meridian quadrant

@@ -10,6 +10,7 @@ import math
 import warnings
 from typing import TYPE_CHECKING
 
+from vibeproj._conformal import conformal_to_geodetic_coefficients
 from vibeproj.projections import register
 from vibeproj.exceptions import CRSResolutionError
 from vibeproj.projections.base import Projection
@@ -47,6 +48,7 @@ class Mercator(Projection):
             "es": e.es,
             "k0": k0,
             "mercator_variant": variant,
+            "conformal_to_geodetic": conformal_to_geodetic_coefficients(e.n),
             "lam0": math.radians(params.lon_0),
             "x0": params.x_0,
             "y0": params.y_0,

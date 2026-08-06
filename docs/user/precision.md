@@ -42,7 +42,10 @@ Helmert, forward UTM, spherical-sinusoidal-forward, and orthographic-forward
 transcendentals with table-free Q1.62 trig. Forward UTM also uses bounded
 fp64-accurate correction polynomials for `atan2` and `asinh`. Sinusoidal and
 orthographic remain fp64-only and use native math above the qualified
-6,400,000 m physical scale. Datacenter, unknown, and future GPUs conservatively
+6,400,000 m physical scale. Regular Mercator automatically uses an exact
+spherical-forward specialization and a shared conformal-series inverse path.
+Its ellipsoidal product-polynomial forward path is explicit-only because mixed
+polar-cap fallback can regress. Coordinate arithmetic remains fp64. Datacenter, unknown, and future GPUs conservatively
 use native fp64 until independently benchmarked.
 
 There are two distinct kinds of fallback. The host resolver reports

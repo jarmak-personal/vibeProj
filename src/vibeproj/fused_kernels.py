@@ -22,6 +22,9 @@ from vibeproj.transcendentals import (
     GNOM_INVERSE_GUARDED_RSQRT_REFRAME,
     HELMERT_FIXED_Q62,
     LAEA_FORWARD_POLAR_FIXED_Q62,
+    MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY,
+    MERC_FORWARD_SPHERICAL_PRODUCT_POLY,
+    MERC_INVERSE_EXP_SERIES,
     NATIVE_LIBDEVICE,
     ORTHO_FORWARD_FIXED_Q62,
     ORTHO_INVERSE_GUARDED_REFRAME,
@@ -2352,6 +2355,9 @@ _PROJECTION_IMPLEMENTATION_TARGETS = {
     ORTHO_INVERSE_GUARDED_REFRAME: ("ortho", "inverse", "float64"),
     GNOM_INVERSE_GUARDED_RSQRT_REFRAME: ("gnom", "inverse", "float64"),
     STERE_INVERSE_FIXED_Q62: ("stere", "inverse", "float64"),
+    MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY: ("merc", "forward", "float64"),
+    MERC_FORWARD_SPHERICAL_PRODUCT_POLY: ("merc", "forward", "float64"),
+    MERC_INVERSE_EXP_SERIES: ("merc", "inverse", "float64"),
 }
 
 _GEOS_FORWARD_FIXED_Q62_FALLBACK_HELPERS = r"""
@@ -2550,6 +2556,119 @@ _GNOM_INVERSE_NATIVE_BODY = """\
         }
     }"""
 
+_MERC_FORWARD_NATIVE_BODY = """\
+    if (!isnan(phi)) {{
+        const {real_t} max_lat = ({real_t})1.5707788735023767;
+        phi = fmin(fmax(phi, -max_lat), max_lat);
+    }}
+    {real_t} e_sin_phi = e * sin(phi);
+    {real_t} y_proj = k0 * log(tan(({real_t})0.25 * {pi} + ({real_t})0.5 * phi)
+                     * pow((({real_t})1.0 - e_sin_phi) / (({real_t})1.0 + e_sin_phi), ({real_t})0.5 * e));"""
+
+_MERC_INVERSE_NATIVE_BODY = """\
+    {real_t} lam = cx / k0;
+    cy /= k0;
+    {real_t} phi = ({real_t})2.0 * atan(exp(cy)) - ({real_t})0.5 * {pi};
+    for (int i = 0; i < 15; i++) {{
+        {real_t} e_sin = e * sin(phi);
+        {real_t} phi_new = ({real_t})2.0 * atan(exp(cy) * pow((({real_t})1.0 + e_sin) / (({real_t})1.0 - e_sin), ({real_t})0.5 * e)) - ({real_t})0.5 * {pi};
+        if (fabs(phi_new - phi) < {tol}) {{ phi = phi_new; break; }}
+        phi = phi_new;
+    }}"""
+
+_MERC_GUARDED_DEVICE_FNS = r"""
+#define VP_MERC_PI_D 3.141592653589793238462643383279502884
+#define VP_MERC_FORWARD_MAX_HOT_LAT_D 1.5690509975429023
+
+__device__ __forceinline__ bool vp_merc_setup_is_qualified(
+    double e,
+    double k0,
+    double lam0,
+    double a,
+    double x0,
+    double y0,
+    double x_unit_to_m,
+    double y_unit_to_m,
+    bool forward
+) {
+    return isfinite(e) && e >= 0.0 && e <= 0.1
+        && isfinite(k0) && k0 > 0.0 && (!forward || k0 <= 1.0)
+        && isfinite(lam0) && vp_projection_fixed_scale_is_qualified(a)
+        && isfinite(x0) && isfinite(y0)
+        && isfinite(x_unit_to_m) && x_unit_to_m != 0.0
+        && isfinite(y_unit_to_m) && y_unit_to_m != 0.0;
+}
+
+__device__ __forceinline__ double vp_merc_exp_negative_small(double value) {
+    // exp(-value), where value=e*atanh(e*sin(phi)) is at most 0.01004
+    // for the guarded eccentricity interval. The degree-eight remainder is
+    // below 3e-23 before floating-point rounding.
+    double polynomial = 1.0 / 40320.0;
+    polynomial = fma(-value, polynomial, 1.0 / 5040.0);
+    polynomial = fma(-value, polynomial, 1.0 / 720.0);
+    polynomial = fma(-value, polynomial, 1.0 / 120.0);
+    polynomial = fma(-value, polynomial, 1.0 / 24.0);
+    polynomial = fma(-value, polynomial, 1.0 / 6.0);
+    polynomial = fma(-value, polynomial, 0.5);
+    polynomial = fma(-value, polynomial, 1.0);
+    return fma(-value, polynomial, 1.0);
+}
+
+__device__ __forceinline__ double vp_conformal_to_geodetic_series(
+    double angle,
+    double p0,
+    double p1,
+    double p2,
+    double p3,
+    double p4,
+    double p5
+) {
+    double sin_two, cos_two;
+    sincos(2.0 * angle, &sin_two, &cos_two);
+    const double two_cos = 2.0 * cos_two;
+    double h2 = 0.0, h1 = p5, h;
+    h = fma(two_cos, h1, p4 - h2); h2 = h1; h1 = h;
+    h = fma(two_cos, h1, p3 - h2); h2 = h1; h1 = h;
+    h = fma(two_cos, h1, p2 - h2); h2 = h1; h1 = h;
+    h = fma(two_cos, h1, p1 - h2); h2 = h1; h1 = h;
+    h = fma(two_cos, h1, p0 - h2);
+    return fma(h, sin_two, angle);
+}
+
+__device__ __noinline__ double vp_merc_forward_native_cold(
+    double phi,
+    double e,
+    double k0
+) {
+    if (!isnan(phi)) {
+        const double max_lat = 1.5707788735023767;
+        phi = fmin(fmax(phi, -max_lat), max_lat);
+    }
+    const double e_sin_phi = e * sin(phi);
+    return k0 * log(tan(0.25 * VP_MERC_PI_D + 0.5 * phi)
+        * pow((1.0 - e_sin_phi) / (1.0 + e_sin_phi), 0.5 * e));
+}
+
+__device__ __noinline__ double vp_merc_inverse_native_cold(
+    double cy,
+    double e
+) {
+    double phi = 2.0 * atan(exp(cy)) - 0.5 * VP_MERC_PI_D;
+    for (int i = 0; i < 15; ++i) {
+        const double e_sin = e * sin(phi);
+        const double phi_new = 2.0 * atan(exp(cy)
+            * pow((1.0 + e_sin) / (1.0 - e_sin), 0.5 * e))
+            - 0.5 * VP_MERC_PI_D;
+        if (fabs(phi_new - phi) < 1e-14) {
+            phi = phi_new;
+            break;
+        }
+        phi = phi_new;
+    }
+    return phi;
+}
+"""
+
 _PROJECTION_GUARDED_NATIVE_FALLBACK_HELPERS = r"""
 // Reusable radial normalization primitive for inverse-projection reframes.
 // The caller owns downstream conditioning and physical-scale guards.
@@ -2626,7 +2745,86 @@ __device__ __noinline__ void vp_gnom_inverse_native_cold(
 }
 """
 
+_MERC_FORWARD_PRODUCT_BODY = """\
+    double y_proj;
+    const bool lane_qualified = isfinite(d_lat) && isfinite(d_lon)
+        && isfinite(phi){latitude_guard}
+        && isfinite(lam)
+        && {geometry_guard}
+        && vp_merc_setup_is_qualified(
+            e, k0, lam0, a, x0, y0, x_unit_to_m, y_unit_to_m, true
+        );
+    const bool warp_uses_native = __any_sync(__activemask(), !lane_qualified);
+    if (warp_uses_native) {
+        y_proj = vp_merc_forward_native_cold(phi, e, k0);
+    } else {
+        const double max_lat = 1.5707788735023767;
+        phi = fmin(fmax(phi, -max_lat), max_lat);
+        const double sin_phi = sin(phi);
+        const double correction = e * atanh(e * sin_phi);
+        const double spherical = tan(0.25 * VP_MERC_PI_D + 0.5 * phi);
+        y_proj = k0 * log(
+            spherical * vp_merc_exp_negative_small(correction)
+        );
+    }"""
+
+
+def _merc_forward_product_rewrite(
+    function_name: str, *, bound_polar_cap: bool, geometry_guard: str
+) -> tuple[str, tuple[tuple[str, str], ...]]:
+    latitude_guard = " && fabs(phi) <= VP_MERC_FORWARD_MAX_HOT_LAT_D" if bound_polar_cap else ""
+    return (
+        function_name,
+        (
+            (
+                _MERC_FORWARD_NATIVE_BODY,
+                _MERC_FORWARD_PRODUCT_BODY.replace("{latitude_guard}", latitude_guard).replace(
+                    "{geometry_guard}", geometry_guard
+                ),
+            ),
+        ),
+    )
+
+
 _PROJECTION_GUARDED_REWRITES = {
+    MERC_FORWARD_SPHERICAL_PRODUCT_POLY: _merc_forward_product_rewrite(
+        "merc_forward_spherical_product_poly",
+        bound_polar_cap=False,
+        geometry_guard="e == 0.0",
+    ),
+    MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY: _merc_forward_product_rewrite(
+        "merc_forward_ellipsoidal_product_poly",
+        bound_polar_cap=True,
+        geometry_guard="e > 0.0",
+    ),
+    MERC_INVERSE_EXP_SERIES: (
+        "merc_inverse_exp_series",
+        (
+            (
+                _MERC_INVERSE_NATIVE_BODY,
+                """\
+    double lam = cx / k0;
+    cy /= k0;
+    double phi;
+    const bool lane_qualified = isfinite(d_arg1) && isfinite(d_arg2)
+        && isfinite(cx) && isfinite(cy) && isfinite(lam)
+        && isfinite(cgb0) && isfinite(cgb1) && isfinite(cgb2)
+        && isfinite(cgb3) && isfinite(cgb4) && isfinite(cgb5)
+        && vp_merc_setup_is_qualified(
+            e, k0, lam0, a, x0, y0, x_unit_to_m, y_unit_to_m, false
+        );
+    const bool warp_uses_native = __any_sync(__activemask(), !lane_qualified);
+    if (warp_uses_native) {
+        phi = vp_merc_inverse_native_cold(cy, e);
+    } else {
+        const double chi = 2.0 * atan(exp(cy)) - 0.5 * VP_MERC_PI_D;
+        phi = vp_conformal_to_geodetic_series(
+            chi, cgb0, cgb1, cgb2, cgb3, cgb4, cgb5
+        );
+    }""",
+            ),
+        ),
+    ),
     ORTHO_INVERSE_GUARDED_REFRAME: (
         "ortho_inverse_guarded_reframe",
         (
@@ -2745,23 +2943,58 @@ def _build_projection_guarded_source(
             tol=_TOL_LITERALS["float64"],
         )
     )
+    if implementation_id == MERC_INVERSE_EXP_SERIES:
+        native_parameters = "    double e, double k0, double lam0, double a, double x0, double y0,"
+        accelerated_parameters = (
+            "    double e, double k0,\n"
+            "    double cgb0, double cgb1, double cgb2,\n"
+            "    double cgb3, double cgb4, double cgb5,\n"
+            "    double lam0, double a, double x0, double y0,"
+        )
+        if source.count(native_parameters) != 1:
+            raise RuntimeError(
+                f"Expected one Mercator inverse parameter site while building {implementation_id!r}"
+            )
+        source = source.replace(native_parameters, accelerated_parameters)
     if source.count(native_func_name) != 1:
         raise RuntimeError(
             f"Expected one {native_func_name!r} kernel while building {implementation_id!r}"
         )
     source = source.replace(native_func_name, function_name)
     for native_expression, accelerated_expression in replacements:
-        native_expression = native_expression.replace("{real_t}", "double")
+        if implementation_id in (
+            MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY,
+            MERC_FORWARD_SPHERICAL_PRODUCT_POLY,
+            MERC_INVERSE_EXP_SERIES,
+        ):
+            native_expression = native_expression.format(
+                real_t="double",
+                pi=_PI_LITERALS["float64"],
+                tol=_TOL_LITERALS["float64"],
+            )
+        else:
+            native_expression = native_expression.replace("{real_t}", "double")
         accelerated_expression = accelerated_expression.replace("{real_t}", "double")
         if source.count(native_expression) != 1:
             raise RuntimeError(
                 f"Expected one {native_expression!r} site while building {implementation_id!r}"
             )
         source = source.replace(native_expression, accelerated_expression)
+    implementation_helpers = (
+        _MERC_GUARDED_DEVICE_FNS
+        if implementation_id
+        in (
+            MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY,
+            MERC_FORWARD_SPHERICAL_PRODUCT_POLY,
+            MERC_INVERSE_EXP_SERIES,
+        )
+        else ""
+    )
     return (
         _NATIVE_PAIRED_SINCOS_DEVICE_FNS
         + _PROJECTION_SCALE_GUARD_DEVICE_FNS
         + _PROJECTION_GUARDED_NATIVE_FALLBACK_HELPERS
+        + implementation_helpers
         + source,
         function_name,
     )
@@ -3140,9 +3373,11 @@ def fused_transform(
             )
 
         elif projection_name == "merc":
+            params = [real_t(computed["e"]), real_t(computed["k0"])]
+            if direction == "inverse" and transcendental_impl == MERC_INVERSE_EXP_SERIES:
+                params.extend(real_t(value) for value in computed["conformal_to_geodetic"])
             args = _with_units(
-                real_t(computed["e"]),
-                real_t(computed["k0"]),
+                *params,
                 real_t(computed["lam0"]),
                 real_t(computed["a"]),
                 real_t(computed["x0"]),
