@@ -31,6 +31,7 @@ GEOS_FORWARD_FIXED_Q62 = "geos.forward.fixed_q62"
 LAEA_FORWARD_POLAR_FIXED_Q62 = "laea.forward.polar.fixed_q62"
 LCC_FORWARD_CONFORMAL_REFRAME = "lcc.forward.conformal_reframe"
 LCC_INVERSE_CONFORMAL_REFRAME = "lcc.inverse.conformal_reframe"
+KROVAK_INVERSE_GUARDED_LOG_RATIO = "krovak.inverse.guarded_log_ratio"
 MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY = "merc.forward.ellipsoidal.product_poly"
 MERC_FORWARD_SPHERICAL_PRODUCT_POLY = "merc.forward.spherical.product_poly"
 MERC_INVERSE_EXP_SERIES = "merc.inverse.exp_series"
@@ -46,6 +47,7 @@ GEOS_FORWARD_FIXED_Q62_MIN_ELEMENTS = 2_097_152
 LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS = 1_048_576
 LCC_FORWARD_CONFORMAL_REFRAME_MIN_ELEMENTS = 65_536
 LCC_INVERSE_CONFORMAL_REFRAME_MIN_ELEMENTS = 128
+KROVAK_INVERSE_GUARDED_LOG_RATIO_MIN_ELEMENTS = 0
 MERC_FORWARD_SPHERICAL_PRODUCT_POLY_MIN_ELEMENTS = 262_144
 MERC_INVERSE_EXP_SERIES_MIN_ELEMENTS = 65_536
 
@@ -55,6 +57,7 @@ _EXACT_DOMAIN_FAMILIES = frozenset(
         "geos",
         "gnom",
         "laea",
+        "krovak",
         "lcc",
         "merc",
         "ortho",
@@ -89,6 +92,11 @@ def _origin_mode(computed: dict) -> str:
     if math.isclose(latitude, 0.0, rel_tol=0.0, abs_tol=1e-10):
         return "equatorial"
     return "oblique"
+
+
+def _krovak_strategy_semantics(computed: dict) -> str:
+    """Return the immutable setup-time Krovak semantic classification."""
+    return str(computed.get("_strategy_krovak_semantics", "unspecified"))
 
 
 def projection_strategy_domain(projection: str, direction: str, computed: dict) -> str:
@@ -175,6 +183,10 @@ def projection_strategy_domain(projection: str, direction: str, computed: dict) 
             cone = "regular_cone" if abs(float(computed["n"])) >= 0.2 else "near_equator"
             return f"lcc.forward.{geometry}.{variant}.{cone}"
         return f"lcc.inverse.{geometry}.{variant}"
+    if projection == "krovak":
+        semantics = _krovak_strategy_semantics(computed)
+        suffix = geometry if semantics == geometry else f"{geometry}.{semantics}"
+        return f"krovak.{direction}.{suffix}"
     if projection == "webmerc":
         return f"webmerc.{direction}.{geometry}.pseudo"
     if projection == "laea":
@@ -265,6 +277,22 @@ def projection_strategy_domains(projection: str, direction: str) -> tuple[str, .
                 else:
                     domains.extend((prefix, f"{prefix}.invalid_setup"))
         return tuple(domains)
+    if projection == "krovak":
+        return tuple(
+            (
+                f"krovak.{direction}.{geometry}.{semantics}"
+                if semantics
+                else f"krovak.{direction}.{geometry}"
+            )
+            for geometry, semantics in (
+                ("ellipsoidal", "standard_bessel.regular"),
+                ("ellipsoidal", "standard_bessel.north_oriented"),
+                ("ellipsoidal", "custom"),
+                ("ellipsoidal", "invalid_setup"),
+                ("spherical", ""),
+                ("unspecified", ""),
+            )
+        )
     prefix = f"{projection}.{direction}"
     registered = {
         domain
@@ -747,6 +775,35 @@ _REGISTRY = (
                 "radius ratio, nonfinite coordinates/results, or setup failures use "
                 "the complete native expression. RTX 4090 maximum native-relative "
                 "horizontal error: 6.328 nm."
+            ),
+        ),
+        native_fallback=True,
+    ),
+    StrategyImplementation(
+        implementation_id=KROVAK_INVERSE_GUARDED_LOG_RATIO,
+        operation=TranscendentalOperation.PROJECTION,
+        family="qualified_krovak_inverse_standard_bessel",
+        supported_policies=("accelerated",),
+        supported_backends=("cuda",),
+        supported_compute_capabilities=((8, 9),),
+        min_fp32_to_fp64_ratio=16,
+        supported_compute_precisions=("auto", "fp64"),
+        min_elements=KROVAK_INVERSE_GUARDED_LOG_RATIO_MIN_ELEMENTS,
+        domains=(
+            "krovak.inverse.ellipsoidal.standard_bessel.regular",
+            "krovak.inverse.ellipsoidal.standard_bessel.north_oriented",
+        ),
+        accuracy=AccuracyContract(
+            reference=NATIVE_LIBDEVICE,
+            max_horizontal_error_m=1e-8,
+            notes=(
+                "Explicit-only standard-Bessel Krovak inverse guarded log-ratio. "
+                "The host setup domain requires the public regular or north-oriented "
+                "method, exact matching axis signs, finite nonzero signed units, finite "
+                "launch scalars, and the qualified Bessel and derived constants. Any "
+                "coordinate guard failure sends the complete warp through the exact "
+                "native expression. RTX 4090 research maximum native-relative "
+                "horizontal error: 7.12 nm. Automatic selection remains native."
             ),
         ),
         native_fallback=True,
@@ -1262,6 +1319,8 @@ __all__ = [
     "HELMERT_FIXED_Q62_MIN_ELEMENTS",
     "LAEA_FORWARD_POLAR_FIXED_Q62",
     "LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS",
+    "KROVAK_INVERSE_GUARDED_LOG_RATIO",
+    "KROVAK_INVERSE_GUARDED_LOG_RATIO_MIN_ELEMENTS",
     "LCC_FORWARD_CONFORMAL_REFRAME",
     "LCC_FORWARD_CONFORMAL_REFRAME_MIN_ELEMENTS",
     "LCC_INVERSE_CONFORMAL_REFRAME",

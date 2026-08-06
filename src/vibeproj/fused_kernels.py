@@ -21,6 +21,7 @@ from vibeproj.transcendentals import (
     GEOS_FORWARD_FIXED_Q62,
     GNOM_INVERSE_GUARDED_RSQRT_REFRAME,
     HELMERT_FIXED_Q62,
+    KROVAK_INVERSE_GUARDED_LOG_RATIO,
     LAEA_FORWARD_POLAR_FIXED_Q62,
     LCC_FORWARD_CONFORMAL_REFRAME,
     LCC_INVERSE_CONFORMAL_REFRAME,
@@ -2362,6 +2363,7 @@ _PROJECTION_IMPLEMENTATION_TARGETS = {
     ORTHO_FORWARD_FIXED_Q62: ("ortho", "forward", "float64"),
     ORTHO_INVERSE_GUARDED_REFRAME: ("ortho", "inverse", "float64"),
     GNOM_INVERSE_GUARDED_RSQRT_REFRAME: ("gnom", "inverse", "float64"),
+    KROVAK_INVERSE_GUARDED_LOG_RATIO: ("krovak", "inverse", "float64"),
     STERE_INVERSE_FIXED_Q62: ("stere", "inverse", "float64"),
     MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY: ("merc", "forward", "float64"),
     MERC_FORWARD_SPHERICAL_PRODUCT_POLY: ("merc", "forward", "float64"),
@@ -2604,6 +2606,39 @@ _MERC_INVERSE_NATIVE_BODY = """\
         phi = phi_new;
     }}"""
 
+_KROVAK_INVERSE_NATIVE_BODY = """\
+    // Undo North Orientated negation (cx, cy already normalised)
+    {real_t} r_norm = sqrt(cx * cx + cy * cy);
+    {real_t} theta = atan2(-cx, -cy);
+
+    // Inverse cone
+    {real_t} D = theta / nn;
+    {real_t} T = ({real_t})2.0 * atan(
+        pow(r0_norm / fmax(r_norm, ({real_t})1e-30), ({real_t})1.0 / nn) * tan_half_p
+    ) - ({real_t})0.5 * {pi};
+
+    // Inverse oblique
+    {real_t} sin_T, cos_T;
+    vp_native_sincos(T, &sin_T, &cos_T);
+    {real_t} sin_D, cos_D;
+    vp_native_sincos(D, &sin_D, &cos_D);
+    {real_t} U = asin(cos_ac * sin_T - sin_ac * cos_T * cos_D);
+    {real_t} V = asin(cos_T * sin_D / cos(U));
+
+    // Inverse Gaussian sphere: t = [tan(pi/4+U/2)/k]^(1/B)
+    {real_t} t = pow(tan(({real_t})0.25 * {pi} + U * ({real_t})0.5) / kk, ({real_t})1.0 / B);
+    {real_t} phi = ({real_t})2.0 * atan(t) - ({real_t})0.5 * {pi};
+    for (int i = 0; i < 15; i++) {{
+        {real_t} e_sin = e * sin(phi);
+        {real_t} phi_new = ({real_t})2.0 * atan(
+            t * pow((({real_t})1.0 + e_sin) / (({real_t})1.0 - e_sin), ({real_t})0.5 * e)
+        ) - ({real_t})0.5 * {pi};
+        if (fabs(phi_new - phi) < {tol}) {{ phi = phi_new; break; }}
+        phi = phi_new;
+    }}
+
+    {real_t} lam = -V / B;"""
+
 _SINU_INVERSE_NATIVE_BODY = """\
     {real_t} phi = cy;
     {real_t} lam;
@@ -2785,6 +2820,87 @@ __device__ __noinline__ double vp_merc_inverse_native_cold(
         phi = phi_new;
     }
     return phi;
+}
+"""
+
+_KROVAK_GUARDED_DEVICE_FNS = r"""
+#define VP_KROVAK_PI_D 3.141592653589793238462643383279502884
+#define VP_KROVAK_HALF_PI_D 1.570796326794896619231321691639751442
+#define VP_KROVAK_HOT_PHI_D 1.39626340159546366153895261479089017
+
+__device__ __forceinline__ bool vp_krovak_inverse_setup_is_qualified(
+    double e, double B, double kk, double nn,
+    double r0_norm, double tan_half_p, double sin_ac, double cos_ac,
+    double cgb0, double cgb1, double cgb2,
+    double cgb3, double cgb4, double cgb5, double log_k,
+    double lam0, double a, double x0, double y0,
+    double x_unit_to_m, double y_unit_to_m
+) {
+    return isfinite(e) && e > 0.0 && e <= 0.1
+        && isfinite(B) && B > 0.0
+        && isfinite(kk) && kk > 0.0
+        && isfinite(nn) && nn != 0.0
+        && isfinite(r0_norm) && r0_norm > 0.0
+        && isfinite(tan_half_p) && tan_half_p > 0.0
+        && isfinite(sin_ac) && isfinite(cos_ac)
+        && isfinite(cgb0) && isfinite(cgb1) && isfinite(cgb2)
+        && isfinite(cgb3) && isfinite(cgb4) && isfinite(cgb5)
+        && isfinite(log_k) && isfinite(lam0)
+        && vp_projection_fixed_scale_is_qualified(a)
+        && isfinite(x0) && isfinite(y0)
+        && isfinite(x_unit_to_m) && x_unit_to_m != 0.0
+        && isfinite(y_unit_to_m) && y_unit_to_m != 0.0;
+}
+
+__device__ __forceinline__ double vp_krovak_conformal_to_geodetic_series(
+    double angle,
+    double p0, double p1, double p2,
+    double p3, double p4, double p5
+) {
+    double sin_two, cos_two;
+    sincos(2.0 * angle, &sin_two, &cos_two);
+    const double two_cos = 2.0 * cos_two;
+    double h2 = 0.0, h1 = p5, h;
+    h = fma(two_cos, h1, p4 - h2); h2 = h1; h1 = h;
+    h = fma(two_cos, h1, p3 - h2); h2 = h1; h1 = h;
+    h = fma(two_cos, h1, p2 - h2); h2 = h1; h1 = h;
+    h = fma(two_cos, h1, p1 - h2); h2 = h1; h1 = h;
+    h = fma(two_cos, h1, p0 - h2);
+    return fma(h, sin_two, angle);
+}
+
+__device__ __noinline__ void vp_krovak_inverse_native_cold(
+    double cx, double cy,
+    double e, double B, double kk, double nn,
+    double r0_norm, double tan_half_p, double sin_ac, double cos_ac,
+    double* lam_out, double* phi_out
+) {
+    const double r_norm = sqrt(cx * cx + cy * cy);
+    const double theta = atan2(-cx, -cy);
+    const double D = theta / nn;
+    const double T = 2.0 * atan(
+        pow(r0_norm / fmax(r_norm, 1e-30), 1.0 / nn) * tan_half_p
+    ) - VP_KROVAK_HALF_PI_D;
+    double sin_T, cos_T;
+    sincos(T, &sin_T, &cos_T);
+    double sin_D, cos_D;
+    sincos(D, &sin_D, &cos_D);
+    const double U = asin(cos_ac * sin_T - sin_ac * cos_T * cos_D);
+    const double V = asin(cos_T * sin_D / cos(U));
+    const double t = pow(
+        tan(0.25 * VP_KROVAK_PI_D + U * 0.5) / kk, 1.0 / B
+    );
+    double phi = 2.0 * atan(t) - VP_KROVAK_HALF_PI_D;
+    for (int i = 0; i < 15; ++i) {
+        const double e_sin = e * sin(phi);
+        const double phi_new = 2.0 * atan(
+            t * pow((1.0 + e_sin) / (1.0 - e_sin), 0.5 * e)
+        ) - VP_KROVAK_HALF_PI_D;
+        if (fabs(phi_new - phi) < 1e-14) { phi = phi_new; break; }
+        phi = phi_new;
+    }
+    *lam_out = -V / B;
+    *phi_out = phi;
 }
 """
 
@@ -3251,6 +3367,72 @@ _PROJECTION_GUARDED_REWRITES = {
             ),
         ),
     ),
+    KROVAK_INVERSE_GUARDED_LOG_RATIO: (
+        "krovak_inverse_guarded_log_ratio",
+        (
+            (
+                _KROVAK_INVERSE_NATIVE_BODY,
+                """\
+    double lam, phi;
+    const bool setup_qualified = vp_krovak_inverse_setup_is_qualified(
+        e, B, kk, nn, r0_norm, tan_half_p, sin_ac, cos_ac,
+        cgb0, cgb1, cgb2, cgb3, cgb4, cgb5, log_k,
+        lam0, a, x0, y0, x_unit_to_m, y_unit_to_m
+    );
+    const double radius_squared = cx * cx + cy * cy;
+    const bool coordinate_prequalified = finite_input
+        && isfinite(radius_squared) && radius_squared > 0.0;
+    const bool prewarp_uses_native = __any_sync(
+        __activemask(), !(setup_qualified && coordinate_prequalified)
+    );
+    if (prewarp_uses_native) {
+        vp_krovak_inverse_native_cold(
+            cx, cy, e, B, kk, nn, r0_norm, tan_half_p, sin_ac, cos_ac,
+            &lam, &phi
+        );
+    } else {
+        const double r_norm = sqrt(cx * cx + cy * cy);
+        const double theta = atan2(-cx, -cy);
+        const double D = theta / nn;
+        const double cone_power = pow(
+            r0_norm / fmax(r_norm, 1e-30), 1.0 / nn
+        ) * tan_half_p;
+        const double T = 2.0 * atan(cone_power) - VP_KROVAK_HALF_PI_D;
+        double sin_T, cos_T;
+        sincos(T, &sin_T, &cos_T);
+        double sin_D, cos_D;
+        sincos(D, &sin_D, &cos_D);
+        const double U = asin(cos_ac * sin_T - sin_ac * cos_T * cos_D);
+        const double V = asin(cos_T * sin_D / cos(U));
+        const double sin_U = sin(U);
+        const double psi = (
+            0.5 * log((1.0 + sin_U) / (1.0 - sin_U)) - log_k
+        ) / B;
+        const double chi = asin(tanh(psi));
+        const double candidate_phi = vp_krovak_conformal_to_geodetic_series(
+            chi, cgb0, cgb1, cgb2, cgb3, cgb4, cgb5
+        );
+        const double candidate_lam = -V / B;
+        const bool candidate_qualified = isfinite(D) && isfinite(cone_power)
+            && cone_power > 0.0 && isfinite(U) && fabs(U) < VP_KROVAK_HALF_PI_D
+            && isfinite(V) && isfinite(candidate_lam)
+            && isfinite(candidate_phi) && fabs(candidate_phi) <= VP_KROVAK_HOT_PHI_D;
+        const bool candidate_warp_uses_native = __any_sync(
+            __activemask(), !candidate_qualified
+        );
+        if (candidate_warp_uses_native) {
+            vp_krovak_inverse_native_cold(
+                cx, cy, e, B, kk, nn, r0_norm, tan_half_p, sin_ac, cos_ac,
+                &lam, &phi
+            );
+        } else {
+            lam = candidate_lam;
+            phi = candidate_phi;
+        }
+    }""",
+            ),
+        ),
+    ),
     ORTHO_INVERSE_GUARDED_REFRAME: (
         "ortho_inverse_guarded_reframe",
         (
@@ -3391,6 +3573,24 @@ def _build_projection_guarded_source(
                 f"{implementation_id!r}"
             )
         source = source.replace(native_parameters, accelerated_parameters)
+    if implementation_id == KROVAK_INVERSE_GUARDED_LOG_RATIO:
+        native_parameters = (
+            "    double r0_norm, double tan_half_p,\n"
+            "    double sin_ac, double cos_ac,\n"
+            "    double lam0, double a, double x0, double y0,"
+        )
+        accelerated_parameters = (
+            "    double r0_norm, double tan_half_p,\n"
+            "    double sin_ac, double cos_ac,\n"
+            "    double cgb0, double cgb1, double cgb2,\n"
+            "    double cgb3, double cgb4, double cgb5, double log_k,\n"
+            "    double lam0, double a, double x0, double y0,"
+        )
+        if source.count(native_parameters) != 1:
+            raise RuntimeError(
+                f"Expected one Krovak inverse parameter site while building {implementation_id!r}"
+            )
+        source = source.replace(native_parameters, accelerated_parameters)
     if source.count(native_func_name) != 1:
         raise RuntimeError(
             f"Expected one {native_func_name!r} kernel while building {implementation_id!r}"
@@ -3405,6 +3605,7 @@ def _build_projection_guarded_source(
             MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY,
             MERC_FORWARD_SPHERICAL_PRODUCT_POLY,
             MERC_INVERSE_EXP_SERIES,
+            KROVAK_INVERSE_GUARDED_LOG_RATIO,
         ):
             native_expression = native_expression.format(
                 real_t="double",
@@ -3436,6 +3637,8 @@ def _build_projection_guarded_source(
         MERC_INVERSE_EXP_SERIES,
     ):
         implementation_helpers = _CONFORMAL_GUARDED_DEVICE_FNS + _MERC_GUARDED_DEVICE_FNS
+    elif implementation_id == KROVAK_INVERSE_GUARDED_LOG_RATIO:
+        implementation_helpers = _KROVAK_GUARDED_DEVICE_FNS
     else:
         implementation_helpers = ""
     return (
@@ -3972,20 +4175,38 @@ def fused_transform(
             )
 
         elif projection_name == "krovak":
-            args = _with_units(
-                real_t(computed["e"]),
-                real_t(computed["B"]),
-                real_t(computed["k"]),
-                real_t(computed["n"]),
-                real_t(computed["r_0_norm"]),
-                real_t(computed["tan_half_p"]),
-                real_t(computed["sin_alpha_c"]),
-                real_t(computed["cos_alpha_c"]),
-                real_t(computed["lam0"]),
-                real_t(computed["a"]),
-                real_t(computed["x0"]),
-                real_t(computed["y0"]),
-            )
+            if direction == "inverse" and transcendental_impl == KROVAK_INVERSE_GUARDED_LOG_RATIO:
+                args = _with_units(
+                    real_t(computed["e"]),
+                    real_t(computed["B"]),
+                    real_t(computed["k"]),
+                    real_t(computed["n"]),
+                    real_t(computed["r_0_norm"]),
+                    real_t(computed["tan_half_p"]),
+                    real_t(computed["sin_alpha_c"]),
+                    real_t(computed["cos_alpha_c"]),
+                    *(real_t(value) for value in computed["cgb"]),
+                    real_t(computed["log_k"]),
+                    real_t(computed["lam0"]),
+                    real_t(computed["a"]),
+                    real_t(computed["x0"]),
+                    real_t(computed["y0"]),
+                )
+            else:
+                args = _with_units(
+                    real_t(computed["e"]),
+                    real_t(computed["B"]),
+                    real_t(computed["k"]),
+                    real_t(computed["n"]),
+                    real_t(computed["r_0_norm"]),
+                    real_t(computed["tan_half_p"]),
+                    real_t(computed["sin_alpha_c"]),
+                    real_t(computed["cos_alpha_c"]),
+                    real_t(computed["lam0"]),
+                    real_t(computed["a"]),
+                    real_t(computed["x0"]),
+                    real_t(computed["y0"]),
+                )
 
         elif projection_name in ("moll", "eck4", "eck6"):
             args = _with_units(

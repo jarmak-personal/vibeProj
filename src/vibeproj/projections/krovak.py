@@ -13,6 +13,7 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
+from vibeproj._conformal import conformal_to_geodetic_coefficients
 from vibeproj.projections import register
 from vibeproj.projections.base import EPS_CONV, EPS_DENOM, Projection
 
@@ -20,6 +21,117 @@ if TYPE_CHECKING:
     from vibeproj.crs import ProjectionParams
 
 _HALF_PI = math.pi / 2.0
+_STANDARD_BESSEL_A = 6_377_397.155
+_STANDARD_BESSEL_E = 0.08169683122252751
+_STANDARD_DERIVED_SCALARS = (
+    1.0005974983716484,
+    1.0034191639671806,
+    0.9799247046208296,
+    0.20353742648834952,
+    9.931008767325844,
+    0.5043488898136432,
+    0.8634999695099853,
+    0.0034133319161083263,
+)
+_STANDARD_CGB = (
+    0.003346491640862642,
+    6.53254012663727e-06,
+    1.7488220271061576e-08,
+    5.3234553990234705e-11,
+    1.737731799565109e-13,
+    5.947923104361088e-16,
+)
+
+
+def _strategy_semantics(
+    params: ProjectionParams,
+    *,
+    a: float,
+    e: float,
+    B: float,
+    k: float,
+    n: float,
+    r_0_norm: float,
+    tan_half_p: float,
+    sin_alpha_c: float,
+    cos_alpha_c: float,
+    cgb: tuple[float, ...],
+    log_k: float,
+    lam0: float,
+    x0: float,
+    y0: float,
+) -> str:
+    """Classify the Krovak policy domain once from immutable setup scalars."""
+    if params.ellipsoid.es == 0.0:
+        return "spherical"
+
+    if params.operation_method == "Krovak":
+        orientation = "regular"
+        expected_easting_sign = expected_northing_sign = -1.0
+    elif params.operation_method == "Krovak (North Orientated)":
+        orientation = "north_oriented"
+        expected_easting_sign = expected_northing_sign = 1.0
+    else:
+        return "custom"
+
+    scalars = (
+        a,
+        e,
+        B,
+        k,
+        n,
+        r_0_norm,
+        tan_half_p,
+        sin_alpha_c,
+        cos_alpha_c,
+        log_k,
+        lam0,
+        x0,
+        y0,
+        params.x_unit_to_m,
+        params.y_unit_to_m,
+        params.easting_axis_sign,
+        params.northing_axis_sign,
+        *cgb,
+    )
+    if (
+        len(cgb) != 6
+        or not all(math.isfinite(value) for value in scalars)
+        or params.x_unit_to_m == 0.0
+        or params.y_unit_to_m == 0.0
+        or B <= 0.0
+        or k <= 0.0
+        or n <= 0.0
+        or r_0_norm <= 0.0
+        or tan_half_p <= 0.0
+        or params.easting_axis_sign != expected_easting_sign
+        or params.northing_axis_sign != expected_northing_sign
+    ):
+        return "invalid_setup"
+
+    derived_scalars = (
+        B,
+        k,
+        n,
+        r_0_norm,
+        tan_half_p,
+        sin_alpha_c,
+        cos_alpha_c,
+        log_k,
+    )
+    standard = (
+        math.isclose(a, _STANDARD_BESSEL_A, rel_tol=0.0, abs_tol=1e-9)
+        and math.isclose(e, _STANDARD_BESSEL_E, rel_tol=0.0, abs_tol=2e-16)
+        and all(
+            math.isclose(value, expected, rel_tol=2e-15, abs_tol=2e-15)
+            for value, expected in zip(derived_scalars, _STANDARD_DERIVED_SCALARS, strict=True)
+        )
+        and all(
+            math.isclose(value, expected, rel_tol=2e-15, abs_tol=2e-15)
+            for value, expected in zip(cgb, _STANDARD_CGB, strict=True)
+        )
+    )
+    return f"standard_bessel.{orientation}" if standard else "custom"
 
 
 class Krovak(Projection):
@@ -62,6 +174,30 @@ class Krovak(Projection):
         # Precompute tan(pi/4 + phi_p/2) for cone formula
         tan_half_p = math.tan(math.pi / 4.0 + phi_p / 2.0)
 
+        sin_alpha_c = math.sin(alpha_c)
+        cos_alpha_c = math.cos(alpha_c)
+        cgb = conformal_to_geodetic_coefficients(ell.n)
+        log_k = math.log(k)
+        x0 = -params.x_0
+        y0 = -params.y_0
+        strategy_semantics = _strategy_semantics(
+            params,
+            a=a,
+            e=e,
+            B=B,
+            k=k,
+            n=n,
+            r_0_norm=r_0_norm,
+            tan_half_p=tan_half_p,
+            sin_alpha_c=sin_alpha_c,
+            cos_alpha_c=cos_alpha_c,
+            cgb=cgb,
+            log_k=log_k,
+            lam0=lam_0,
+            x0=x0,
+            y0=y0,
+        )
+
         return {
             "a": a,
             "e": e,
@@ -70,8 +206,13 @@ class Krovak(Projection):
             "n": n,
             "r_0_norm": r_0_norm,
             "tan_half_p": tan_half_p,
-            "sin_alpha_c": math.sin(alpha_c),
-            "cos_alpha_c": math.cos(alpha_c),
+            "sin_alpha_c": sin_alpha_c,
+            "cos_alpha_c": cos_alpha_c,
+            # Immutable setup-time scalars for the guarded fp64 inverse.
+            # Native dispatch ignores them and keeps its historical ABI.
+            "cgb": cgb,
+            "log_k": log_k,
+            "_strategy_krovak_semantics": strategy_semantics,
             "lam0": lam_0,
             # Krovak's false-origin convention subtracts these values from
             # the north-oriented core coordinates (opposite the generic EPSG
@@ -80,8 +221,8 @@ class Krovak(Projection):
             # apply one symmetric offset contract. This matches PROJ forward
             # coordinates for custom nonzero offsets while deliberately
             # avoiding the asymmetric inverse exposed by legacy PROJ pipelines.
-            "x0": -params.x_0,
-            "y0": -params.y_0,
+            "x0": x0,
+            "y0": y0,
         }
 
     def forward(self, lam, phi, params, computed, xp):

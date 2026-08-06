@@ -142,6 +142,19 @@ Explicit `"accelerated"` selects the faster recurrence hybrid for callers whose
 inputs are concentrated inside the documented ±89.9°/wrapped-longitude hot
 domain; a cold lane sends its complete warp through exact native math.
 
+Standard-Bessel Krovak inverse has an explicit-only guarded log-ratio strategy
+for all six public regular/north-oriented CRSs (EPSG:2065/5221/5513/5514/8352/8353)
+on qualified Ada fp64 hardware. Regular Krovak keeps its public X=Southing,
+Y=Westing order even with `always_xy=True`. Supported custom and spherical
+setups plus invalid-setup, forward, fp32, double-single, and non-Ada cases stay
+native; Modified Krovak CRS methods remain unsupported. `"auto"` remains native
+at every size. Retained research measured about 2.583x
+gain with no more than 7.12 nm native-relative horizontal error. The formal
+six-CRS public run passed every gate with at least 2.6901x synchronized-wall and
+2.6976x CUDA-event speedup at five million coordinates; formal maximum/p99
+native-relative horizontal error was 7.9089/4.7453 nm, and `"auto"` remained
+bitwise native throughout.
+
 ### Cross-datum transforms (Helmert)
 
 ```python

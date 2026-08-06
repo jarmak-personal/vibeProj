@@ -66,7 +66,7 @@ shared native pairing helper (or the equivalent double-single helper).
 | `omerc` | forward | `sin`, `tan`, `pow`, `log`, `cos`, `atan2` | `U` clamped below `|1|`; remaining derived arguments depend on CRS/domain | pair `B*lambda` | `native.libdevice` | paired native only | T3 |
 | `omerc` | inverse | `exp`, `sin`/`cos`, `sqrt`, `pow`, iterative `atan`/`sin`/`pow`, `atan2` | `U'` clamped below `|1|`; exponential and projected inputs unbounded | pair `B*u/A` | `native.libdevice` | paired native only | T3 |
 | `krovak` | forward | `sin`, `tan`, `pow`, `atan`, `sin`/`cos`, two `asin` | inverse-trig inputs not explicitly clamped; `phi` unknown | pair `U`; pair `V`; pair cone angle | `native.libdevice` | paired native only | T3 |
-| `krovak` | inverse | `sqrt`, `atan2`, `atan`, `pow`, `sin`/`cos`, `asin`, `tan`, iterative special math | radius guarded away from zero; remaining projected/iterative arguments unknown | pair `T`; pair `D`; iterative pair `phi` | `native.libdevice` | paired native only | T3 |
+| `krovak` | inverse | `sqrt`, `atan2`, `atan`, `pow`, paired `sin`/`cos`, `asin`, `tan`, iterative `sin`/`pow`; guarded reframe adds `log`, `tanh`, and a conformal series | exact standard-Bessel regular/north-oriented setup; accelerated coordinates require positive finite radius and finite intermediates with recovered `|phi| <= 80 degrees` | pair `T`; pair `D`; native inverse iteration uses `sin(phi)` only, not a trig pair | `native.libdevice`, or explicit-only `krovak.inverse.guarded_log_ratio` | guarded log-ratio and sixth-order conformal recovery; either cold vote makes the complete warp exactly native; `auto` always remains native | T2 |
 | `eck4` | forward | `sin`; iterative `sin`/`cos`; output `sin`/`cos` | `phi`: unknown; iteration bound not enforced | pair iterative/output `theta` | `native.libdevice` | paired native only | T3 |
 | `eck4` | inverse | clamped `asin`, `sin`/`cos`, clamped `asin` | both inverse-trig arguments clamped | pair `theta` | `native.libdevice` | paired native only | T1 |
 | `eck6` | forward | `sin`; iterative/output `sin`/`cos` | `phi`: unknown; iteration bound not enforced | pair `theta` | `native.libdevice` | paired native only | T3 |
@@ -114,6 +114,7 @@ The user-facing coverage matrix is intentionally narrower than the inventory:
 | `merc.inverse.exp_series` | `merc` | inverse, spherical/ellipsoidal A/B | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 65,536 | native `exp`/`atan` conformal seed followed by reusable sixth-order Poder/Engsager recovery; finite raw/normalized/setup/coefficients guard |
 | `lcc.forward.conformal_reframe` | `lcc` | spherical/ellipsoidal 1SP/2SP forward regular cones | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 65,536 | log/exp or native-outer-power conformal reframe; exact finite setup, `k0==1`, `abs(n)>=0.2`, pole/non-finite/theta and complete-warp native guards |
 | `lcc.inverse.conformal_reframe` | `lcc` | spherical/ellipsoidal 1SP/2SP inverse | fp64 | Ada `sm_89`, weak-native-fp64 consumer class | 128 | logarithmic or native-outer-power conformal reconstruction; six-step `1e-14` recovery bound with a final contraction correction only when step six has not converged; apex/nonpositive/non-finite complete-warp native guards |
+| `krovak.inverse.guarded_log_ratio` | `krovak` | standard-Bessel inverse, regular and north oriented | fp64 | Ada `sm_89`, weak-native-fp64 consumer class; explicit `accelerated` only | n/a | setup-derived exact Bessel domain, guarded log-ratio and sixth-order conformal recovery; positive finite radius, finite intermediates, `|phi| <= 80 degrees`, and complete-warp exact native fallback |
 
 `tests/test_transcendental_coverage.py` binds these IDs and capabilities to
 the public registry and resolver. Adding a documented accelerated row without
@@ -579,6 +580,65 @@ flock /tmp/vibeproj-wave3-gpu.lock -c 'uv run python \
 
 The final formal artifact has SHA-256
 `62e9db49f7a3fcac9f99a1aa6c64861f0ebd27eba5d2552bdd7d204368c82937`.
+
+### Wave 3E standard-Bessel Krovak inverse qualification
+
+Wave 3E registers one explicit-only strategy,
+`krovak.inverse.guarded_log_ratio`. Its host domain is derived from the complete
+CRS setup: ellipsoidal geometry; operation method `Krovak` with exact `(-1,-1)`
+axis signs or `Krovak (North Orientated)` with exact `(+1,+1)` signs; finite,
+nonzero signed units; and finite launch scalars. The standard Bessel semi-major
+axis and eccentricity use absolute `math.isclose` tolerances of `1e-9 m` and
+`2e-16`. `B`, `k`, `n`, normalized radius, pseudo-parallel tangent, cone-axis
+sine/cosine, `log(k)`, and all six conformal-series coefficients use relative
+and absolute tolerances of `2e-15`. The central meridian and false offsets need
+only be finite: `lam0` is deliberately not pinned because the Ferro and
+Greenwich realizations differ.
+
+The two exact domains cover EPSG:2065/5513/8352 regular public
+X=Southing/Y=Westing coordinates and EPSG:5221/5514/8353 north-oriented
+X=Easting/Y=Northing coordinates. Each projected CRS is qualified against its
+own geodetic CRS so the benchmark does not introduce WGS 84 datum operations.
+Supported custom and spherical setups, non-finite setup, mismatched-sign, or
+otherwise invalid setups resolve native. Modified Krovak CRS methods remain
+unsupported. Forward Krovak, fp32/double-single, non-Ada devices, and native
+policy also remain native.
+
+The guarded kernel replaces iterative conformal recovery with a log-ratio seed
+and the shared sixth-order conformal-to-geodetic series. Positive finite radius,
+finite derived values, and recovered `|phi| <= 80 degrees` are required. A cold
+lane at either vote sends its complete warp through the outlined exact native
+inverse. Fixed-six iteration and per-lane fallback variants are rejected
+research and are not registered. The retained research screen measured about
+2.583x gain with at most 7.12 nm native-relative horizontal error, but these are
+not the formal production qualification metrics. `auto` remains
+`native.libdevice` for every workload size.
+
+The formal public run must cover main correctness, kernel resources, exact
+setup, signed units/axis semantics, scale rejection, restored-state replay,
+N=1/2/5,000,000 timing, and homogeneous complete-warp cold sweeps at
+0/0.1/1/10/50/100%. The integrated formal run used:
+
+```console
+flock /tmp/vibeproj-wave3-gpu.lock -c 'uv run python \
+  benchmarks/bench_transcendental_policy.py --case krovak-inverse --n 5000000 \
+  --workload-sizes 1,2,5000000 --warmup 10 --iterations 30 --repeats 3 \
+  --oracle-n 100000 --precision fp64 --seed 42 --enforce-gates \
+  --json /tmp/wave3e_krovak_inverse_public_qualification.json'
+```
+
+All six cases passed every enforced gate. At five million coordinates, the
+minimum synchronized-wall accelerated speedup across the six main cases was
+2.6901x and the minimum CUDA-event speedup was 2.6976x. The formal maximum/p99
+native-relative horizontal error was 7.9089/4.7453 nm. Every N=1, N=2, and
+N=5,000,000 explicit timing row required its median and all three wall/device
+repeats to reach 1.05x; the worst wall repeats were 1.4264x, 1.4262x, and
+2.6898x respectively, and every `auto` row resolved `native.libdevice`. All
+homogeneous 0/0.1/1/10/50/100% cold-warp sweeps, setup,
+unit/sign, scale, replay, allocation, topology, resource, and pyproj-regression
+gates passed. Native/candidate kernels used 38/40 registers and 40/56 bytes of
+local memory respectively, with zero shared memory. The formal artifact SHA-256
+is `1cddab8c4850768cc25d942c8b2761143c21d2a7a4a2def739608578a5f5a22e`.
 
 ### Go/no-go gates
 

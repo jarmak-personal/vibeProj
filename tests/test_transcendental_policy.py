@@ -22,6 +22,8 @@ from vibeproj.transcendentals import (
     HELMERT_FIXED_Q62_MIN_ELEMENTS,
     LAEA_FORWARD_POLAR_FIXED_Q62,
     LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS,
+    KROVAK_INVERSE_GUARDED_LOG_RATIO,
+    KROVAK_INVERSE_GUARDED_LOG_RATIO_MIN_ELEMENTS,
     LCC_FORWARD_CONFORMAL_REFRAME,
     LCC_INVERSE_CONFORMAL_REFRAME,
     MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY,
@@ -130,6 +132,7 @@ def test_registry_is_immutable_and_contains_stable_ids():
         GEOS_FORWARD_FIXED_Q62,
         GNOM_INVERSE_GUARDED_RSQRT_REFRAME,
         LAEA_FORWARD_POLAR_FIXED_Q62,
+        KROVAK_INVERSE_GUARDED_LOG_RATIO,
         LCC_FORWARD_CONFORMAL_REFRAME,
         LCC_INVERSE_CONFORMAL_REFRAME,
         MERC_FORWARD_ELLIPSOIDAL_PRODUCT_POLY,
@@ -340,6 +343,201 @@ def test_sinu_inverse_warmup_domains_include_native_exact_domains():
                 workload_size=5_000_000,
             )
             assert decision.implementation_id == NATIVE_LIBDEVICE
+
+
+@pytest.mark.parametrize("epsg", [2065, 5221, 5513, 5514, 8352, 8353])
+def test_krovak_inverse_public_crss_are_explicit_only(epsg):
+    from pyproj import CRS
+
+    projected = CRS.from_epsg(epsg)
+    transformer = Transformer.from_crs(projected, projected.geodetic_crs, always_xy=True)
+    orientation = "regular" if epsg in (2065, 5513, 8352) else "north_oriented"
+    domain = f"krovak.inverse.ellipsoidal.standard_bessel.{orientation}"
+    registered = next(
+        entry
+        for entry in list_transcendental_strategies()
+        if entry.implementation_id == KROVAK_INVERSE_GUARDED_LOG_RATIO
+    )
+    assert registered.min_elements == KROVAK_INVERSE_GUARDED_LOG_RATIO_MIN_ELEMENTS == 0
+
+    for workload_size in (1, 2, 5_000_000):
+        automatic = transformer.explain_strategy(
+            transcendentals="auto",
+            precision="fp64",
+            device=ADA,
+            workload_size=workload_size,
+        ).decisions[0]
+        explicit = transformer.explain_strategy(
+            transcendentals="accelerated",
+            precision="fp64",
+            device=ADA,
+            workload_size=workload_size,
+        ).decisions[0]
+        assert automatic.domain == domain
+        assert automatic.implementation_id == NATIVE_LIBDEVICE
+        assert explicit.domain == domain
+        assert explicit.implementation_id == KROVAK_INVERSE_GUARDED_LOG_RATIO
+        assert explicit.fallback is False
+
+
+def test_krovak_exact_domain_reuses_immutable_setup_qualification():
+    from pyproj import CRS
+
+    projected = CRS.from_epsg(5514)
+    computed = dict(
+        Transformer.from_crs(projected, projected.geodetic_crs, always_xy=True)._pipeline.computed
+    )
+    expected = "krovak.inverse.ellipsoidal.standard_bessel.north_oriented"
+    assert projection_strategy_domain("krovak", "inverse", computed) == expected
+
+    # The historical Ferro and Greenwich realizations legitimately use
+    # different central-meridian scalars; finite lam0 is deliberately unpinned.
+    changed_lam0 = {**computed, "lam0": computed["lam0"] + 0.25}
+    assert projection_strategy_domain("krovak", "inverse", changed_lam0) == expected
+    signed_units = {**computed, "x_unit_to_m": -2.0, "y_unit_to_m": 3.0}
+    assert projection_strategy_domain("krovak", "inverse", signed_units) == expected
+
+    close_a = {**computed, "a": math.nextafter(computed["a"], math.inf)}
+    close_e = {**computed, "e": math.nextafter(computed["e"], math.inf)}
+    assert projection_strategy_domain("krovak", "inverse", close_a) == expected
+    assert projection_strategy_domain("krovak", "inverse", close_e) == expected
+
+
+def test_krovak_dispatch_lookup_microbenchmark_does_no_repeated_setup_work(monkeypatch):
+    import vibeproj.transcendentals as transcendental_module
+
+    semantic = "standard_bessel.regular"
+
+    class LookupOnly(dict):
+        lookups = 0
+
+        def get(self, key, default=None):
+            assert key == "_strategy_krovak_semantics"
+            self.lookups += 1
+            return super().get(key, default)
+
+        def __getitem__(self, key):
+            raise AssertionError(f"unexpected setup scalar lookup: {key}")
+
+        def __iter__(self):
+            raise AssertionError("dispatch must not iterate setup state")
+
+        def items(self):
+            raise AssertionError("dispatch must not rebuild setup mappings")
+
+        def values(self):
+            raise AssertionError("dispatch must not expand setup values")
+
+    computed = LookupOnly(_strategy_krovak_semantics=semantic)
+
+    def repeated_setup_work(*args, **kwargs):
+        raise AssertionError("dispatch repeated setup-time math.isclose work")
+
+    monkeypatch.setattr(transcendental_module.math, "isclose", repeated_setup_work)
+    for _ in range(100_000):
+        assert transcendental_module._krovak_strategy_semantics(computed) is semantic
+    assert computed.lookups == 100_000
+    assert transcendental_module._krovak_strategy_semantics({}) == "unspecified"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "suffix"),
+    [
+        (
+            {"a": 6_378_137.0, "_strategy_krovak_semantics": "custom"},
+            "ellipsoidal.custom",
+        ),
+        (
+            {
+                "_strategy_operation_method": "Custom Krovak",
+                "_strategy_krovak_semantics": "custom",
+            },
+            "ellipsoidal.custom",
+        ),
+        (
+            {"_strategy_geometry": "spherical", "_strategy_krovak_semantics": "spherical"},
+            "spherical",
+        ),
+        (
+            {"B": math.nan, "_strategy_krovak_semantics": "invalid_setup"},
+            "ellipsoidal.invalid_setup",
+        ),
+        (
+            {"cgb": (0.0,) * 5, "_strategy_krovak_semantics": "invalid_setup"},
+            "ellipsoidal.invalid_setup",
+        ),
+        (
+            {
+                "cgb": (0.004, 0.0, 0.0, 0.0, 0.0, 0.0),
+                "_strategy_krovak_semantics": "custom",
+            },
+            "ellipsoidal.custom",
+        ),
+        (
+            {"log_k": 0.004, "_strategy_krovak_semantics": "custom"},
+            "ellipsoidal.custom",
+        ),
+        (
+            {"log_k": math.inf, "_strategy_krovak_semantics": "invalid_setup"},
+            "ellipsoidal.invalid_setup",
+        ),
+        (
+            {"x_unit_to_m": 0.0, "_strategy_krovak_semantics": "invalid_setup"},
+            "ellipsoidal.invalid_setup",
+        ),
+        (
+            {"easting_axis_sign": -1.0, "_strategy_krovak_semantics": "invalid_setup"},
+            "ellipsoidal.invalid_setup",
+        ),
+    ],
+)
+def test_krovak_unqualified_setup_domains_are_observable_native(overrides, suffix):
+    from pyproj import CRS
+
+    projected = CRS.from_epsg(5514)
+    computed = dict(
+        Transformer.from_crs(projected, projected.geodetic_crs, always_xy=True)._pipeline.computed
+    )
+    domain = projection_strategy_domain("krovak", "inverse", {**computed, **overrides})
+    assert domain == f"krovak.inverse.{suffix}"
+    decision = resolve_transcendental_strategy(
+        TranscendentalOperation.PROJECTION,
+        "accelerated",
+        device=ADA,
+        domain=domain,
+        precision="fp64",
+    )
+    assert decision.implementation_id == NATIVE_LIBDEVICE
+    assert decision.fallback is True
+
+
+@pytest.mark.parametrize(
+    ("device", "precision"),
+    [(HOPPER, "fp64"), (WEAK_ADA, "fp64"), (CPU, "fp64"), (ADA, "fp32"), (ADA, "ds")],
+)
+def test_krovak_explicit_candidate_rejects_wrong_device_or_precision(device, precision):
+    decision = resolve_transcendental_strategy(
+        TranscendentalOperation.PROJECTION,
+        "accelerated",
+        device=device,
+        domain="krovak.inverse.ellipsoidal.standard_bessel.regular",
+        precision=precision,
+        workload_size=5_000_000,
+    )
+    assert decision.implementation_id == NATIVE_LIBDEVICE
+    assert decision.fallback is True
+
+
+def test_krovak_forward_direction_remains_native():
+    decision = resolve_transcendental_strategy(
+        TranscendentalOperation.PROJECTION,
+        "accelerated",
+        device=ADA,
+        domain="krovak.forward.ellipsoidal.standard_bessel.regular",
+        precision="fp64",
+    )
+    assert decision.implementation_id == NATIVE_LIBDEVICE
+    assert decision.fallback is True
 
 
 @pytest.mark.parametrize(
@@ -852,6 +1050,37 @@ def test_compile_unqualified_modes_collapse_mixed_tmerc_to_native(monkeypatch, p
         (
             ("tmerc", "forward", NATIVE_LIBDEVICE),
             ("tmerc", "inverse", NATIVE_LIBDEVICE),
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("policy", "inverse_implementation"),
+    [
+        ("accelerated", KROVAK_INVERSE_GUARDED_LOG_RATIO),
+        ("auto", NATIVE_LIBDEVICE),
+        ("native", NATIVE_LIBDEVICE),
+    ],
+)
+def test_krovak_compile_cache_target_mapping(monkeypatch, policy, inverse_implementation):
+    from pyproj import CRS
+
+    projected = CRS.from_epsg(5514)
+    observed = []
+    monkeypatch.setattr("vibeproj.transcendentals.detect_device_capability", lambda: ADA)
+    monkeypatch.setattr(
+        "vibeproj.fused_kernels.compile_kernels",
+        lambda *args, **kwargs: observed.append(kwargs["projection_variants"]),
+    )
+
+    Transformer.from_crs(projected, projected.geodetic_crs, always_xy=True).compile(
+        precision="fp64", transcendentals=policy
+    )
+
+    assert observed == [
+        (
+            ("krovak", "forward", NATIVE_LIBDEVICE),
+            ("krovak", "inverse", inverse_implementation),
         )
     ]
 

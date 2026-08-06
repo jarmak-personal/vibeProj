@@ -26,6 +26,8 @@ from vibeproj.transcendentals import (
     HELMERT_FIXED_Q62_MIN_ELEMENTS,
     LAEA_FORWARD_POLAR_FIXED_Q62,
     LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS,
+    KROVAK_INVERSE_GUARDED_LOG_RATIO,
+    KROVAK_INVERSE_GUARDED_LOG_RATIO_MIN_ELEMENTS,
     LCC_FORWARD_CONFORMAL_REFRAME,
     LCC_FORWARD_CONFORMAL_REFRAME_MIN_ELEMENTS,
     LCC_INVERSE_CONFORMAL_REFRAME,
@@ -265,6 +267,17 @@ EXPECTED_REGISTRY_MATRIX = frozenset(
             ((8, 9),),
             ("auto", "fp64"),
             LCC_INVERSE_CONFORMAL_REFRAME_MIN_ELEMENTS,
+        ),
+        (
+            KROVAK_INVERSE_GUARDED_LOG_RATIO,
+            TranscendentalOperation.PROJECTION,
+            (
+                "krovak.inverse.ellipsoidal.standard_bessel.regular",
+                "krovak.inverse.ellipsoidal.standard_bessel.north_oriented",
+            ),
+            ((8, 9),),
+            ("auto", "fp64"),
+            KROVAK_INVERSE_GUARDED_LOG_RATIO_MIN_ELEMENTS,
         ),
         (
             HELMERT_FIXED_Q62,
@@ -686,6 +699,45 @@ def test_gnom_inverse_is_explicit_accelerated_only(domain, workload_size):
 
     assert automatic.implementation_id == NATIVE_LIBDEVICE
     assert explicit.implementation_id == GNOM_INVERSE_GUARDED_RSQRT_REFRAME
+
+
+@pytest.mark.parametrize(
+    "domain",
+    [
+        "krovak.inverse.ellipsoidal.standard_bessel.regular",
+        "krovak.inverse.ellipsoidal.standard_bessel.north_oriented",
+    ],
+)
+@pytest.mark.parametrize("workload_size", [1, 2, 5_000_000])
+def test_krovak_inverse_has_one_explicit_only_candidate(domain, workload_size):
+    candidates = [
+        entry
+        for entry in list_transcendental_strategies()
+        if entry.implementation_id != NATIVE_LIBDEVICE and domain in entry.domains
+    ]
+    assert [entry.implementation_id for entry in candidates] == [KROVAK_INVERSE_GUARDED_LOG_RATIO]
+    assert candidates[0].supported_policies == ("accelerated",)
+    assert candidates[0].min_elements == KROVAK_INVERSE_GUARDED_LOG_RATIO_MIN_ELEMENTS == 0
+    assert candidates[0].native_fallback is True
+
+    automatic = resolve_transcendental_strategy(
+        TranscendentalOperation.PROJECTION,
+        "auto",
+        device=ADA_4090,
+        domain=domain,
+        precision="fp64",
+        workload_size=workload_size,
+    )
+    explicit = resolve_transcendental_strategy(
+        TranscendentalOperation.PROJECTION,
+        "accelerated",
+        device=ADA_4090,
+        domain=domain,
+        precision="fp64",
+        workload_size=workload_size,
+    )
+    assert automatic.implementation_id == NATIVE_LIBDEVICE
+    assert explicit.implementation_id == KROVAK_INVERSE_GUARDED_LOG_RATIO
 
 
 def test_gnom_explicit_only_does_not_change_sinu_auto_contract():
@@ -1436,3 +1488,29 @@ def test_every_accelerated_registry_id_has_matching_benchmark_contract():
             assert specification.max_physical_scale_m == entry.accuracy.max_physical_scale_m
             if entry.operation is TranscendentalOperation.PROJECTION:
                 assert specification.domain.split(".")[1] == specification.direction
+
+
+def test_krovak_benchmark_has_six_public_explicit_only_cases():
+    benchmark_module = _load_policy_benchmark_module()
+    expected = tuple(f"krovak-inverse-epsg-{epsg}" for epsg in (2065, 5221, 5513, 5514, 8352, 8353))
+    assert benchmark_module.KROVAK_INVERSE_CASES == expected
+    assert benchmark_module.CASE_GROUPS["krovak-inverse"] == expected
+    for name in expected:
+        specification = benchmark_module.QUALIFICATION_SPECS[name]
+        assert specification.implementation_id == KROVAK_INVERSE_GUARDED_LOG_RATIO
+        assert specification.direction == "inverse"
+        assert specification.min_elements == 0
+        assert specification.auto_enabled is False
+        assert specification.explicit_performance_min_elements == 1
+        assert specification.representative_mixed_guard_sweep is True
+        assert benchmark_module._qualification_workload_sizes((1, 2, 5_000_000), specification) == (
+            1,
+            2,
+            5_000_000,
+        )
+
+
+def test_rejected_krovak_research_variants_are_not_registered():
+    implementation_ids = {entry.implementation_id for entry in list_transcendental_strategies()}
+    assert not any("fixed_six" in implementation_id for implementation_id in implementation_ids)
+    assert not any("per_lane" in implementation_id for implementation_id in implementation_ids)

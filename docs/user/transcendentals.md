@@ -87,6 +87,7 @@ The initial accelerated coverage is deliberately small:
 | `merc.inverse.exp_series` | Regular Mercator inverse, spherical/ellipsoidal variants A/B | Native conformal `exp`/`atan` seed followed by the shared sixth-order Poder/Engsager recovery series | Ada `sm_89` consumer GPUs | 65,536 |
 | `lcc.forward.conformal_reframe` | Lambert Conformal Conic forward, spherical/ellipsoidal 1SP/2SP regular cones | Spherical log/exp power reframe; ellipsoidal native outer power with stable `exp`/`atanh` conformal correction | Ada `sm_89` consumer GPUs | 65,536 |
 | `lcc.inverse.conformal_reframe` | Lambert Conformal Conic inverse, spherical/ellipsoidal 1SP/2SP | Spherical logarithmic latitude reconstruction; ellipsoidal native outer power with bounded six-step `exp`/`atanh` recovery and a final contraction correction when step six has not reached `1e-14` | Ada `sm_89` consumer GPUs | 128 |
+| `krovak.inverse.guarded_log_ratio` | Standard-Bessel Krovak inverse, regular and north oriented | Guarded log-ratio conformal seed and sixth-order recovery; a cold lane makes the complete warp exact native | Ada `sm_89` consumer GPUs; explicit `accelerated` only | n/a |
 
 On the qualifying RTX 4090 at five million coordinates, spherical Mercator
 forward measured about 1.13x native, explicit ellipsoidal forward about 1.26x,
@@ -100,7 +101,7 @@ or above the listed sizes; below them it resolves native. Explicit
 Transverse Mercator, inverse UTM, spherical Sinusoidal inverse, Orthographic inverse
 outside the exact spherical-equatorial origin domain, LAEA outside spherical
 polar forward, Polar Stereographic outside the five listed inverse domains,
-GEOS inverse, Web Mercator in both directions, all other projection families, unsupported
+GEOS inverse, Web Mercator in both directions, all unlisted projection domains, unsupported
 precision combinations, and unknown devices resolve or fall back to
 `native.libdevice`. Guarded input values do not
 change the host decision: a selected fixed `StrategyDecision` remains selected
@@ -116,6 +117,12 @@ normalized radius. A random 10% mixture outside the guard measured about 0.92x n
 on RTX 4090, so `"auto"` remains native at every size. Expert callers who know their
 inputs are concentrated in the documented hot domain may opt in with
 `transcendentals="accelerated"`; high-origin and polar CRS domains remain native.
+
+Standard-Bessel Krovak inverse is also explicit-only. Its guarded log-ratio
+path covers the six listed public regular/north-oriented CRSs, but `"auto"`
+remains native at every size. Supported custom and spherical setups plus
+invalid-setup and forward Krovak domains remain native. Modified Krovak CRS
+methods are unsupported.
 
 Ellipsoidal Sinusoidal inverse deliberately assigns different implementations
 to the two policies. `"auto"` uses `sinu.inverse.convergent_newton` for every
@@ -185,6 +192,25 @@ against native policy. The current release gates are:
   applies at most six fixed-point steps; only when the sixth delta remains at
   least `1e-14`, that final delta receives a contraction correction. This adds
   no seventh transcendental evaluation and closes the exact `e=0.1` boundary.
+- Standard-Bessel Krovak inverse: explicit `accelerated` covers the six public
+  EPSG CRSs 2065/5221/5513/5514/8352/8353 in their exact regular or
+  north-oriented setup domains. Regular public inputs remain X=Southing and
+  Y=Westing even with `always_xy=True`. The setup guard pins the Bessel
+  ellipsoid, derived cone/conformal scalars, method, and axis signs while
+  allowing either finite central meridian; finite nonzero signed units are
+  required. Coordinates need a positive finite radius, finite intermediates,
+  and recovered `|latitude| <= 80 degrees`; otherwise the complete warp uses
+  exact native math. Supported custom and spherical setups plus invalid,
+  forward, fp32, double-single, and non-Ada cases remain native; Modified
+  Krovak CRS methods are unsupported. `"auto"` is native at every size.
+  Retained research measured about 2.583x gain and no more than 7.12 nm
+  native-relative horizontal error. The formal six-CRS public run passed every
+  gate with at least 2.6901x synchronized-wall and 2.6976x CUDA-event speedup at
+  five million coordinates; maximum/p99 native-relative horizontal error was
+  7.9089/4.7453 nm. N=1/2/5,000,000 explicit rows required every wall/device
+  repeat to reach 1.05x and passed with worst repeats of 1.4264x/1.4262x/2.6898x
+  respectively; every complete-warp cold sweep passed, while `"auto"` remained
+  bitwise native.
 - Orthographic forward: at physical scale `0 < scale <= 6,400,000 m`, both
   latitude and wrapped-longitude sine/cosine pairs use one atomic guard over
   `[-pi/2, pi/2]` and `[-pi, pi]`. If either argument is invalid, both pairs

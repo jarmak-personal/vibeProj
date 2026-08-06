@@ -41,6 +41,8 @@ from vibeproj.transcendentals import (
     HELMERT_FIXED_Q62_MIN_ELEMENTS,
     LAEA_FORWARD_POLAR_FIXED_Q62,
     LAEA_FORWARD_POLAR_FIXED_Q62_MIN_ELEMENTS,
+    KROVAK_INVERSE_GUARDED_LOG_RATIO,
+    KROVAK_INVERSE_GUARDED_LOG_RATIO_MIN_ELEMENTS,
     LCC_FORWARD_CONFORMAL_REFRAME,
     LCC_FORWARD_CONFORMAL_REFRAME_MIN_ELEMENTS,
     LCC_INVERSE_CONFORMAL_REFRAME,
@@ -373,15 +375,39 @@ QUALIFICATION_SPECS = {
         coordinate_contract_m=1e-8,
         max_physical_scale_m=PROJECTION_FIXED_Q62_MAX_SCALE_M,
     ),
+    **{
+        f"krovak-inverse-epsg-{epsg}": QualificationSpec(
+            implementation_id=KROVAK_INVERSE_GUARDED_LOG_RATIO,
+            operation="projection",
+            domain=(
+                "krovak.inverse.ellipsoidal.standard_bessel.regular"
+                if epsg in (2065, 5513, 8352)
+                else "krovak.inverse.ellipsoidal.standard_bessel.north_oriented"
+            ),
+            direction="inverse",
+            min_elements=KROVAK_INVERSE_GUARDED_LOG_RATIO_MIN_ELEMENTS,
+            coordinate_contract_m=1e-8,
+            auto_enabled=False,
+            auto_disabled_reason=(
+                "the guarded log-ratio is expert opt-in; automatic Krovak inverse "
+                "remains native at every workload size"
+            ),
+            explicit_performance_min_elements=1,
+            representative_mixed_guard_sweep=True,
+        )
+        for epsg in (2065, 5221, 5513, 5514, 8352, 8353)
+    },
 }
 CASES = tuple(QUALIFICATION_SPECS)
 MERC_CASES = tuple(name for name in CASES if name.startswith("merc-"))
 LCC_CASES = tuple(name for name in CASES if name.startswith("lcc-"))
 SINU_INVERSE_CASES = tuple(name for name in CASES if name.startswith("sinu-inverse"))
+KROVAK_INVERSE_CASES = tuple(name for name in CASES if name.startswith("krovak-inverse"))
 CASE_GROUPS = {
     "merc": MERC_CASES,
     "lcc": LCC_CASES,
     "sinu-inverse": SINU_INVERSE_CASES,
+    "krovak-inverse": KROVAK_INVERSE_CASES,
 }
 WORKLOAD_GRID_CASES = tuple(
     name
@@ -1803,6 +1829,73 @@ def _lcc_hot_guard_audit(
     }
 
 
+def _prepare_krovak_inverse(
+    cp: Any,
+    n: int,
+    rng: np.random.Generator,
+    *,
+    epsg: int,
+) -> BenchmarkCase:
+    """Prepare one public standard-Bessel Krovak inverse qualification case."""
+    from pyproj import CRS
+    from pyproj import Transformer as PyProjTransformer
+
+    from vibeproj import Transformer
+
+    projected = CRS.from_epsg(epsg)
+    geographic = projected.geodetic_crs
+    prime_meridian = float(geographic.prime_meridian.longitude)
+    longitude = rng.uniform(12.0 - prime_meridian, 19.0 - prime_meridian, n)
+    latitude = rng.uniform(48.0, 51.3, n)
+    oracle_forward = PyProjTransformer.from_crs(geographic, projected, always_xy=True)
+    public_x, public_y = oracle_forward.transform(longitude, latitude)
+    public_x = np.asarray(public_x, dtype=np.float64)
+    public_y = np.asarray(public_y, dtype=np.float64)
+    transformer = Transformer.from_crs(projected, geographic, always_xy=True)
+    computed = transformer._pipeline.computed
+    regular = epsg in (2065, 5513, 8352)
+
+    # Public regular Krovak is X=Southing/Y=Westing even with always_xy=True;
+    # do not reinterpret these buffers as generic easting/northing.
+    edge_x = np.asarray(
+        [0.0, public_x[0], math.nan, math.inf, -math.inf, public_x[-1]],
+        dtype=np.float64,
+    )
+    edge_y = np.asarray(
+        [0.0, public_y[0], public_y[0], public_y[0], public_y[0], public_y[-1]],
+        dtype=np.float64,
+    )
+    name = f"krovak-inverse-epsg-{epsg}"
+    return BenchmarkCase(
+        name=name,
+        family="krovak",
+        direction="FORWARD",
+        transformer=transformer,
+        input_x=cp.asarray(public_x),
+        input_y=cp.asarray(public_y),
+        host_x=public_x,
+        host_y=public_y,
+        edge_host_x=edge_x,
+        edge_host_y=edge_y,
+        domain={
+            "epsg": epsg,
+            "crs": f"{projected.name} -> {geographic.name}",
+            "geodetic_crs": geographic.name,
+            "operation_method": computed["_strategy_operation_method"],
+            "public_axis_order": "X=Southing/Y=Westing" if regular else "X=Easting/Y=Northing",
+            "prime_meridian": geographic.prime_meridian.name,
+            "greenwich_longitude_degrees": [12.0, 19.0],
+            "source_latitude_degrees": [48.0, 51.3],
+        },
+        edges={"first": _json_edge_values(edge_x), "second": _json_edge_values(edge_y)},
+        output_is_geographic=True,
+        oracle_from_crs=projected,
+        oracle_to_crs=geographic,
+        qualification=QUALIFICATION_SPECS[name],
+        geographic_scale_m=float(computed["a"]),
+    )
+
+
 def _prepare_case(cp: Any, name: str, n: int, seed: int) -> BenchmarkCase:
     rng = np.random.default_rng(seed)
     if name == "tmerc-forward":
@@ -1859,6 +1952,13 @@ def _prepare_case(cp: Any, name: str, n: int, seed: int) -> BenchmarkCase:
             rng,
             direction=direction,
             configuration="-".join(configuration_parts),
+        )
+    if name.startswith("krovak-inverse-epsg-"):
+        return _prepare_krovak_inverse(
+            cp,
+            n,
+            rng,
+            epsg=int(name.rsplit("-", maxsplit=1)[1]),
         )
     raise ValueError(f"Unknown benchmark case: {name}")
 
@@ -2482,6 +2582,165 @@ def _sinu_inverse_mixed_guard_sweep(
     }
 
 
+def _krovak_inverse_mixed_guard_sweep(
+    cp: Any,
+    case: BenchmarkCase,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    """Qualify complete-warp Krovak fallback with homogeneous cold warps."""
+    from pyproj import CRS
+    from pyproj import Transformer as PyProjTransformer
+
+    n = max(args.n, 32_000)
+    rng = np.random.default_rng(args.seed + 130_000)
+    epsg = int(case.domain["epsg"])
+    projected = CRS.from_epsg(epsg)
+    geographic = projected.geodetic_crs
+    prime_meridian = float(geographic.prime_meridian.longitude)
+    longitude = rng.uniform(12.0 - prime_meridian, 19.0 - prime_meridian, n)
+    latitude = rng.uniform(48.0, 51.3, n)
+    oracle_forward = PyProjTransformer.from_crs(geographic, projected, always_xy=True)
+    hot_projected = oracle_forward.transform(longitude, latitude)
+    hot_x = np.asarray(hot_projected[0], dtype=np.float64)
+    hot_y = np.asarray(hot_projected[1], dtype=np.float64)
+    cold_groups = (
+        ("zero_radius", 0.0, 0.0),
+        ("nan_first", math.nan, float(hot_y[0])),
+        ("positive_inf_second", float(hot_x[0]), math.inf),
+        ("huge_positive", 1e308, 1e308),
+        ("huge_opposed", -1e308, 1e308),
+    )
+    fractions = (0.0, 0.001, 0.01, 0.10, 0.50, 1.0)
+    warp_count = math.ceil(n / 32)
+    rows = []
+    for fraction in fractions:
+        cold_warp_count = round(fraction * warp_count)
+        input_x_host = hot_x.copy()
+        input_y_host = hot_y.copy()
+        cold_warp_mask = np.zeros(n, dtype=bool)
+        for warp_index in range(cold_warp_count):
+            start = warp_index * 32
+            stop = min(start + 32, n)
+            _, cold_x, cold_y = cold_groups[warp_index % len(cold_groups)]
+            input_x_host[start:stop] = cold_x
+            input_y_host[start:stop] = cold_y
+            cold_warp_mask[start:stop] = True
+
+        input_x = cp.asarray(input_x_host)
+        input_y = cp.asarray(input_y_host)
+        outputs = {
+            policy: (cp.empty(n, dtype=cp.float64), cp.empty(n, dtype=cp.float64))
+            for policy in POLICIES
+        }
+
+        def invoke(policy: str) -> None:
+            case.transformer.transform_buffers(
+                input_x,
+                input_y,
+                direction=case.direction,
+                out_x=outputs[policy][0],
+                out_y=outputs[policy][1],
+                precision=args.precision,
+                transcendentals=policy,
+            )
+
+        launches = {policy: lambda policy=policy: invoke(policy) for policy in POLICIES}
+        device_timing, _, _ = _time_interleaved(
+            cp,
+            launches,
+            n=n,
+            warmup=args.warmup,
+            iterations=args.iterations,
+            repeats=args.repeats,
+        )
+        wall_timing = _time_synchronized_wall_interleaved(
+            cp,
+            launches,
+            n=n,
+            warmup=args.warmup,
+            iterations=args.iterations,
+            repeats=args.repeats,
+        )
+        for policy in POLICIES:
+            invoke(policy)
+        cp.cuda.get_current_stream().synchronize()
+        host_outputs = {
+            policy: (cp.asnumpy(out_x), cp.asnumpy(out_y))
+            for policy, (out_x, out_y) in outputs.items()
+        }
+        native_x, native_y = host_outputs["native"]
+        accelerated_x, accelerated_y = host_outputs["accelerated"]
+        auto_x, auto_y = host_outputs["auto"]
+        accelerated_error = _coordinate_error(
+            accelerated_x,
+            accelerated_y,
+            native_x,
+            native_y,
+            geographic=True,
+            geographic_scale_m=case.geographic_scale_m,
+        )
+        accelerated_cold_bitwise = bool(
+            np.array_equal(
+                accelerated_x[cold_warp_mask].view(np.uint64),
+                native_x[cold_warp_mask].view(np.uint64),
+            )
+            and np.array_equal(
+                accelerated_y[cold_warp_mask].view(np.uint64),
+                native_y[cold_warp_mask].view(np.uint64),
+            )
+        )
+        auto_bitwise_native = bool(
+            np.array_equal(auto_x.view(np.uint64), native_x.view(np.uint64))
+            and np.array_equal(auto_y.view(np.uint64), native_y.view(np.uint64))
+        )
+        auto_strategy = _resolved_strategy(
+            case.transformer,
+            "auto",
+            case.direction,
+            precision=args.precision,
+            workload_size=n,
+        )
+        rows.append(
+            {
+                "cold_fraction_requested": fraction,
+                "cold_warp_count": cold_warp_count,
+                "cold_warp_fraction_achieved": cold_warp_count / warp_count,
+                "cold_lane_count": int(np.count_nonzero(cold_warp_mask)),
+                "cold_pattern": "homogeneous complete warps cycling named edge groups",
+                "homogeneous_warp_edge_groups": [group[0] for group in cold_groups],
+                "device_timing": device_timing,
+                "wall_timing": wall_timing,
+                "error_vs_native_m": accelerated_error,
+                "accelerated_cold_warp_lanes_bitwise_native": accelerated_cold_bitwise,
+                "auto_strategy": auto_strategy,
+                "auto_bitwise_native": auto_bitwise_native,
+            }
+        )
+
+    correctness_pass = all(
+        row["accelerated_cold_warp_lanes_bitwise_native"]
+        and row["auto_strategy"]["implementation_ids"] == [NATIVE_LIBDEVICE]
+        and row["auto_bitwise_native"]
+        and row["error_vs_native_m"]["max_m"] is not None
+        and row["error_vs_native_m"]["max_m"] <= case.qualification.coordinate_contract_m
+        and row["error_vs_native_m"]["nonfinite_match"]
+        for row in rows
+    )
+    return {
+        "required": True,
+        "n": n,
+        "fractions": list(fractions),
+        "warp_layout": "selected cold warps are homogeneous; no random per-lane mixing",
+        "rows": rows,
+        "auto_native_at_every_fraction_pass": all(
+            row["auto_strategy"]["implementation_ids"] == [NATIVE_LIBDEVICE]
+            and row["auto_bitwise_native"]
+            for row in rows
+        ),
+        "qualification_pass": correctness_pass,
+    }
+
+
 def _guarded_inverse_fallback_sweep(
     cp: Any,
     case: BenchmarkCase,
@@ -2492,6 +2751,8 @@ def _guarded_inverse_fallback_sweep(
         return _merc_forward_polar_cap_sweep(cp, case, args)
     if case.family == "sinu" and case.qualification.direction == "inverse":
         return _sinu_inverse_mixed_guard_sweep(cp, case, args)
+    if case.family == "krovak":
+        return _krovak_inverse_mixed_guard_sweep(cp, case, args)
     if case.name != "ortho-inverse" and not case.name.startswith("gnom-inverse-"):
         return {"required": False, "rows": []}
 
@@ -3561,6 +3822,231 @@ def _sinu_inverse_parameter_guard_behavior(
     }
 
 
+def _krovak_parameter_guard_behavior(
+    cp: Any,
+    case: BenchmarkCase,
+    precision: str,
+) -> dict[str, Any]:
+    """Exercise Krovak setup, unit/sign, scale, and restored-state replay."""
+    pipeline = case.transformer._pipeline_for_direction(case.direction)
+    original = pipeline.computed
+    n = min(4_096, case.host_x.size)
+    first = cp.asarray(case.host_x[:n])
+    second = cp.asarray(case.host_y[:n])
+
+    def execute() -> dict[str, Any]:
+        outputs = {}
+        for policy in ("native", "accelerated", "auto"):
+            out_x = cp.empty(n, dtype=cp.float64)
+            out_y = cp.empty(n, dtype=cp.float64)
+            case.transformer.transform_buffers(
+                first,
+                second,
+                direction=case.direction,
+                out_x=out_x,
+                out_y=out_y,
+                precision=precision,
+                transcendentals=policy,
+            )
+            outputs[policy] = (cp.asnumpy(out_x), cp.asnumpy(out_y))
+        native_x, native_y = outputs["native"]
+        accelerated_x, accelerated_y = outputs["accelerated"]
+        auto_x, auto_y = outputs["auto"]
+        return {
+            "accelerated_strategy": _resolved_strategy(
+                case.transformer,
+                "accelerated",
+                case.direction,
+                precision=precision,
+                workload_size=n,
+            ),
+            "auto_strategy": _resolved_strategy(
+                case.transformer,
+                "auto",
+                case.direction,
+                precision=precision,
+                workload_size=n,
+            ),
+            "accelerated_bitwise_native": bool(
+                np.array_equal(accelerated_x.view(np.uint64), native_x.view(np.uint64))
+                and np.array_equal(accelerated_y.view(np.uint64), native_y.view(np.uint64))
+            ),
+            "auto_bitwise_native": bool(
+                np.array_equal(auto_x.view(np.uint64), native_x.view(np.uint64))
+                and np.array_equal(auto_y.view(np.uint64), native_y.view(np.uint64))
+            ),
+            "error_vs_native_m": _coordinate_error(
+                accelerated_x,
+                accelerated_y,
+                native_x,
+                native_y,
+                geographic=True,
+                geographic_scale_m=case.geographic_scale_m,
+            ),
+        }
+
+    hot = execute()
+    hot["strategy_selected"] = hot["accelerated_strategy"]["implementation_ids"] == [
+        KROVAK_INVERSE_GUARDED_LOG_RATIO
+    ]
+    hot["auto_native_pass"] = (
+        hot["auto_strategy"]["implementation_ids"] == [NATIVE_LIBDEVICE]
+        and hot["auto_bitwise_native"]
+    )
+
+    cgb = tuple(original["cgb"])
+    mutations: dict[str, list[tuple[str, dict[str, Any]]]] = {
+        "setup": [
+            (
+                "custom_method",
+                {
+                    "_strategy_operation_method": "Custom Krovak",
+                    "_strategy_krovak_semantics": "custom",
+                },
+            ),
+            (
+                "spherical_geometry",
+                {
+                    "_strategy_geometry": "spherical",
+                    "_strategy_krovak_semantics": "spherical",
+                },
+            ),
+            (
+                "eccentricity_nonfinite",
+                {"e": math.nan, "_strategy_krovak_semantics": "invalid_setup"},
+            ),
+            ("B_nonfinite", {"B": math.inf, "_strategy_krovak_semantics": "invalid_setup"}),
+            ("k_nonfinite", {"k": math.nan, "_strategy_krovak_semantics": "invalid_setup"}),
+            ("cone_nonpositive", {"n": 0.0, "_strategy_krovak_semantics": "invalid_setup"}),
+            (
+                "radius_nonpositive",
+                {"r_0_norm": 0.0, "_strategy_krovak_semantics": "invalid_setup"},
+            ),
+            (
+                "tan_half_p_nonpositive",
+                {"tan_half_p": 0.0, "_strategy_krovak_semantics": "invalid_setup"},
+            ),
+            (
+                "sin_alpha_nonfinite",
+                {"sin_alpha_c": math.nan, "_strategy_krovak_semantics": "invalid_setup"},
+            ),
+            (
+                "cos_alpha_nonfinite",
+                {"cos_alpha_c": math.inf, "_strategy_krovak_semantics": "invalid_setup"},
+            ),
+            (
+                "series_nonfinite",
+                {
+                    "cgb": (math.nan, *cgb[1:]),
+                    "_strategy_krovak_semantics": "invalid_setup",
+                },
+            ),
+            (
+                "log_k_nonfinite",
+                {"log_k": math.inf, "_strategy_krovak_semantics": "invalid_setup"},
+            ),
+            (
+                "central_meridian_nonfinite",
+                {"lam0": math.nan, "_strategy_krovak_semantics": "invalid_setup"},
+            ),
+            (
+                "x_offset_nonfinite",
+                {"x0": math.inf, "_strategy_krovak_semantics": "invalid_setup"},
+            ),
+            (
+                "y_offset_nonfinite",
+                {"y0": math.nan, "_strategy_krovak_semantics": "invalid_setup"},
+            ),
+        ],
+        "units": [
+            (
+                "x_unit_zero",
+                {"x_unit_to_m": 0.0, "_strategy_krovak_semantics": "invalid_setup"},
+            ),
+            (
+                "y_unit_nonfinite",
+                {"y_unit_to_m": math.inf, "_strategy_krovak_semantics": "invalid_setup"},
+            ),
+            (
+                "wrong_easting_sign",
+                {
+                    "easting_axis_sign": -original["easting_axis_sign"],
+                    "_strategy_krovak_semantics": "invalid_setup",
+                },
+            ),
+            (
+                "wrong_northing_sign",
+                {
+                    "northing_axis_sign": -original["northing_axis_sign"],
+                    "_strategy_krovak_semantics": "invalid_setup",
+                },
+            ),
+        ],
+        "scale": [
+            (
+                "non_bessel_scale",
+                {"a": original["a"] + 1.0, "_strategy_krovak_semantics": "custom"},
+            ),
+            (
+                "scale_nonfinite",
+                {"a": math.inf, "_strategy_krovak_semantics": "invalid_setup"},
+            ),
+        ],
+    }
+    probes: dict[str, list[dict[str, Any]]] = {category: [] for category in mutations}
+    try:
+        for category, category_mutations in mutations.items():
+            for label, mutation in category_mutations:
+                pipeline.computed = {**original, **mutation}
+                result = execute()
+                result["native_dispatch_pass"] = result["accelerated_strategy"][
+                    "implementation_ids"
+                ] == [NATIVE_LIBDEVICE]
+                result["behavior_pass"] = (
+                    result["native_dispatch_pass"]
+                    and result["accelerated_bitwise_native"]
+                    and result["auto_bitwise_native"]
+                )
+                probes[category].append(
+                    {"name": label, "mutated_fields": sorted(mutation), **result}
+                )
+    finally:
+        pipeline.computed = original
+
+    replay = execute()
+    replay["strategy_selected"] = replay["accelerated_strategy"]["implementation_ids"] == [
+        KROVAK_INVERSE_GUARDED_LOG_RATIO
+    ]
+    replay_error = replay["error_vs_native_m"]
+    replay["behavior_pass"] = (
+        replay["strategy_selected"]
+        and replay["auto_strategy"]["implementation_ids"] == [NATIVE_LIBDEVICE]
+        and replay["auto_bitwise_native"]
+        and replay_error["max_m"] is not None
+        and replay_error["max_m"] <= case.qualification.coordinate_contract_m
+        and replay_error["nonfinite_match"]
+    )
+    hot_error = hot["error_vs_native_m"]
+    hot_pass = (
+        hot["strategy_selected"]
+        and hot["auto_native_pass"]
+        and hot_error["max_m"] is not None
+        and hot_error["max_m"] <= case.qualification.coordinate_contract_m
+        and hot_error["nonfinite_match"]
+    )
+    return {
+        "required": True,
+        "hot_probe": hot,
+        "setup_probes": probes["setup"],
+        "unit_probes": probes["units"],
+        "scale_probes": probes["scale"],
+        "replay": replay,
+        "qualification_pass": hot_pass
+        and replay["behavior_pass"]
+        and all(probe["behavior_pass"] for category in probes.values() for probe in category),
+    }
+
+
 def _parameter_guard_behavior(
     cp: Any,
     case: BenchmarkCase,
@@ -3572,6 +4058,8 @@ def _parameter_guard_behavior(
         return _lcc_parameter_guard_behavior(cp, case, args.precision)
     if case.family == "sinu" and case.qualification.direction == "inverse":
         return _sinu_inverse_parameter_guard_behavior(cp, case, args.precision)
+    if case.family == "krovak":
+        return _krovak_parameter_guard_behavior(cp, case, args.precision)
     return _stere_inverse_e_guard_behavior(cp, case, args)
 
 
@@ -4255,7 +4743,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
 def _requires_default_workload_grid(case: str) -> bool:
     """Whether enforced qualification requires the full historical 20-size grid."""
-    return case not in {"merc", "lcc"} and not case.startswith("sinu-inverse")
+    return (
+        case not in {"merc", "lcc", "krovak-inverse"}
+        and not case.startswith("sinu-inverse")
+        and not case.startswith("krovak-inverse-")
+    )
 
 
 def main() -> None:
