@@ -17,6 +17,14 @@ serialized transformer's state.
 | `"native"` | Use CUDA/libdevice special functions. Adjacent sine and cosine calls may use native paired `sincos`; that is still native policy. |
 | `"accelerated"` | Request a qualified accelerated implementation. If no qualified implementation covers the device, family, direction, precision, or domain, explicitly fall back to native. |
 
+The policies change who supplies the performance assumption, not the accuracy
+contract: `auto` requires the library to prove the win from device, setup, and
+workload size, while explicit `accelerated` lets a caller assert that its data
+mostly occupies a documented hot domain. See the
+[RTX 4090 policy rationale and native-relative results](https://github.com/jarmak-personal/vibeProj/blob/main/experiments/transcendentals/qualification.md#policy-and-performance-summary)
+for the compact comparison and the reason each implementation is automatic or
+explicit-only.
+
 ```python
 from vibeproj import Transformer
 

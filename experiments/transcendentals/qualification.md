@@ -9,6 +9,57 @@ in [`docs/dev/transcendentals.md`](../../docs/dev/transcendentals.md). Values
 here describe the named qualification runs; they are not promises for other
 devices or future releases.
 
+## Policy and performance summary
+
+The policy names describe who can establish that an accelerated path will be
+faster; they do not define different accuracy levels. Every accelerated path
+retains its documented correctness guards, and an uncovered device, transform,
+precision, setup, or coordinate falls back to native behavior.
+
+| Policy | When to use it | Why an implementation receives this policy |
+|---|---|---|
+| `auto` | The default for general workloads. | The planner can establish the qualified device, CRS/setup, precision, and workload-size conditions before launch, and the implementation cleared the 1.05x wall-time gate across its representative domain and mixtures. Below its measured crossover, selection stays native. |
+| `accelerated` | An explicit opt-in when the caller knows its data stays mostly in the documented hot domain, or deliberately wants the implementation below the automatic crossover. | Some implementations win strongly on hot data but lose when enough lanes take a guarded native fallback. Inspecting coordinate values in the host planner would require synchronization, so the caller supplies that performance-distribution knowledge. Correctness guards still apply. |
+| `native` | Reproducibility, comparison, unsupported hardware/domains, or workloads where acceleration is not qualified. | CUDA/libdevice is the reference implementation and the safe fallback. Paired native `sincos` is still native policy. |
+
+Consequently, explicit-only does **not** mean less accurate or less guarded.
+It means that the library cannot prove the performance assumption from setup
+and size alone. Candidates that did not meet the accuracy contract or did not
+offer a useful qualified gain were not registered under either accelerated
+policy.
+
+The table below is the compact native-relative view of every registered
+accelerated implementation. Results are synchronized public-dispatch wall
+time on the qualifying RTX 4090 (`sm_89`) at 5,000,000 coordinates. Values are
+relative to `native.libdevice`; ranges span qualified CRS variants or setup
+domains. They are evidence for this named hardware, not general GPU promises.
+
+| Implementation | Selection | Auto minimum | 5M wall speedup vs native |
+|---|---|---:|---:|
+| `helmert.fixed_q62` | Auto + explicit | 131,072 | 1.083x |
+| `tmerc.forward.fixed_q62` | Explicit-only hot UTM | n/a | 1.548x |
+| `sinu.forward.fixed_q62` | Auto + explicit | 524,288 | 1.096x |
+| `sinu.inverse.convergent_newton` | Auto-only | 1 | 3.026x |
+| `sinu.inverse.meridional_recurrence` | Explicit-only hot domain | n/a | 4.621–4.623x |
+| `ortho.forward.fixed_q62` | Auto + explicit | 262,144 | 1.341x |
+| `ortho.inverse.guarded_reframe` | Auto + explicit | 524,288 | 1.134x |
+| `gnom.inverse.guarded_rsqrt_reframe` | Explicit-only hot domain | n/a | 1.31–1.47x |
+| `stere.inverse.fixed_q62` | Auto + explicit | 1,000,000 | at least 1.056x |
+| `geos.forward.fixed_q62` | Auto + explicit | 2,097,152 | 1.059–1.062x |
+| `laea.forward.polar.fixed_q62` | Auto + explicit | 1,048,576 | 1.063x |
+| `merc.forward.spherical.product_poly` | Auto + explicit | 262,144 | 1.128x |
+| `merc.forward.ellipsoidal.product_poly` | Explicit-only hot domain | n/a | 1.259x |
+| `merc.inverse.exp_series` | Auto + explicit | 65,536 | 1.792x spherical; 8.243x ellipsoidal |
+| `lcc.forward.conformal_reframe` | Auto + explicit | 65,536 | at least 1.138x |
+| `lcc.inverse.conformal_reframe` | Auto + explicit | 128 | at least 1.44x |
+| `krovak.inverse.guarded_log_ratio` | Explicit-only hot domain | n/a | at least 2.690x |
+
+Forward UTM's explicit performance crossover was measured at 256 coordinates,
+but it has no automatic threshold: broad-longitude guard mixtures can erase
+the win. The same distinction explains the other explicit-only rows. Detailed
+domains, accuracy results, crossover grids, and negative mixture evidence
+follow below.
+
 ## Ada qualification evidence
 
 The public-policy benchmark was run on an RTX 4090 (`sm_89`, fp32:fp64 ratio
