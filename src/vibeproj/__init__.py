@@ -1,6 +1,6 @@
 """vibeProj — GPU-accelerated coordinate projection library."""
 
-__version__ = "1.0.5"
+__version__ = "1.0.6"
 
 from vibeproj.crs import CRSInput
 from vibeproj.exceptions import (
