@@ -11,20 +11,24 @@ preallocated device buffers through a small pyproj-style API.
 
 ## Performance
 
-One million fp64 coordinates on an RTX 4090 and i9-13900K, measured August
-2026. GPU measurements use preallocated device inputs and outputs; results are
-the median of three runs with ten timed calls per run.
+One million fp64 coordinates on an RTX 4090 and i9-13900K, measured with
+pyproj 3.7.2 in August 2026. GPU measurements use preallocated device inputs
+and outputs; results are the median of three runs with ten timed calls per run.
 
-| Projection | GPU | NumPy CPU | Speedup |
+| Projection | vibeProj GPU | vibeProj NumPy | pyproj |
 |---|---:|---:|---:|
-| Transverse Mercator / UTM | 0.47 ms | 125.0 ms | 269x |
-| Lambert Conformal Conic | 0.48 ms | 48.7 ms | 101x |
-| Albers Equal Area | 0.28 ms | 34.4 ms | 124x |
-| Web Mercator | 0.19 ms | 16.9 ms | 90x |
-| Equal Earth | 0.45 ms | 56.6 ms | 126x |
-| Plate Carrée | 0.07 ms | 9.5 ms | 139x |
-| Oblique Mercator | 0.77 ms | 79.2 ms | 103x |
-| Krovak | 1.95 ms | 360.5 ms | 185x |
+| Transverse Mercator / UTM | 0.47 ms | 123.9 ms | 86.7 ms |
+| Lambert Conformal Conic | 0.48 ms | 48.1 ms | 72.1 ms |
+| Albers Equal Area | 0.28 ms | 34.5 ms | 48.0 ms |
+| Web Mercator | 0.19 ms | 17.1 ms | 54.9 ms |
+| Equal Earth | 0.45 ms | 56.4 ms | 66.4 ms |
+| Plate Carrée | 0.07 ms | 9.2 ms | 26.2 ms |
+| Oblique Mercator | 0.77 ms | 79.3 ms | 99.5 ms |
+| Krovak | 1.95 ms | 360.4 ms | 401.3 ms |
+
+vibeProj's NumPy path is 1.1–3.2x faster than pyproj in seven of these eight
+cases; pyproj is 1.4x faster for UTM. With coordinates already on the GPU,
+vibeProj is 129–391x faster than pyproj across this sample.
 
 Run the same suite with:
 

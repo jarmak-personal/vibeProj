@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark key projections on CPU and GPU, output JSON.
+"""Benchmark key projections with vibeProj and pyproj, output JSON.
 
 Usage:
     uv run benchmarks/bench_projections.py run [--n N] [--output FILE]
@@ -50,7 +50,7 @@ def _detect_gpu():
 
 
 def _bench_cpu(n):
-    """Benchmark all projections on CPU (NumPy)."""
+    """Benchmark all projections with vibeProj on CPU (NumPy)."""
     from vibeproj import Transformer
 
     rng = np.random.default_rng(42)
@@ -70,6 +70,37 @@ def _bench_cpu(n):
         for _ in range(BENCH_ITERS):
             t0 = time.perf_counter()
             t.transform(lat, lon)
+            times.append((time.perf_counter() - t0) * 1000)
+
+        times.sort()
+        results[label] = {
+            "median_ms": round(times[len(times) // 2], 3),
+            "min_ms": round(times[0], 3),
+            "max_ms": round(times[-1], 3),
+        }
+
+    return results
+
+
+def _bench_pyproj(n):
+    """Benchmark the same projection set with pyproj on CPU."""
+    from pyproj import Transformer as PyProjTransformer
+
+    rng = np.random.default_rng(42)
+    lat = rng.uniform(35, 65, n).astype(np.float64)
+    lon = rng.uniform(-10, 30, n).astype(np.float64)
+
+    results = {}
+    for label, src, dst in BENCHMARKS:
+        transformer = PyProjTransformer.from_crs(src, dst, always_xy=False)
+
+        for _ in range(WARMUP_ITERS):
+            transformer.transform(lat[:1000], lon[:1000])
+
+        times = []
+        for _ in range(BENCH_ITERS):
+            t0 = time.perf_counter()
+            transformer.transform(lat, lon)
             times.append((time.perf_counter() - t0) * 1000)
 
         times.sort()
@@ -127,6 +158,8 @@ def _bench_gpu(cp, n):
 
 def cmd_run(args):
     """Run benchmarks, emit JSON."""
+    import pyproj
+
     n = args.n
 
     meta = {
@@ -135,11 +168,15 @@ def cmd_run(args):
         "n_coords": n,
         "warmup_iters": WARMUP_ITERS,
         "bench_iters": BENCH_ITERS,
+        "pyproj": pyproj.__version__,
     }
 
     # CPU
     print(f"Benchmarking CPU ({n:,} coords)...", file=sys.stderr)
     cpu_results = _bench_cpu(n)
+
+    print(f"Benchmarking pyproj ({n:,} coords)...", file=sys.stderr)
+    pyproj_results = _bench_pyproj(n)
 
     # GPU
     cp, gpu_name = _detect_gpu()
@@ -151,7 +188,7 @@ def cmd_run(args):
     else:
         print("No GPU detected, skipping GPU benchmarks.", file=sys.stderr)
 
-    output = {"meta": meta, "cpu": cpu_results}
+    output = {"meta": meta, "cpu": cpu_results, "pyproj": pyproj_results}
     if gpu_results is not None:
         output["gpu"] = gpu_results
 
@@ -176,14 +213,16 @@ def cmd_compare(args):
 
     has_regression = False
 
-    for device in ("cpu", "gpu"):
+    for device in ("cpu", "pyproj", "gpu"):
         if device not in base or device not in current:
             continue
 
         print(f"\n{'=' * 60}")
         print(f" {device.upper()} Performance Comparison")
         print(f" base: {args.base}  vs  current: {args.current}")
-        absolute_floor_us = args.cpu_absolute_us if device == "cpu" else args.gpu_absolute_us
+        absolute_floor_us = (
+            args.gpu_absolute_us if device == "gpu" else args.cpu_absolute_us
+        )
         print(f" gate: >{threshold}% and >{absolute_floor_us:g} us slower")
         print(f"{'=' * 60}")
         print(
